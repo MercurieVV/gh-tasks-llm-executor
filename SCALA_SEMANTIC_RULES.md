@@ -5,3 +5,17 @@ For Scala source questions, use ScalaSemantic MCP tools before shell text tools.
 Do not use `cat`, `sed`, `rg`, or similar tools to inspect `.scala` files for symbol, type, signature, hierarchy, implicit, reference, or call-path questions when ScalaSemantic tools are available.
 
 Use shell for builds, tests, git, config, docs, scripts, and non-Scala text work.
+
+## Scala CLI SemanticDB
+
+Enable with Scala CLI directives: `--semanticdb`
+
+Not raw scalac flags:
+```scala
+//> using semanticdb
+//> using semanticdbSourceroot .
+```
+Avoid `//> using options -Ysemanticdb and //> using options -sourceroot:..`
+
+If SemanticDB tools report an empty index, verify generation with:
+`find .scala-build -name '*.semanticdb'`

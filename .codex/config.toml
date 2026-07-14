@@ -9,3 +9,6 @@ approval_mode = "approve"
 
 [mcp_servers.scala-semantic.tools.annotated_source]
 approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.document_outline]
+approval_mode = "approve"
