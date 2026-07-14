@@ -46,4 +46,5 @@ build/
 ### Scala ###
 .bsp/
 .scala-build/
+*.semanticdb
 .idea/

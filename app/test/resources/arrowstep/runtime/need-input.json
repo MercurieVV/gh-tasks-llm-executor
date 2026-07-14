@@ -1,0 +1,1 @@
+{"status":"need-input","context":"Configuring Scala project ./x","questions":[{"id":"web-server","text":"Enable Web Server?","kind":"choice","allowed":["yes","no"],"default":"no","current":"no","context":null}]}

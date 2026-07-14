@@ -1,0 +1,1 @@
+{"status":"rejected","problems":[{"questionId":"module-name","message":"must not be empty"}],"questions":[{"id":"module-name","text":"Module name?","kind":"free-text","default":null,"current":"","context":"Use a Scala identifier."}]}
