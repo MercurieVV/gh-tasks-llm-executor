@@ -263,7 +263,13 @@ object Main extends IOApp:
             traced("commentOutput", commentOutput[F]) >>>
             traced("commitIfChanged", commitIfChanged[F]) >>>
             traced("verifyReplayCi", verifyReplayCi[F]) >>>
-            traced("closeTask", closeTask[F])).run(acquiredTask)
+            traced("closeTask", closeTask[F])).run(acquiredTask).onError { case _ =>
+            Git[F].preserveUnpushedCommits(
+              acquiredTask.run.worktreePath,
+              acquiredTask.run.branchName,
+              progress
+            )
+          }
         }
       }
 

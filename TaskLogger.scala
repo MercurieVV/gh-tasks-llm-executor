@@ -38,6 +38,7 @@ object TaskLogger:
       .map(line => s"${Instant.now()} [$source] $line")
       .mkString(System.lineSeparator())
     os.write.append(logFile, prefixed + System.lineSeparator())
+    System.err.println(prefixed)
 
   private def logDirectory: os.Path =
     os.pwd / ".gh-tasks-llm-executor" / "logs"

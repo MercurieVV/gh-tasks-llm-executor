@@ -54,6 +54,34 @@ final class Git[F[_]](using F: Sync[F]):
       _ <- call(root, "git", "branch", "-D", branchName).attempt.void
     yield ()
 
+  // Commits that never made it to a normal push/PR (e.g. the push step
+  // itself failed, such as a rejected pre-push hook) would otherwise be
+  // destroyed when releaseWorktree force-removes the worktree/branch.
+  // Call this from within the worktree resource's `.use` block on failure,
+  // while the worktree still exists, to push them to a recovery ref first.
+  def preserveUnpushedCommits(
+      worktreePath: os.Path,
+      branchName: String,
+      progress: String => F[Unit]
+  ): F[Unit] =
+    hasPublishableCommits(worktreePath, branchName).flatMap {
+      case false => F.unit
+      case true =>
+        val recoveryRef = s"refs/gh-tasks-llm-executor/failed/$branchName"
+        progress(
+          s"Branch $branchName has commits not on origin; preserving them at $recoveryRef before cleanup..."
+        ) *>
+          call(worktreePath, "git", "push", "-f", "origin", s"HEAD:$recoveryRef").attempt
+            .flatMap {
+              case Right(_) =>
+                progress(s"Preserved unpushed commits at $recoveryRef.")
+              case Left(error) =>
+                progress(
+                  s"Warning: failed to preserve unpushed commits at $recoveryRef: ${error.getMessage}"
+                )
+            }
+    }
+
   def filesChanged(worktreePath: os.Path): F[Boolean] =
     F.blocking {
       os.proc("git", "status", "--porcelain")
