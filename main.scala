@@ -1,27 +1,62 @@
 import arrowstep.core.*
 import arrowstep.runtime.AgentMain
-import arrowstep.runtime.ReplayAsk
+import cats.arrow.ArrowChoice
 import cats.data.Kleisli
 import cats.effect.ExitCode
 import cats.effect.IO
 import cats.effect.IOApp
+import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
 import scala.annotation.tailrec
 import scala.util.Try
 
-final case class Issue(
-    number: Int,
-    title: String,
-    body: String,
-    state: String
+final case class AppInput(root: os.Path)
+
+final case class RunContext(root: os.Path)
+
+final case class TaskRunner(
+    agent: String,
+    model: Option[String],
+    version: Option[String]
+):
+  def display: String =
+    val modelPart = model.fold("")(value => s", model: $value")
+    val versionPart = version.fold("")(value => s", version: $value")
+    s"agent: $agent$modelPart$versionPart"
+
+  def command(prompt: String): Seq[String] =
+    Seq(agent) ++ model.toList.flatMap(value => Seq("-m", value)) ++
+      Seq("-p", prompt)
+
+final case class RunnableTask(issue: Issue, runner: TaskRunner)
+
+final case class TaskSelection(context: RunContext, task: Option[RunnableTask])
+
+final case class NoTask(context: RunContext)
+
+final case class TaskRun(
+    context: RunContext,
+    task: Issue,
+    runner: TaskRunner,
+    worktreePath: os.Path,
+    branchName: String
 )
 
-final case class AppInput(root: os.Path, executorOverride: Option[String])
+final case class TaskWithPrompt(
+    run: TaskRun,
+    parentConclusion: Option[String]
+)
 
-final case class RunContext(root: os.Path, executor: String)
+final case class TaskWithOutput(run: TaskRun, output: String)
 
-final case class TaskSelection(context: RunContext, task: Option[Issue])
+final case class ExistingBranch(run: TaskWithPrompt)
+
+final case class NewBranch(run: TaskWithPrompt)
+
+final case class ChangedTask(run: TaskWithOutput)
+
+final case class UnchangedTask(run: TaskWithOutput)
 
 final case class RunSummary(
     status: String,
@@ -47,13 +82,12 @@ final case class RunSummary(
 
 object Main extends IOApp:
 
-  type -->[A, B] = Kleisli[IO, A, B]
+  type -->[F[_], A, B] = Kleisli[F, A, B]
+  type Flow[F[_]] = [A, B] =>> Kleisli[F, A, B]
   def run(args: List[String]): IO[ExitCode] =
-    val parsed = extractExecutorArgs(args)
+    val arrowstepArgs = removeRunnerArgs(args)
     AgentMain
-      .run[IO](parsed.arrowstepArgs, os.pwd)(_ =>
-        program(AppInput(os.pwd, parsed.executor))
-      )
+      .run[IO](arrowstepArgs, os.pwd)(_ => program(AppInput(os.pwd)))
       .flatMap { outcome =>
         IO.print(outcome.stdout) *>
           IO.whenA(outcome.stderr.nonEmpty)(
@@ -62,270 +96,298 @@ object Main extends IOApp:
           IO.pure(ExitCode(outcome.exitCode))
       }
 
-  private def program(input: AppInput): IO[ProgramSays[ujson.Value]] =
-    taskFlow.run(input).map(summary => ProgramSays.Done(summary.toJson))
+  private def program[F[_]: Sync](
+      input: AppInput
+  ): F[ProgramSays[ujson.Value]] =
+    taskFlow[F].run(input).map(summary => ProgramSays.Done(summary.toJson))
 
-  private def taskFlow: AppInput --> RunSummary =
-    resolveExecutor >>> selectTask >>> executeTask
+  private def taskFlow[F[_]: Sync]: -->[F, AppInput, RunSummary] =
+    resolveContext[F] >>> selectTask[F] >>> executeTask[F]
 
-  private def resolveExecutor: AppInput --> RunContext =
-    Kleisli.apply{ input =>
-      input.executorOverride match
-        case Some(executor) =>
-          IO.pure(RunContext(input.root, executor))
-        case None =>
-          for
-            valid <- ReplayAsk
-              .askUntilValid[IO](input.root, Validator.basic[IO])
-              .run(executorInput)
-            executor <- IO.fromOption(valid.toMap.get("executor"))(
-              new RuntimeException("validated answers did not contain executor")
-            )
-          yield RunContext(input.root, executor)
-    }
+  private def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =
+    Kleisli(input => RunContext(input.root).pure[F])
 
-  private def selectTask: RunContext --> TaskSelection =
-    Kleisli{ (context: RunContext) =>
+  private def selectTask[F[_]: Sync]: -->[F, RunContext, TaskSelection] =
+    Kleisli { (context: RunContext) =>
       for
         _ <- progress("Fetching open issues from GitHub...")
-        issues <- fetchIssues(context.root)
-        candidates = issues.filter(hasTargetExecutor(context.executor))
-        _ <- progress(
-          s"Found ${candidates.size} open tasks with '${context.executor}' preferred executor."
-        )
+        issues <- GitHub.fetchIssues(context.root)
         openIssueNumbers = issues.map(_.number).toSet
-        nextTask = candidates.find(task =>
-          !hasUnresolvedDependencies(task, openIssueNumbers)
+        candidates = issues
+          .filterNot(GitHub.hasUnresolvedDependencies(_, openIssueNumbers))
+          .flatMap(task => GitHub.taskRunner(task).map(RunnableTask(task, _)))
+        _ <- progress(
+          s"Found ${candidates.size} runnable open tasks with agent/model/version metadata."
         )
+        nextTask = candidates.headOption
       yield TaskSelection(context, nextTask)
     }
 
-  private def executeTask: TaskSelection --> RunSummary =
-    Kleisli.apply {
-      case TaskSelection(context, None) =>
-        IO.pure(
-          RunSummary(
-            status = "no-task",
-            message =
-              s"No tasks found without unresolved dependencies and with '${context.executor}' executor.",
-            task = None
-          )
-        )
-
-      case TaskSelection(context, Some(task)) =>
-        runTask(context, task).as(
-          RunSummary(
-            status = "completed",
-            message = s"Task #${task.number} completed successfully.",
-            task = Some(task)
-          )
-        )
-    }
-
-  private def runTask(context: RunContext, task: Issue): IO[Unit] =
-    val taskId = task.number
-    val worktreePath = context.root / os.up / s"task-$taskId"
-    val branchName = s"task-$taskId"
-
-    for
-      _ <- progress(s"Selected next task: #$taskId - ${task.title}")
-      _ <- setIssueStatus(context.root, taskId, "in progress")
-      parentConclusion <- parentConclusion(context.root, task)
-      _ <- ensureWorktree(context.root, worktreePath, branchName)
-      prompt = taskPrompt(task, parentConclusion)
-      _ <- progress(s"Running task #$taskId with ${context.executor}...")
-      output <- runCommandAndCapture(
-        Seq(context.executor, "-p", prompt),
-        worktreePath
-      )
-      _ <- commentRunOutput(context.root, taskId, output)
-      changed <- filesChanged(worktreePath)
-      _ <-
-        if changed then
-          commitAndMerge(context.root, worktreePath, branchName, task)
-        else progress("No files changed.")
-      _ <- cleanupWorktree(context.root, worktreePath, branchName)
-      _ <- progress(s"Closing task #$taskId with comment...")
-      _ <- setIssueStatus(context.root, taskId, "completed")
-      _ <- closeIssue(context.root, taskId)
-      _ <- progress("Task execution finished successfully.")
-    yield ()
-
-  private def executorInput: AskInput =
-    AskInput(
-      questions = List(
-        Question(
-          id = "executor",
-          text = "Which LLM executor command should run selected GitHub tasks?",
-          kind = QuestionKind.FreeText,
-          default = Some("codex"),
-          current = None,
-          context = Some(
-            "Use the same command name you would pass to --executor, for example codex, claude, gemini, or agy."
-          )
-        )
-      ),
-      context = Some(
-        "gh-tasks-llm-executor needs an executor command before it can start a task worktree."
-      )
+  private def executeTask[F[_]: Sync]: -->[F, TaskSelection, RunSummary] =
+    selectedTask[F] >>> choose[F, NoTask, TaskRun, RunSummary](
+      noTaskSummary[F],
+      runSelectedTask[F]
     )
 
-  private def fetchIssues(root: os.Path): IO[List[Issue]] =
-    IO.blocking {
-      val issuesJson = os
-        .proc(
-          "gh",
-          "issue",
-          "list",
-          "--state",
-          "open",
-          "--limit",
-          "1000",
-          "--json",
-          "number,title,body,state"
+  private def selectedTask[F[_]: Sync]
+      : -->[F, TaskSelection, Either[NoTask, TaskRun]] =
+    Kleisli { selection =>
+      selection.task
+        .fold[Either[NoTask, TaskRun]](Left(NoTask(selection.context)))(task =>
+          Right(taskRun(selection.context, task.issue, task.runner))
         )
-        .call(cwd = root)
-        .out
-        .text()
-
-      ujson.read(issuesJson).arr.toList.flatMap(parseIssue)
+        .pure[F]
     }
 
-  private def parseIssue(value: ujson.Value): Option[Issue] =
-    value match
-      case ujson.Obj(fields) =>
-        for
-          number <- fields.get("number").collect { case ujson.Num(value) =>
-            value.toInt
-          }
-          title <- fields.get("title").collect { case ujson.Str(value) =>
-            value
-          }
-        yield Issue(
-          number = number,
-          title = title,
-          body = fields
-            .get("body")
-            .collect { case ujson.Str(value) => value }
-            .getOrElse(""),
-          state = fields
-            .get("state")
-            .collect { case ujson.Str(value) => value }
-            .getOrElse("")
+  private def noTaskSummary[F[_]: Sync]: -->[F, NoTask, RunSummary] =
+    Kleisli { noTask =>
+      val context = noTask.context
+      RunSummary(
+        status = "no-task",
+        message =
+          "No tasks found without unresolved dependencies and with agent/model/version metadata in the task description.",
+        task = None
+      ).pure[F]
+    }
+
+  private def runSelectedTask[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
+    taskExecution[F].map { run =>
+      RunSummary(
+        status = "completed",
+        message = s"Task #${run.task.number} completed successfully.",
+        task = Some(run.task)
+      )
+    }
+
+  private def taskExecution[F[_]: Sync]: -->[F, TaskRun, TaskRun] =
+    announceTask[F] >>>
+      markInProgress[F] >>>
+      fetchParentConclusion[F] >>>
+      ensureTaskWorktree[F] >>>
+      runExecutor[F] >>>
+      commentOutput[F] >>>
+      commitIfChanged[F] >>>
+      cleanupTaskWorktree[F] >>>
+      closeTask[F]
+
+  private def announceTask[F[_]: Sync]: -->[F, TaskRun, TaskRun] =
+    Kleisli { run =>
+      progress(
+        s"Selected next task: #${run.task.number} - ${run.task.title}"
+      ).as(run)
+    }
+
+  private def markInProgress[F[_]: Sync]: -->[F, TaskRun, TaskRun] =
+    Kleisli { run =>
+      GitHub
+        .setIssueStatus(
+          run.context.root,
+          run.task.number,
+          "in progress",
+          progress
         )
-      case _ => None
+        .as(run)
+    }
 
-  private def hasTargetExecutor(executor: String)(issue: Issue): Boolean =
-    val quotedExecutor = java.util.regex.Pattern.quote(executor)
-    val executorRegex =
-      s"""(?i)(?:preferr?ed\\s+executor|executor)\\s*(?:is\\s+)?(?:is:?\\s+)?:?\\s*$quotedExecutor""".r
-    executorRegex.findFirstIn(issue.body).isDefined
+  private def fetchParentConclusion[
+      F[_]: Sync
+  ]: -->[F, TaskRun, TaskWithPrompt] =
+    Kleisli { run =>
+      GitHub
+        .parentConclusion(run.context.root, run.task, progress)
+        .map(parentConclusion => TaskWithPrompt(run, parentConclusion))
+    }
 
-  private val DepLineKeywords =
-    List("depends on", "depend on", "dependency", "dependencies", "parent")
+  private def ensureTaskWorktree[
+      F[_]: Sync
+  ]: -->[F, TaskWithPrompt, TaskWithPrompt] =
+    progressStartingWorktree[F] >>>
+      removeExistingTaskWorktree[F] >>>
+      branchPlan[F] >>>
+      choose[F, ExistingBranch, NewBranch, TaskWithPrompt](
+        addExistingBranchWorktree[F],
+        addNewBranchWorktree[F]
+      )
 
-  private val IssueNumRegex = """#(\d+)""".r
+  private def progressStartingWorktree[
+      F[_]: Sync
+  ]: -->[F, TaskWithPrompt, TaskWithPrompt] =
+    Kleisli { task =>
+      progress(s"Starting new worktree at ${task.run.worktreePath}").as(task)
+    }
 
-  private def getDependencies(body: String): List[Int] =
-    body.linesIterator
-      .flatMap { line =>
-        val lower = line.toLowerCase
-        if DepLineKeywords.exists(keyword => lower.contains(keyword)) then
-          IssueNumRegex.findAllMatchIn(line).map(_.group(1).toInt)
-        else Nil
+  private def removeExistingTaskWorktree[
+      F[_]: Sync
+  ]: -->[F, TaskWithPrompt, TaskWithPrompt] =
+    Kleisli { task =>
+      removeExistingWorktree(
+        task.run.context.root,
+        task.run.worktreePath
+      ).as(task)
+    }
+
+  private def branchPlan[
+      F[_]: Sync
+  ]: -->[F, TaskWithPrompt, Either[ExistingBranch, NewBranch]] =
+    Kleisli { task =>
+      branchExists(task.run.context.root, task.run.branchName).map {
+        case true  => Left(ExistingBranch(task))
+        case false => Right(NewBranch(task))
       }
-      .toList
-      .distinct
+    }
 
-  private def hasUnresolvedDependencies(
-      issue: Issue,
-      openIssueNumbers: Set[Int]
-  ): Boolean =
-    getDependencies(issue.body).exists(openIssueNumbers.contains)
+  private def addExistingBranchWorktree[
+      F[_]: Sync
+  ]: -->[F, ExistingBranch, TaskWithPrompt] =
+    Kleisli { branch =>
+      val run = branch.run.run
+      progress(
+        s"Branch ${run.branchName} already exists, adding worktree for it"
+      ) *>
+        call(
+          run.context.root,
+          "git",
+          "worktree",
+          "add",
+          run.worktreePath.toString,
+          run.branchName
+        ).as(branch.run)
+    }
 
-  private def parentConclusion(root: os.Path, task: Issue): IO[Option[String]] =
-    val ParentRegex = """(?i)parent:?\s*#(\d+)""".r
-    ParentRegex.findFirstMatchIn(task.body).map(_.group(1).toInt) match
-      case None => IO.pure(None)
-      case Some(parentId) =>
-        progress(
-          s"Found parent task #$parentId. Fetching conclusion comment..."
-        ) *>
-          IO.blocking {
-            Try {
-              val res = os
-                .proc(
-                  "gh",
-                  "issue",
-                  "view",
-                  parentId.toString,
-                  "--json",
-                  "comments"
-                )
-                .call(cwd = root)
-              val comments = ujson.read(res.out.text())("comments").arr.toList
-              comments
-                .find(
-                  commentBody(_).exists(_.toLowerCase.contains("conclusion"))
-                )
-                .orElse(comments.lastOption)
-                .flatMap(commentBody)
-            }.toEither
-          }.flatMap {
-            case Right(comment) => IO.pure(comment)
-            case Left(error) =>
-              progress(
-                s"Failed to read comments for parent task #$parentId: ${error.getMessage}"
-              ).as(None)
-          }
+  private def addNewBranchWorktree[
+      F[_]: Sync
+  ]: -->[F, NewBranch, TaskWithPrompt] =
+    Kleisli { branch =>
+      val run = branch.run.run
+      progress(s"Creating branch ${run.branchName} and adding worktree") *>
+        call(
+          run.context.root,
+          "git",
+          "worktree",
+          "add",
+          "-b",
+          run.branchName,
+          run.worktreePath.toString
+        ).as(branch.run)
+    }
 
-  private def commentBody(value: ujson.Value): Option[String] =
-    value match
-      case ujson.Obj(fields) =>
-        fields.get("body").collect { case ujson.Str(body) => body }
-      case _ => None
+  private def runExecutor[F[_]: Sync]: -->[F, TaskWithPrompt, TaskWithOutput] =
+    Kleisli { task =>
+      val run = task.run
+      val prompt = taskPrompt(run.task, run.runner, task.parentConclusion)
+      for
+        _ <- progress(
+          s"Running task #${run.task.number} with ${run.runner.display}..."
+        )
+        output <- runCommandAndCapture(
+          run.runner.command(prompt),
+          run.worktreePath
+        )
+      yield TaskWithOutput(run, output)
+    }
 
-  private def ensureWorktree(
-      root: os.Path,
-      worktreePath: os.Path,
-      branchName: String
-  ): IO[Unit] =
-    for
-      _ <- progress(s"Starting new worktree at $worktreePath")
-      _ <- removeExistingWorktree(root, worktreePath)
-      exists <- branchExists(root, branchName)
-      _ <-
-        if exists then
-          progress(
-            s"Branch $branchName already exists, adding worktree for it"
-          ) *>
-            call(
-              root,
-              "git",
-              "worktree",
-              "add",
-              worktreePath.toString,
-              branchName
-            )
-        else
-          progress(s"Creating branch $branchName and adding worktree") *>
-            call(
-              root,
-              "git",
-              "worktree",
-              "add",
-              "-b",
-              branchName,
-              worktreePath.toString
-            )
-    yield ()
+  private def commentOutput[F[_]: Sync]
+      : -->[F, TaskWithOutput, TaskWithOutput] =
+    Kleisli { task =>
+      GitHub
+        .commentRunOutput(
+          task.run.context.root,
+          task.run.task.number,
+          task.output,
+          progress
+        )
+        .as(task)
+    }
 
-  private def removeExistingWorktree(
+  private def commitIfChanged[F[_]: Sync]
+      : -->[F, TaskWithOutput, TaskWithOutput] =
+    changedPlan[F] >>> choose[F, ChangedTask, UnchangedTask, TaskWithOutput](
+      commitChangedTask[F],
+      reportUnchangedTask[F]
+    )
+
+  private def changedPlan[F[_]: Sync]
+      : -->[F, TaskWithOutput, Either[ChangedTask, UnchangedTask]] =
+    Kleisli { task =>
+      filesChanged(task.run.worktreePath).map {
+        case true  => Left(ChangedTask(task))
+        case false => Right(UnchangedTask(task))
+      }
+    }
+
+  private def commitChangedTask[
+      F[_]: Sync
+  ]: -->[F, ChangedTask, TaskWithOutput] =
+    Kleisli { changed =>
+      val run = changed.run.run
+      commitAndMerge(
+        run.context.root,
+        run.worktreePath,
+        run.branchName,
+        run.task
+      ).as(changed.run)
+    }
+
+  private def reportUnchangedTask[
+      F[_]: Sync
+  ]: -->[F, UnchangedTask, TaskWithOutput] =
+    Kleisli { unchanged =>
+      progress("No files changed.").as(unchanged.run)
+    }
+
+  private def cleanupTaskWorktree[
+      F[_]: Sync
+  ]: -->[F, TaskWithOutput, TaskWithOutput] =
+    Kleisli { task =>
+      cleanupWorktree(
+        task.run.context.root,
+        task.run.worktreePath,
+        task.run.branchName
+      ).as(task)
+    }
+
+  private def closeTask[F[_]: Sync]: -->[F, TaskWithOutput, TaskRun] =
+    Kleisli { task =>
+      val run = task.run
+      for
+        _ <- progress(s"Closing task #${run.task.number} with comment...")
+        _ <- GitHub.setIssueStatus(
+          run.context.root,
+          run.task.number,
+          "completed",
+          progress
+        )
+        _ <- GitHub.closeIssue(run.context.root, run.task.number)
+        _ <- progress("Task execution finished successfully.")
+      yield run
+    }
+
+  private def choose[F[_]: Sync, A, B, C](
+      left: -->[F, A, C],
+      right: -->[F, B, C]
+  ): -->[F, Either[A, B], C] =
+    ArrowChoice[Flow[F]].choice(left, right)
+
+  private def taskRun(
+      context: RunContext,
+      task: Issue,
+      runner: TaskRunner
+  ): TaskRun =
+    val taskId = task.number
+    TaskRun(
+      context = context,
+      task = task,
+      runner = runner,
+      worktreePath = context.root / os.up / s"task-$taskId",
+      branchName = s"task-$taskId"
+    )
+
+  private def removeExistingWorktree[F[_]](
       root: os.Path,
       worktreePath: os.Path
-  ): IO[Unit] =
-    IO.blocking(os.exists(worktreePath)).flatMap {
-      case false => IO.unit
+  )(using F: Sync[F]): F[Unit] =
+    F.blocking(os.exists(worktreePath)).flatMap {
+      case false => F.unit
       case true =>
         progress(
           s"Worktree directory $worktreePath already exists. Cleaning up..."
@@ -338,13 +400,16 @@ object Main extends IOApp:
             "--force",
             worktreePath.toString
           ).attempt.void *>
-          IO.blocking {
+          F.blocking {
             if os.exists(worktreePath) then os.remove.all(worktreePath)
           }
     }
 
-  private def branchExists(root: os.Path, branchName: String): IO[Boolean] =
-    IO.blocking {
+  private def branchExists[F[_]: Sync](
+      root: os.Path,
+      branchName: String
+  ): F[Boolean] =
+    Sync[F].blocking {
       Try {
         os.proc("git", "show-ref", "--verify", s"refs/heads/$branchName")
           .call(cwd = root)
@@ -353,6 +418,7 @@ object Main extends IOApp:
 
   private def taskPrompt(
       task: Issue,
+      runner: TaskRunner,
       parentConclusion: Option[String]
   ): String =
     val parentConclusionStr = parentConclusion
@@ -361,6 +427,9 @@ object Main extends IOApp:
 
     s"""Task ID: #${task.number}
 Title: ${task.title}
+Agent: ${runner.agent}
+Model: ${runner.model.getOrElse("")}
+Version: ${runner.version.getOrElse("")}
 
 Task Description:
 ${task.body}
@@ -368,8 +437,11 @@ $parentConclusionStr
 Please implement this task in the current repository. Make any necessary file changes.
 """
 
-  private def runCommandAndCapture(cmd: Seq[String], cwd: os.Path): IO[String] =
-    IO.blocking {
+  private def runCommandAndCapture[F[_]: Sync](
+      cmd: Seq[String],
+      cwd: os.Path
+  ): F[String] =
+    Sync[F].blocking {
       val result = os
         .proc(cmd)
         .call(cwd = cwd, stdout = os.Pipe, stderr = os.Pipe, check = false)
@@ -377,39 +449,17 @@ Please implement this task in the current repository. Make any necessary file ch
       val stderr = result.err.text()
       val output = stdout + stderr
       if output.nonEmpty then Console.err.print(output)
-      if result.exitCode === 0 then output
-      else
-        throw new RuntimeException(
+      Either.cond(
+        result.exitCode === 0,
+        output,
+        new RuntimeException(
           s"${cmd.headOption.getOrElse("command")} exited with ${result.exitCode}"
         )
-    }
-
-  private def commentRunOutput(
-      root: os.Path,
-      taskId: Int,
-      output: String
-  ): IO[Unit] =
-    for
-      _ <- progress(s"Commenting run output on task #$taskId...")
-      commentBody =
-        s"""Task run output:
-```
-$output
-```"""
-      tempFile <- IO.blocking(os.temp(commentBody))
-      _ <- call(
-        root,
-        "gh",
-        "issue",
-        "comment",
-        taskId.toString,
-        "--body-file",
-        tempFile.toString
       )
-    yield ()
+    }.rethrow
 
-  private def filesChanged(worktreePath: os.Path): IO[Boolean] =
-    IO.blocking {
+  private def filesChanged[F[_]: Sync](worktreePath: os.Path): F[Boolean] =
+    Sync[F].blocking {
       os.proc("git", "status", "--porcelain")
         .call(cwd = worktreePath)
         .out
@@ -418,12 +468,12 @@ $output
         .nonEmpty
     }
 
-  private def commitAndMerge(
+  private def commitAndMerge[F[_]](
       root: os.Path,
       worktreePath: os.Path,
       branchName: String,
       task: Issue
-  ): IO[Unit] =
+  )(using Sync[F]): F[Unit] =
     for
       _ <- progress("Files changed. Committing and merging changes...")
       _ <- call(worktreePath, "git", "add", "-A")
@@ -434,46 +484,22 @@ $output
         "-m",
         s"Implement task #${task.number}: ${task.title}"
       )
-      hasRemote <- IO.blocking(
+      hasRemote <- Sync[F].blocking(
         os.proc("git", "remote").call(cwd = root).out.text().trim.nonEmpty
       )
       _ <-
-        if hasRemote then pushCreateAndMergePr(worktreePath, branchName, task)
+        if hasRemote then
+          GitHub.pushCreateAndMergePr(worktreePath, branchName, task, progress)
         else mergeLocally(root, worktreePath, branchName)
     yield ()
 
-  private def pushCreateAndMergePr(
-      worktreePath: os.Path,
-      branchName: String,
-      task: Issue
-  ): IO[Unit] =
-    for
-      _ <- progress("Pushing branch to origin...")
-      _ <- call(worktreePath, "git", "push", "-u", "origin", branchName)
-      _ <- progress("Creating Pull Request...")
-      _ <- call(
-        worktreePath,
-        "gh",
-        "pr",
-        "create",
-        "--title",
-        s"Task #${task.number}: ${task.title}",
-        "--body",
-        s"Closes #${task.number}",
-        "--head",
-        branchName
-      )
-      _ <- progress("Merging Pull Request...")
-      _ <- call(worktreePath, "gh", "pr", "merge", "--merge", "--delete-branch")
-    yield ()
-
-  private def mergeLocally(
+  private def mergeLocally[F[_]](
       root: os.Path,
       worktreePath: os.Path,
       branchName: String
-  ): IO[Unit] =
+  )(using Sync[F]): F[Unit] =
     for
-      mainBranch <- IO.blocking(
+      mainBranch <- Sync[F].blocking(
         os.proc("git", "branch", "--show-current")
           .call(cwd = root)
           .out
@@ -495,13 +521,13 @@ $output
       _ <- call(root, "git", "branch", "-d", branchName)
     yield ()
 
-  private def cleanupWorktree(
+  private def cleanupWorktree[F[_]](
       root: os.Path,
       worktreePath: os.Path,
       branchName: String
-  ): IO[Unit] =
-    IO.blocking(os.exists(worktreePath)).flatMap {
-      case false => IO.unit
+  )(using F: Sync[F]): F[Unit] =
+    F.blocking(os.exists(worktreePath)).flatMap {
+      case false => F.unit
       case true =>
         progress(s"Removing worktree at $worktreePath") *>
           call(
@@ -515,74 +541,30 @@ $output
           call(root, "git", "branch", "-D", branchName).attempt.void
     }
 
-  private def closeIssue(root: os.Path, taskId: Int): IO[Unit] =
-    call(
-      root,
-      "gh",
-      "issue",
-      "close",
-      taskId.toString,
-      "--comment",
-      s"Task #$taskId completed successfully. Worktree closed."
-    )
-
-  private def setIssueStatus(
-      root: os.Path,
-      taskId: Int,
-      status: String
-  ): IO[Unit] =
-    val (toAdd, toRemove) =
-      if status === "in progress" then
-        (
-          List("status: in progress", "in progress"),
-          List("status: completed", "completed")
-        )
-      else
-        (
-          List("status: completed", "completed"),
-          List("status: in progress", "in progress")
-        )
-
-    val addFlags = toAdd.flatMap(label => Seq("--add-label", label))
-    val removeFlags = toRemove.flatMap(label => Seq("--remove-label", label))
-    val fullCmd =
-      Seq("gh", "issue", "edit", taskId.toString) ++ addFlags ++ removeFlags
-
-    call(root, fullCmd*).handleErrorWith { error =>
-      progress(
-        s"Warning: Failed to update GitHub labels for task #$taskId: ${error.getMessage}"
-      )
-    } *>
-      call(root, "ght", "status", taskId.toString, status).attempt.void
-
-  private def call(cwd: os.Path, command: String*): IO[Unit] =
-    IO.blocking {
+  private def call[F[_]: Sync](cwd: os.Path, command: String*): F[Unit] =
+    Sync[F].blocking {
       os.proc(command).call(cwd = cwd)
       ()
     }
 
-  private def progress(message: String): IO[Unit] =
-    IO.delay(Console.err.println(message))
+  private def progress[F[_]: Sync](message: String): F[Unit] =
+    Sync[F].delay(Console.err.println(message))
 
-  private final case class ParsedArgs(
-      executor: Option[String],
-      arrowstepArgs: List[String]
-  )
-
-  private def extractExecutorArgs(args: List[String]): ParsedArgs =
+  private def removeRunnerArgs(args: List[String]): List[String] =
     @tailrec
     def loop(
         remaining: List[String],
-        clean: List[String],
-        executor: Option[String]
-    ): ParsedArgs =
+        clean: List[String]
+    ): List[String] =
       remaining match
-        case Nil => ParsedArgs(executor, clean.reverse)
-        case ("--executor" | "--llm") :: value :: tail =>
-          loop(tail, clean, Some(value))
-        case flag :: Nil if flag === "--executor" || flag === "--llm" =>
-          loop(Nil, flag :: clean, executor)
+        case Nil => clean.reverse
+        case ("--executor" | "--llm" | "--agent" | "--model") :: _ :: tail =>
+          loop(tail, clean)
+        case flag :: Nil
+            if flag === "--executor" || flag === "--llm" ||
+              flag === "--agent" || flag === "--model" =>
+          loop(Nil, clean)
         case head :: tail =>
-          loop(tail, head :: clean, executor)
+          loop(tail, head :: clean)
 
-    loop(args, Nil, None)
+    loop(args, Nil)
