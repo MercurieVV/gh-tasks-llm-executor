@@ -120,7 +120,9 @@ object Main extends IOApp:
     taskFlow[F].run(input).map(summary => ProgramSays.Done(summary.toJson))
 
   private def taskFlow[F[_]: Sync]: -->[F, AppInput, RunSummary] =
-    resolveContext[F] >>> selectTask[F] >>> executeTask[F]
+    traced("resolveContext", resolveContext[F]) >>>
+      traced("selectTask", selectTask[F]) >>>
+      traced("executeTask", executeTask[F])
 
   private def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =
     Kleisli.fromFunction(input => RunContext(input.root))
@@ -152,10 +154,11 @@ object Main extends IOApp:
     }
 
   private def executeTask[F[_]: Sync]: -->[F, TaskSelection, RunSummary] =
-    selectedTask[F] >>> choose[F, NoTask, TaskRun, RunSummary](
-      noTaskSummary[F],
-      runSelectedTask[F]
-    )
+    traced("selectedTask", selectedTask[F]) >>>
+      choose[F, NoTask, TaskRun, RunSummary](
+        traced("noTaskSummary", noTaskSummary[F]),
+        traced("runSelectedTask", runSelectedTask[F])
+      )
 
   private def selectedTask[F[_]: Sync]
       : -->[F, TaskSelection, Either[NoTask, TaskRun]] =
@@ -182,14 +185,14 @@ object Main extends IOApp:
     taskExecution[F]
 
   private def taskExecution[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
-    announceTask[F] >>>
-      fetchTaskContext[F] >>>
-      evaluateTask[F] >>>
+    traced("announceTask", announceTask[F]) >>>
+      traced("fetchTaskContext", fetchTaskContext[F]) >>>
+      traced("evaluateTask", evaluateTask[F]) >>>
       choose[F, NeedsUserInput, Either[SplitTask, TaskWithPrompt], RunSummary](
-        needsUserInputSummary[F],
+        traced("needsUserInputSummary", needsUserInputSummary[F]),
         choose[F, SplitTask, TaskWithPrompt, RunSummary](
-          splitTaskSummary[F],
-          executePreparedTask[F]
+          traced("splitTaskSummary", splitTaskSummary[F]),
+          traced("executePreparedTask", executePreparedTask[F])
         )
       )
 
@@ -207,14 +210,14 @@ object Main extends IOApp:
   private def runPreparedTask[
       F[_]: Sync
   ]: -->[F, TaskWithPrompt, TaskRun] =
-    markInProgress[F] >>>
-      ensureTaskWorktree[F] >>>
-      runExecutor[F] >>>
-      runProjectValidation[F] >>>
-      commentOutput[F] >>>
-      commitIfChanged[F] >>>
-      cleanupTaskWorktree[F] >>>
-      closeTask[F]
+    traced("markInProgress", markInProgress[F]) >>>
+      traced("ensureTaskWorktree", ensureTaskWorktree[F]) >>>
+      traced("runExecutor", runExecutor[F]) >>>
+      traced("runProjectValidation", runProjectValidation[F]) >>>
+      traced("commentOutput", commentOutput[F]) >>>
+      traced("commitIfChanged", commitIfChanged[F]) >>>
+      traced("cleanupTaskWorktree", cleanupTaskWorktree[F]) >>>
+      traced("closeTask", closeTask[F])
 
   private def needsUserInputSummary[
       F[_]: Sync
@@ -343,12 +346,12 @@ object Main extends IOApp:
   private def ensureTaskWorktree[
       F[_]: Sync
   ]: -->[F, TaskWithPrompt, TaskWithPrompt] =
-    progressStartingWorktree[F] >>>
-      removeExistingTaskWorktree[F] >>>
-      branchPlan[F] >>>
+    traced("progressStartingWorktree", progressStartingWorktree[F]) >>>
+      traced("removeExistingTaskWorktree", removeExistingTaskWorktree[F]) >>>
+      traced("branchPlan", branchPlan[F]) >>>
       choose[F, ExistingBranch, NewBranch, TaskWithPrompt](
-        addExistingBranchWorktree[F],
-        addNewBranchWorktree[F]
+        traced("addExistingBranchWorktree", addExistingBranchWorktree[F]),
+        traced("addNewBranchWorktree", addNewBranchWorktree[F])
       )
 
   private def progressStartingWorktree[
@@ -452,10 +455,11 @@ object Main extends IOApp:
 
   private def commitIfChanged[F[_]: Sync]
       : -->[F, TaskWithOutput, TaskWithOutput] =
-    changedPlan[F] >>> choose[F, ChangedTask, UnchangedTask, TaskWithOutput](
-      commitChangedTask[F],
-      reportUnchangedTask[F]
-    )
+    traced("changedPlan", changedPlan[F]) >>>
+      choose[F, ChangedTask, UnchangedTask, TaskWithOutput](
+        traced("commitChangedTask", commitChangedTask[F]),
+        traced("reportUnchangedTask", reportUnchangedTask[F])
+      )
 
   private def changedPlan[F[_]: Sync]
       : -->[F, TaskWithOutput, Either[ChangedTask, UnchangedTask]] =
@@ -531,7 +535,96 @@ object Main extends IOApp:
       left: -->[F, A, C],
       right: -->[F, B, C]
   ): -->[F, Either[A, B], C] =
-    ArrowChoice[Flow[F]].choice(left, right)
+    Kleisli { input =>
+      val branch = input.fold(_ => "left", _ => "right")
+      val value = input.fold(identity, identity)
+      TaskLogger.trace[F](
+        s"decision choose branch=$branch input=${summarize(value)}"
+      ) *>
+        ArrowChoice[Flow[F]].choice(left, right).run(input)
+    }
+
+  private def traced[F[_]: Sync, A, B](
+      name: String,
+      flow: -->[F, A, B]
+  ): -->[F, A, B] =
+    Kleisli { input =>
+      TaskLogger.trace[F](s"enter $name input=${summarize(input)}") *>
+        flow
+          .run(input)
+          .flatTap(output =>
+            TaskLogger.trace[F](s"exit $name output=${summarize(output)}")
+          )
+          .handleErrorWith { error =>
+            TaskLogger.trace[F](
+              s"fail $name error=${error.getClass.getSimpleName}: ${error.getMessage}"
+            ) *> Sync[F].raiseError(error)
+          }
+    }
+
+  private def summarize(value: Any): String =
+    value match
+      case null => "null"
+      case AppInput(root) =>
+        s"AppInput(root=$root)"
+      case RunContext(root) =>
+        s"RunContext(root=$root)"
+      case Issue(number, title, body, state) =>
+        s"Issue(#$number,title=${quote(title)},state=$state,bodyChars=${body.length})"
+      case TaskRunner(agent, model, version) =>
+        s"TaskRunner(agent=$agent,model=${model.getOrElse("")},version=${version.getOrElse("")})"
+      case RunnableTask(issue, runner) =>
+        s"RunnableTask(issue=#${issue.number},runner=${runner.display})"
+      case TaskSelection(_, task) =>
+        s"TaskSelection(task=${task.map(_.issue.number).fold("none")(number => s"#$number")})"
+      case NoTask(_) =>
+        "NoTask"
+      case TaskRun(_, task, runner, worktreePath, branchName) =>
+        s"TaskRun(issue=#${task.number},runner=${runner.display},worktree=$worktreePath,branch=$branchName)"
+      case TaskWithPrompt(run, parentConclusion, replayContext) =>
+        s"TaskWithPrompt(issue=#${run.task.number},hasDependencyConclusion=${parentConclusion.nonEmpty},hasReplayContext=${replayContext.nonEmpty})"
+      case TaskWithOutput(run, output) =>
+        s"TaskWithOutput(issue=#${run.task.number},outputChars=${output.length})"
+      case NeedsUserInput(run, questions) =>
+        s"NeedsUserInput(issue=#${run.task.number},questionChars=${questions.length})"
+      case SplitTask(run) =>
+        s"SplitTask(issue=#${run.task.number})"
+      case TaskEvaluation(body, questions, execution) =>
+        s"TaskEvaluation(execution=$execution,bodyChars=${body.length},hasQuestions=${questions
+            .exists(_.trim.nonEmpty)})"
+      case ExistingBranch(run) =>
+        s"ExistingBranch(issue=#${run.run.task.number},branch=${run.run.branchName})"
+      case NewBranch(run) =>
+        s"NewBranch(issue=#${run.run.task.number},branch=${run.run.branchName})"
+      case ChangedTask(run) =>
+        s"ChangedTask(issue=#${run.run.task.number})"
+      case UnchangedTask(run) =>
+        s"UnchangedTask(issue=#${run.run.task.number})"
+      case RunSummary(status, message, task) =>
+        s"RunSummary(status=$status,task=${task
+            .map(_.number)
+            .fold("none")(number => s"#$number")},message=${quote(message)})"
+      case Left(value) =>
+        s"Left(${summarize(value)})"
+      case Right(value) =>
+        s"Right(${summarize(value)})"
+      case Some(value) =>
+        s"Some(${summarize(value)})"
+      case None =>
+        "None"
+      case list: List[?] =>
+        s"List(size=${list.size})"
+      case seq: Seq[?] =>
+        s"Seq(size=${seq.size})"
+      case other =>
+        truncate(other.toString, 240)
+
+  private def quote(value: String): String =
+    "\"" + truncate(value.linesIterator.mkString("\\n"), 120) + "\""
+
+  private def truncate(value: String, maxLength: Int): String =
+    if value.length <= maxLength then value
+    else value.take(maxLength) + "...[truncated]"
 
   private def taskRun(
       context: RunContext,

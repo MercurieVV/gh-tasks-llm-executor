@@ -213,10 +213,17 @@ final class Git[F[_]](using F: Sync[F]):
     }
 
   private def call(cwd: os.Path, command: String*): F[Unit] =
-    F.blocking {
-      os.proc(command).call(cwd = cwd)
-      ()
-    }
+    TaskLogger.trace[F](s"command cwd=$cwd args=${formatCommand(command)}") *>
+      F.blocking {
+        os.proc(command).call(cwd = cwd)
+        ()
+      }
+
+  private def formatCommand(command: Seq[String]): String =
+    command.map(value => s""""${truncate(value)}"""").mkString(" ")
+
+  private def truncate(value: String): String =
+    if value.length <= 160 then value else value.take(160) + "...[truncated]"
 
 object Git:
   def apply[F[_]: Sync]: Git[F] = new Git[F]

@@ -1007,22 +1007,44 @@ This parent task will not be implemented directly. Run child tasks first; when a
       call(root, "ght", "status", taskId.toString, status).attempt.void
 
   private def call[F[_]: Sync](cwd: os.Path, command: String*): F[Unit] =
-    Sync[F].blocking {
-      os.proc(command).call(cwd = cwd)
-      ()
-    }
+    TaskLogger.trace[F](s"command cwd=$cwd args=${formatCommand(command)}") *>
+      Sync[F].blocking {
+        os.proc(command).call(cwd = cwd)
+        ()
+      }
 
   private def callOutput[F[_]: Sync](
       cwd: os.Path,
       command: String*
   ): F[String] =
-    Sync[F].blocking(os.proc(command).call(cwd = cwd).out.text().trim)
+    TaskLogger.trace[F](
+      s"command-output cwd=$cwd args=${formatCommand(command)}"
+    ) *>
+      Sync[F].blocking(os.proc(command).call(cwd = cwd).out.text().trim)
 
   private def callOutputUnchecked[F[_]: Sync](
       cwd: os.Path,
       command: String*
   ): F[String] =
-    Sync[F].blocking {
-      val result = os.proc(command).call(cwd = cwd, check = false)
-      result.out.text().trim
-    }
+    TaskLogger.trace[F](
+      s"command-output-unchecked cwd=$cwd args=${formatCommand(command)}"
+    ) *>
+      Sync[F].blocking {
+        val result = os.proc(command).call(cwd = cwd, check = false)
+        result.out.text().trim
+      }
+
+  private def formatCommand(command: Seq[String]): String =
+    redactCommand(command.toList)
+      .map(value => s""""${truncate(value)}"""")
+      .mkString(" ")
+
+  private def redactCommand(command: List[String]): List[String] =
+    command match
+      case Nil => Nil
+      case ("--body" | "--body-file") :: _ :: tail =>
+        command.head :: "<redacted>" :: redactCommand(tail)
+      case head :: tail => head :: redactCommand(tail)
+
+  private def truncate(value: String): String =
+    if value.length <= 160 then value else value.take(160) + "...[truncated]"
