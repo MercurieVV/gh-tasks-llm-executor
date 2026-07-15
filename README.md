@@ -17,23 +17,19 @@ cd /path/to/target-repo
 BASE=https://raw.githubusercontent.com/MercurieVV/gh-tasks-llm-executor/master
 
 scala-cli run \
-  --scala 3.8.4 \
-  --dependency org.typelevel::cats-core:2.13.0 \
-  --dependency org.typelevel::cats-effect:3.7.0 \
-  --dependency io.github.mercurievv::arrowstep:0.1.1 \
-  --dependency com.lihaoyi::os-lib:0.11.8 \
-  --dependency com.lihaoyi::ujson:4.4.3 \
+  $BASE/project-remote.scala \
   $BASE/main.scala $BASE/Git.scala $BASE/github.scala \
   $BASE/IssueClaim.scala $BASE/AgentExecutor.scala $BASE/AgentInventory.scala \
   $BASE/TaskLogger.scala \
   -- --task=123
 ```
 
-- `project.scala` is deliberately **not** included in the URL list — its
-  `//> using exclude ...` directives are directory-scoped and make
+- `project-remote.scala` stands in for `project.scala` here — it carries the
+  same `//> using scala`/`//> using dep` directives, but not the
+  `//> using exclude ...` ones. Those are directory-scoped and make
   `scala-cli` fail (`os.PathError$InvalidSegment`) when every input is a
-  remote URL instead of a local path. The `--scala`/`--dependency` flags
-  above replace what `project.scala` would otherwise provide.
+  remote URL instead of a local path, so `project.scala` itself can't be
+  used for this launch path.
 - Drop `-- --task=123` to let it auto-select the next runnable open issue
   instead of a specific one. `--issue=123` also works.
 - Wrap it in a shell function/alias if you use it often:
@@ -42,12 +38,7 @@ scala-cli run \
   gh-task() {
     BASE=https://raw.githubusercontent.com/MercurieVV/gh-tasks-llm-executor/master
     scala-cli run \
-      --scala 3.8.4 \
-      --dependency org.typelevel::cats-core:2.13.0 \
-      --dependency org.typelevel::cats-effect:3.7.0 \
-      --dependency io.github.mercurievv::arrowstep:0.1.1 \
-      --dependency com.lihaoyi::os-lib:0.11.8 \
-      --dependency com.lihaoyi::ujson:4.4.3 \
+      $BASE/project-remote.scala \
       $BASE/main.scala $BASE/Git.scala $BASE/github.scala \
       $BASE/IssueClaim.scala $BASE/AgentExecutor.scala $BASE/AgentInventory.scala \
       $BASE/TaskLogger.scala \

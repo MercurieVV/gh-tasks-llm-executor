@@ -2,6 +2,7 @@
 //> using options -Wunused:imports
 // //> using options -Werror
 //> using exclude Setup.scala
+//> using exclude project-remote.scala
 //> using exclude scripts
 //> using exclude docs
 //> using exclude mdoc-docs
