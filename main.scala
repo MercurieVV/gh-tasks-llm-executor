@@ -209,6 +209,7 @@ object Main extends IOApp:
     markInProgress[F] >>>
       ensureTaskWorktree[F] >>>
       runExecutor[F] >>>
+      runProjectValidation[F] >>>
       commentOutput[F] >>>
       commitIfChanged[F] >>>
       cleanupTaskWorktree[F] >>>
@@ -422,6 +423,14 @@ object Main extends IOApp:
           task.output,
           progress
         )
+        .as(task)
+    }
+
+  private def runProjectValidation[F[_]: Sync]
+      : -->[F, TaskWithOutput, TaskWithOutput] =
+    Kleisli { task =>
+      Git[F]
+        .runProjectValidation(task.run.worktreePath, progress)
         .as(task)
     }
 

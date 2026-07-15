@@ -82,6 +82,54 @@ final class Git[F[_]](using F: Sync[F]):
         .nonEmpty
     }
 
+  def runProjectValidation(
+      worktreePath: os.Path,
+      progress: String => F[Unit]
+  ): F[Unit] =
+    validationHook(worktreePath).flatMap {
+      case None =>
+        progress(
+          "No project validation hook found. Skipping local project checks."
+        )
+      case Some(hook) =>
+        for
+          _ <- progress(s"Running project validation hook: $hook")
+          result <- F.blocking {
+            os.proc(hook)
+              .call(
+                cwd = worktreePath,
+                stdout = os.Pipe,
+                stderr = os.Pipe,
+                check = false
+              )
+          }
+          stdout <- F.blocking(result.out.text())
+          stderr <- F.blocking(result.err.text())
+          output = (stdout + stderr).trim
+          _ <-
+            if output.nonEmpty then progress(output)
+            else progress("Project validation hook produced no output.")
+          _ <-
+            if result.exitCode === 0 then
+              progress("Project validation hook passed.")
+            else
+              F.raiseError(
+                new RuntimeException(
+                  s"Project validation hook failed with exit code ${result.exitCode}."
+                )
+              )
+        yield ()
+    }
+
+  private def validationHook(worktreePath: os.Path): F[Option[os.Path]] =
+    F.blocking {
+      List(
+        worktreePath / ".gh-tasks-llm-executor" / "validate",
+        worktreePath / ".github" / "gh-tasks-llm-executor" / "validate",
+        worktreePath / "scripts" / "gh-task-validate"
+      ).find(path => os.exists(path) && os.isFile(path))
+    }
+
   def commitAll(worktreePath: os.Path, task: Issue): F[Unit] =
     call(worktreePath, "git", "add", "-A") *>
       call(
