@@ -514,13 +514,24 @@ object Main extends IOApp:
       runner: TaskRunner
   ): TaskRun =
     val taskId = task.number
+    val taskName = taskSlug(task.title).getOrElse(s"task-$taskId")
     TaskRun(
       context = context,
       task = task,
       runner = runner,
-      worktreePath = context.root / os.up / s"task-$taskId",
+      worktreePath = context.root / os.up / s"$taskName-$taskId",
       branchName = s"task-$taskId"
     )
+
+  private def taskSlug(title: String): Option[String] =
+    val slug = title.toLowerCase
+      .map(char => if char.isLetterOrDigit then char else '-')
+      .mkString
+      .replaceAll("-+", "-")
+      .stripPrefix("-")
+      .stripSuffix("-")
+      .take(60)
+    Option.when(slug.nonEmpty)(slug)
 
   private def taskPrompt(
       task: Issue,
@@ -742,7 +753,7 @@ Execution: $execution
     yield ()
 
   private def progress[F[_]: Sync](message: String): F[Unit] =
-    Sync[F].delay(Console.err.println(message))
+    TaskLogger.script(message)
 
   private def removeRunnerArgs(args: List[String]): List[String] =
     @tailrec

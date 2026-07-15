@@ -1,6 +1,7 @@
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
+import scala.concurrent.duration.*
 import scala.util.Try
 
 final case class Issue(
@@ -11,6 +12,9 @@ final case class Issue(
 )
 
 object GitHub:
+
+  private val PullRequestCheckTimeoutMillis = 30.minutes.toMillis
+  private val PullRequestCheckPollMillis = 30.seconds.toMillis
 
   def fetchIssues[F[_]: Sync](root: os.Path): F[List[Issue]] =
     Sync[F].blocking {
@@ -204,7 +208,7 @@ object GitHub:
     for
       _ <- progress(s"Commenting run output on task #$taskId...")
       commentBody =
-        s"""Task run output:
+        s"""LLM run output:
 ```
 $output
 ```"""
@@ -227,7 +231,7 @@ $output
       progress: String => F[Unit]
   )(using Sync[F]): F[Unit] =
     val body =
-      s"""Conclusion:
+      s"""Script conclusion:
 Task #${task.number} completed successfully.
 
 Runner:
@@ -348,22 +352,146 @@ This parent task will not be implemented directly. Run child tasks first; when a
     for
       _ <- progress("Pushing branch to origin...")
       _ <- call(worktreePath, "git", "push", "-u", "origin", branchName)
-      _ <- progress("Creating Pull Request...")
-      _ <- call(
-        worktreePath,
-        "gh",
-        "pr",
-        "create",
-        "--title",
-        s"Task #${task.number}: ${task.title}",
-        "--body",
-        s"Closes #${task.number}",
-        "--head",
-        branchName
+      _ <- ensurePullRequest(worktreePath, branchName, task, progress)
+      _ <- awaitPullRequestChecks(
+        root,
+        branchName,
+        PullRequestCheckTimeoutMillis,
+        PullRequestCheckPollMillis,
+        progress
       )
       _ <- progress("Merging Pull Request...")
       _ <- call(root, "gh", "pr", "merge", branchName, "--merge")
     yield ()
+
+  private def ensurePullRequest[F[_]](
+      worktreePath: os.Path,
+      branchName: String,
+      task: Issue,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    call(worktreePath, "gh", "pr", "view", branchName).attempt.flatMap {
+      case Right(_) =>
+        progress(s"Pull Request for $branchName already exists.")
+      case Left(_) =>
+        progress("Creating Pull Request...") *>
+          call(
+            worktreePath,
+            "gh",
+            "pr",
+            "create",
+            "--title",
+            s"Task #${task.number}: ${task.title}",
+            "--body",
+            s"Closes #${task.number}",
+            "--head",
+            branchName
+          )
+    }
+
+  private def awaitPullRequestChecks[F[_]](
+      root: os.Path,
+      branchName: String,
+      timeoutMillis: Long,
+      pollMillis: Long,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    def loop(deadlineMillis: Long): F[Unit] =
+      for
+        now <- F.blocking(System.currentTimeMillis())
+        _ <-
+          if now >= deadlineMillis then
+            F.raiseError(
+              new RuntimeException(
+                s"Timed out waiting for Pull Request checks on $branchName."
+              )
+            )
+          else
+            pullRequestCheckStatus(root, branchName).flatMap {
+              case PullRequestChecksPending(message) =>
+                progress(message) *>
+                  F.blocking(Thread.sleep(pollMillis)) *>
+                  loop(deadlineMillis)
+              case PullRequestChecksPassed(message) =>
+                progress(message)
+              case PullRequestChecksFailed(message) =>
+                F.raiseError(new RuntimeException(message))
+            }
+      yield ()
+
+    for
+      _ <- progress(
+        s"Waiting for Pull Request checks on $branchName with ${timeoutMillis / 1000}s timeout..."
+      )
+      started <- F.blocking(System.currentTimeMillis())
+      _ <- loop(started + timeoutMillis)
+    yield ()
+
+  private sealed trait PullRequestCheckStatus
+
+  private final case class PullRequestChecksPending(message: String)
+      extends PullRequestCheckStatus
+
+  private final case class PullRequestChecksPassed(message: String)
+      extends PullRequestCheckStatus
+
+  private final case class PullRequestChecksFailed(message: String)
+      extends PullRequestCheckStatus
+
+  private def pullRequestCheckStatus[F[_]](
+      root: os.Path,
+      branchName: String
+  )(using F: Sync[F]): F[PullRequestCheckStatus] =
+    callOutputUnchecked(
+      root,
+      "gh",
+      "pr",
+      "checks",
+      branchName,
+      "--json",
+      "name,state"
+    ).map { output =>
+      val checks = parsePullRequestChecks(output)
+      val failed = checks.filter(check =>
+        Set("FAIL", "FAILED", "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT")
+          .contains(check.state)
+      )
+      val pending = checks.filterNot(check =>
+        Set("SUCCESS", "PASS", "PASSED", "SKIPPED", "NEUTRAL")
+          .contains(check.state)
+      )
+      if output.trim.isEmpty || checks.isEmpty then
+        PullRequestChecksPending(
+          s"Pull Request checks for $branchName are not available yet."
+        )
+      else if failed.nonEmpty then
+        PullRequestChecksFailed(
+          s"Pull Request checks failed for $branchName: ${formatChecks(failed)}"
+        )
+      else if pending.nonEmpty then
+        PullRequestChecksPending(
+          s"Pull Request checks pending for $branchName: ${formatChecks(pending)}"
+        )
+      else
+        PullRequestChecksPassed(s"Pull Request checks passed for $branchName.")
+    }
+
+  private final case class PullRequestCheck(name: String, state: String)
+
+  private def parsePullRequestChecks(output: String): List[PullRequestCheck] =
+    Try(ujson.read(output).arr.toList).toOption.toList.flatten.flatMap {
+      case ujson.Obj(fields) =>
+        for
+          name <- fields.get("name").collect { case ujson.Str(value) => value }
+          state <- fields.get("state").collect { case ujson.Str(value) =>
+            value.trim.toUpperCase
+          }
+        yield PullRequestCheck(name, state)
+      case _ => None
+    }
+
+  private def formatChecks(checks: List[PullRequestCheck]): String =
+    checks.map(check => s"${check.name}=${check.state}").mkString(", ")
 
   def closeIssue[F[_]: Sync](root: os.Path, taskId: Int): F[Unit] =
     call(
@@ -410,4 +538,13 @@ This parent task will not be implemented directly. Run child tasks first; when a
     Sync[F].blocking {
       os.proc(command).call(cwd = cwd)
       ()
+    }
+
+  private def callOutputUnchecked[F[_]: Sync](
+      cwd: os.Path,
+      command: String*
+  ): F[String] =
+    Sync[F].blocking {
+      val result = os.proc(command).call(cwd = cwd, check = false)
+      result.out.text().trim
     }
