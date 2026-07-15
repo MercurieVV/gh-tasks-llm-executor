@@ -193,6 +193,238 @@ object GitHub:
               ).as(None)
           }
 
+  def replayContext[F[_]](
+      root: os.Path,
+      task: Issue,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Option[String]] =
+    for
+      history <- issueHistory(root, task.number).handleErrorWith { error =>
+        progress(
+          s"Failed to read replay history for task #${task.number}: ${error.getMessage}"
+        ).as(IssueHistory(Nil, Nil))
+      }
+      pullRequests <- history.pullRequests.traverse(pr =>
+        pullRequestReplayContext(root, pr)
+      )
+      context = formatReplayContext(history.comments, pullRequests.flatten)
+      replay = Option.when(context.trim.nonEmpty)(context)
+      _ <- replay.fold(F.unit)(_ =>
+        progress(
+          s"Found prior task history for #${task.number}. Running in replay/continue mode."
+        )
+      )
+    yield replay
+
+  private final case class IssueHistory(
+      comments: List[IssueComment],
+      pullRequests: List[Int]
+  )
+
+  private final case class IssueComment(
+      author: String,
+      createdAt: String,
+      body: String
+  )
+
+  private def issueHistory[F[_]: Sync](
+      root: os.Path,
+      taskId: Int
+  ): F[IssueHistory] =
+    callOutput(
+      root,
+      "gh",
+      "issue",
+      "view",
+      taskId.toString,
+      "--json",
+      "comments,closedByPullRequestsReferences"
+    ).map(parseIssueHistory)
+
+  private def parseIssueHistory(output: String): IssueHistory =
+    Try(ujson.read(output).obj).toOption.fold(IssueHistory(Nil, Nil)) {
+      fields =>
+        val comments = fields
+          .get("comments")
+          .collect { case ujson.Arr(values) =>
+            values.toList.flatMap(parseIssueComment)
+          }
+          .getOrElse(Nil)
+        val pullRequests = fields
+          .get("closedByPullRequestsReferences")
+          .collect { case ujson.Arr(values) =>
+            values.toList.flatMap(parsePullRequestNumber)
+          }
+          .getOrElse(Nil)
+          .distinct
+        IssueHistory(comments, pullRequests)
+    }
+
+  private def parseIssueComment(value: ujson.Value): Option[IssueComment] =
+    value match
+      case ujson.Obj(fields) =>
+        for body <- fields.get("body").collect { case ujson.Str(value) =>
+            value
+          }
+        yield IssueComment(
+          author = fields
+            .get("author")
+            .collect { case ujson.Obj(authorFields) =>
+              authorFields
+                .get("login")
+                .collect { case ujson.Str(value) => value }
+            }
+            .flatten
+            .getOrElse("unknown"),
+          createdAt = fields
+            .get("createdAt")
+            .collect { case ujson.Str(value) => value }
+            .getOrElse("unknown time"),
+          body = body
+        )
+      case _ => None
+
+  private def parsePullRequestNumber(value: ujson.Value): Option[Int] =
+    value match
+      case ujson.Obj(fields) =>
+        fields.get("number").collect { case ujson.Num(value) => value.toInt }
+      case _ => None
+
+  private final case class PullRequestReplay(
+      number: Int,
+      state: String,
+      url: String,
+      baseRefName: String,
+      headRefName: String,
+      mergeCommit: Option[String],
+      runs: List[WorkflowRun]
+  )
+
+  private def pullRequestReplayContext[F[_]](
+      root: os.Path,
+      number: Int
+  )(using F: Sync[F]): F[Option[PullRequestReplay]] =
+    callOutputUnchecked(
+      root,
+      "gh",
+      "pr",
+      "view",
+      number.toString,
+      "--json",
+      "number,state,url,baseRefName,headRefName,mergeCommit"
+    ).flatMap { output =>
+      parsePullRequestReplay(output).traverse { replay =>
+        replay.mergeCommit.fold(replay.copy(runs = Nil).pure[F]) { commit =>
+          workflowRuns(root, replay.baseRefName, commit)
+            .map(runs => replay.copy(runs = runs))
+        }
+      }
+    }
+
+  private def parsePullRequestReplay(
+      output: String
+  ): Option[PullRequestReplay] =
+    Try(ujson.read(output).obj).toOption.flatMap { fields =>
+      for
+        number <- fields.get("number").collect { case ujson.Num(value) =>
+          value.toInt
+        }
+        state <- fields.get("state").collect { case ujson.Str(value) =>
+          value
+        }
+      yield PullRequestReplay(
+        number = number,
+        state = state,
+        url = fields
+          .get("url")
+          .collect { case ujson.Str(value) => value }
+          .getOrElse(""),
+        baseRefName = fields
+          .get("baseRefName")
+          .collect { case ujson.Str(value) => value }
+          .getOrElse(""),
+        headRefName = fields
+          .get("headRefName")
+          .collect { case ujson.Str(value) => value }
+          .getOrElse(""),
+        mergeCommit = fields
+          .get("mergeCommit")
+          .collect { case ujson.Obj(commitFields) =>
+            commitFields.get("oid").collect { case ujson.Str(value) => value }
+          }
+          .flatten,
+        runs = Nil
+      )
+    }
+
+  private def workflowRuns[F[_]: Sync](
+      root: os.Path,
+      branchName: String,
+      commitSha: String
+  ): F[List[WorkflowRun]] =
+    callOutputUnchecked(
+      root,
+      "gh",
+      "run",
+      "list",
+      "--branch",
+      branchName,
+      "--commit",
+      commitSha,
+      "--limit",
+      "100",
+      "--json",
+      "name,status,conclusion,url"
+    ).map(parseWorkflowRuns)
+
+  private def formatReplayContext(
+      comments: List[IssueComment],
+      pullRequests: List[PullRequestReplay]
+  ): String =
+    val relevantComments = comments.takeRight(8)
+    val hasAutomationHistory = comments.exists(comment =>
+      val lower = comment.body.toLowerCase
+      lower.startsWith("llm run output:") ||
+      lower.startsWith("script conclusion:") ||
+      lower.startsWith("task run output:")
+    )
+    val shouldReplay = pullRequests.nonEmpty || hasAutomationHistory
+
+    if !shouldReplay then ""
+    else
+      val commentsText =
+        if relevantComments.isEmpty then "No recent issue comments."
+        else
+          relevantComments
+            .map(comment =>
+              s"- ${comment.createdAt} @${comment.author}: ${truncate(comment.body, 2000)}"
+            )
+            .mkString("\n")
+      val prText =
+        if pullRequests.isEmpty then "No related pull requests found."
+        else
+          pullRequests
+            .map { pr =>
+              val runText =
+                if pr.runs.isEmpty then "no related workflow runs found"
+                else formatRuns(pr.runs)
+              s"- PR #${pr.number} ${pr.state} ${pr.url} head=${pr.headRefName} base=${pr.baseRefName} merge=${pr.mergeCommit
+                  .getOrElse("none")} runs=[$runText]"
+            }
+            .mkString("\n")
+
+      s"""Recent issue comments:
+$commentsText
+
+Related pull requests and CI runs:
+$prText
+"""
+
+  private def truncate(value: String, maxLength: Int): String =
+    val normalized = value.linesIterator.mkString("\\n")
+    if normalized.length <= maxLength then normalized
+    else normalized.take(maxLength) + "... [truncated]"
+
   private def commentBody(value: ujson.Value): Option[String] =
     value match
       case ujson.Obj(fields) =>
@@ -352,17 +584,24 @@ This parent task will not be implemented directly. Run child tasks first; when a
     for
       _ <- progress("Pushing branch to origin...")
       _ <- call(worktreePath, "git", "push", "-u", "origin", branchName)
-      _ <- ensurePullRequest(worktreePath, branchName, task, progress)
+      pullRequest <- ensurePullRequest(worktreePath, branchName, task, progress)
       _ <- awaitPullRequestChecks(
         root,
-        branchName,
+        pullRequest.number.toString,
         PullRequestCheckTimeoutMillis,
         PullRequestCheckPollMillis,
         progress
       )
       _ <- progress("Merging Pull Request...")
-      _ <- call(root, "gh", "pr", "merge", branchName, "--merge")
-      merged <- mergedPullRequest(root, branchName)
+      _ <- call(
+        root,
+        "gh",
+        "pr",
+        "merge",
+        pullRequest.number.toString,
+        "--merge"
+      )
+      merged <- mergedPullRequest(root, pullRequest.number)
       _ <- awaitBranchChecks(
         root,
         merged.baseRefName,
@@ -373,16 +612,20 @@ This parent task will not be implemented directly. Run child tasks first; when a
       )
     yield ()
 
+  private final case class PullRequest(number: Int, state: String)
+
   private def ensurePullRequest[F[_]](
       worktreePath: os.Path,
       branchName: String,
       task: Issue,
       progress: String => F[Unit]
-  )(using F: Sync[F]): F[Unit] =
-    call(worktreePath, "gh", "pr", "view", branchName).attempt.flatMap {
-      case Right(_) =>
-        progress(s"Pull Request for $branchName already exists.")
-      case Left(_) =>
+  )(using F: Sync[F]): F[PullRequest] =
+    pullRequestForBranch(worktreePath, branchName).flatMap {
+      case Some(pullRequest) if pullRequest.state === "OPEN" =>
+        progress(
+          s"Pull Request #${pullRequest.number} for $branchName already exists."
+        ).as(pullRequest)
+      case _ =>
         progress("Creating Pull Request...") *>
           call(
             worktreePath,
@@ -395,7 +638,43 @@ This parent task will not be implemented directly. Run child tasks first; when a
             s"Closes #${task.number}",
             "--head",
             branchName
-          )
+          ) *>
+          pullRequestForBranch(worktreePath, branchName).flatMap {
+            case Some(pullRequest) if pullRequest.state === "OPEN" =>
+              pullRequest.pure[F]
+            case _ =>
+              F.raiseError(
+                new RuntimeException(
+                  s"Could not find open Pull Request for $branchName after creation."
+                )
+              )
+          }
+    }
+
+  private def pullRequestForBranch[F[_]](
+      root: os.Path,
+      branchName: String
+  )(using F: Sync[F]): F[Option[PullRequest]] =
+    callOutputUnchecked(
+      root,
+      "gh",
+      "pr",
+      "view",
+      branchName,
+      "--json",
+      "number,state"
+    ).map(parsePullRequest)
+
+  private def parsePullRequest(output: String): Option[PullRequest] =
+    Try(ujson.read(output).obj).toOption.flatMap { fields =>
+      for
+        number <- fields.get("number").collect { case ujson.Num(value) =>
+          value.toInt
+        }
+        state <- fields.get("state").collect { case ujson.Str(value) =>
+          value.trim.toUpperCase
+        }
+      yield PullRequest(number, state)
     }
 
   private def awaitPullRequestChecks[F[_]](
@@ -509,20 +788,20 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
   private def mergedPullRequest[F[_]](
       root: os.Path,
-      branchName: String
+      pullRequestNumber: Int
   )(using F: Sync[F]): F[MergedPullRequest] =
     callOutput(
       root,
       "gh",
       "pr",
       "view",
-      branchName,
+      pullRequestNumber.toString,
       "--json",
       "baseRefName,mergeCommit"
     ).flatMap { output =>
       parseMergedPullRequest(output).liftTo[F](
         new RuntimeException(
-          s"Could not read merged Pull Request metadata for $branchName."
+          s"Could not read merged Pull Request metadata for #$pullRequestNumber."
         )
       )
     }

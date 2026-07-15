@@ -13,20 +13,27 @@ final class Git[F[_]](using F: Sync[F]):
     F.blocking(os.exists(worktreePath)).flatMap {
       case false => F.unit
       case true =>
-        progress(
-          s"Worktree directory $worktreePath already exists. Cleaning up..."
-        ) *>
-          call(
-            root,
-            "git",
-            "worktree",
-            "remove",
-            "--force",
-            worktreePath.toString
-          ).attempt.void *>
-          F.blocking {
-            if os.exists(worktreePath) then os.remove.all(worktreePath)
-          }
+        filesChanged(worktreePath).flatMap {
+          case true =>
+            progress(
+              s"Worktree directory $worktreePath already exists with local changes. Reusing it for replay."
+            )
+          case false =>
+            progress(
+              s"Clean worktree directory $worktreePath already exists. Cleaning up..."
+            ) *>
+              call(
+                root,
+                "git",
+                "worktree",
+                "remove",
+                "--force",
+                worktreePath.toString
+              ).attempt.void *>
+              F.blocking {
+                if os.exists(worktreePath) then os.remove.all(worktreePath)
+              }
+        }
     }
 
   def branchExists(root: os.Path, branchName: String): F[Boolean] =
@@ -43,17 +50,22 @@ final class Git[F[_]](using F: Sync[F]):
       branchName: String,
       progress: String => F[Unit]
   ): F[Unit] =
-    progress(
-      s"Branch $branchName already exists, adding worktree for it"
-    ) *>
-      call(
-        root,
-        "git",
-        "worktree",
-        "add",
-        worktreePath.toString,
-        branchName
-      )
+    F.blocking(os.exists(worktreePath)).flatMap {
+      case true =>
+        progress(s"Reusing existing worktree at $worktreePath")
+      case false =>
+        progress(
+          s"Branch $branchName already exists, adding worktree for it"
+        ) *>
+          call(
+            root,
+            "git",
+            "worktree",
+            "add",
+            worktreePath.toString,
+            branchName
+          )
+    }
 
   def addNewBranchWorktree(
       root: os.Path,
@@ -61,16 +73,21 @@ final class Git[F[_]](using F: Sync[F]):
       branchName: String,
       progress: String => F[Unit]
   ): F[Unit] =
-    progress(s"Creating branch $branchName and adding worktree") *>
-      call(
-        root,
-        "git",
-        "worktree",
-        "add",
-        "-b",
-        branchName,
-        worktreePath.toString
-      )
+    F.blocking(os.exists(worktreePath)).flatMap {
+      case true =>
+        progress(s"Reusing existing worktree at $worktreePath")
+      case false =>
+        progress(s"Creating branch $branchName and adding worktree") *>
+          call(
+            root,
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            branchName,
+            worktreePath.toString
+          )
+    }
 
   def filesChanged(worktreePath: os.Path): F[Boolean] =
     F.blocking {

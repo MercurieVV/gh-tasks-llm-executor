@@ -50,7 +50,8 @@ final case class TaskRun(
 
 final case class TaskWithPrompt(
     run: TaskRun,
-    parentConclusion: Option[String]
+    parentConclusion: Option[String],
+    replayContext: Option[String]
 )
 
 final case class TaskWithOutput(run: TaskRun, output: String)
@@ -182,7 +183,7 @@ object Main extends IOApp:
 
   private def taskExecution[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
     announceTask[F] >>>
-      fetchDependencyConclusion[F] >>>
+      fetchTaskContext[F] >>>
       evaluateTask[F] >>>
       choose[F, NeedsUserInput, Either[SplitTask, TaskWithPrompt], RunSummary](
         needsUserInputSummary[F],
@@ -276,13 +277,22 @@ object Main extends IOApp:
         .as(task)
     }
 
-  private def fetchDependencyConclusion[
+  private def fetchTaskContext[
       F[_]: Sync
   ]: -->[F, TaskRun, TaskWithPrompt] =
     Kleisli { run =>
-      GitHub
-        .dependencyConclusion(run.context.root, run.task, progress)
-        .map(dependencyConclusion => TaskWithPrompt(run, dependencyConclusion))
+      for
+        dependencyConclusion <- GitHub.dependencyConclusion(
+          run.context.root,
+          run.task,
+          progress
+        )
+        replayContext <- GitHub.replayContext(
+          run.context.root,
+          run.task,
+          progress
+        )
+      yield TaskWithPrompt(run, dependencyConclusion, replayContext)
     }
 
   private def evaluateTask[
@@ -404,7 +414,13 @@ object Main extends IOApp:
   private def runExecutor[F[_]: Sync]: -->[F, TaskWithPrompt, TaskWithOutput] =
     Kleisli { task =>
       val run = task.run
-      val prompt = taskPrompt(run.task, run.runner, task.parentConclusion)
+      val prompt =
+        taskPrompt(
+          run.task,
+          run.runner,
+          task.parentConclusion,
+          task.replayContext
+        )
       for
         _ <- progress(
           s"Running task #${run.task.number} with ${run.runner.display}..."
@@ -545,11 +561,24 @@ object Main extends IOApp:
   private def taskPrompt(
       task: Issue,
       runner: TaskRunner,
-      dependencyConclusion: Option[String]
+      dependencyConclusion: Option[String],
+      replayContext: Option[String]
   ): String =
     val dependencyConclusionStr = dependencyConclusion
       .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
       .getOrElse("")
+    val replayContextStr = replayContext
+      .map(context => s"""
+Replay / repair context:
+$context
+
+Replay rules:
+- This task was reopened or resumed after a prior script/agent run.
+- Continue from the current repository, branch, PR, and worktree state.
+- Do not repeat completed work unless needed to repair the failure.
+- Focus on the latest failure context above, for example failed CI, build output, or user restart comment.
+- If the previous implementation was already merged, create the minimal follow-up fix in this task branch.
+""").getOrElse("")
 
     s"""Task ID: #${task.number}
 Title: ${task.title}
@@ -560,6 +589,7 @@ Version: ${runner.version.getOrElse("")}
 Task Description:
 ${task.body}
 $dependencyConclusionStr
+$replayContextStr
 Workflow:
 1. First estimate the task size and complexity before editing files.
 2. If the task is too broad, ambiguous, risky, or naturally decomposes into independent steps, split it instead of implementing it directly.
