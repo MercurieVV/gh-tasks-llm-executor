@@ -215,8 +215,30 @@ final class Git[F[_]](using F: Sync[F]):
   private def call(cwd: os.Path, command: String*): F[Unit] =
     TaskLogger.trace[F](s"command cwd=$cwd args=${formatCommand(command)}") *>
       F.blocking {
-        os.proc(command).call(cwd = cwd)
-        ()
+        os
+          .proc(command)
+          .call(cwd = cwd, stdout = os.Pipe, stderr = os.Pipe, check = false)
+      }.flatMap { result =>
+        for
+          stdout <- F.blocking(result.out.text().trim)
+          stderr <- F.blocking(result.err.text().trim)
+          _ <-
+            if stdout.nonEmpty then
+              TaskLogger.trace[F](s"command stdout ${truncate(stdout)}")
+            else F.unit
+          _ <-
+            if stderr.nonEmpty then
+              TaskLogger.trace[F](s"command stderr ${truncate(stderr)}")
+            else F.unit
+          _ <-
+            if result.exitCode === 0 then F.unit
+            else
+              F.raiseError(
+                new RuntimeException(
+                  s"Command failed with exit code ${result.exitCode}: ${formatCommand(command)}"
+                )
+              )
+        yield ()
       }
 
   private def formatCommand(command: Seq[String]): String =

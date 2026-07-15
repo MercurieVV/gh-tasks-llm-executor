@@ -108,9 +108,6 @@ object Main extends IOApp:
       .run[IO](arrowstepArgs, os.pwd)(_ => program(AppInput(os.pwd)))
       .flatMap { outcome =>
         IO.print(outcome.stdout) *>
-          IO.whenA(outcome.stderr.nonEmpty)(
-            IO.delay(Console.err.print(outcome.stderr))
-          ) *>
           IO.pure(ExitCode(outcome.exitCode))
       }
 

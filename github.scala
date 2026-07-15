@@ -1008,10 +1008,34 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
   private def call[F[_]: Sync](cwd: os.Path, command: String*): F[Unit] =
     TaskLogger.trace[F](s"command cwd=$cwd args=${formatCommand(command)}") *>
-      Sync[F].blocking {
-        os.proc(command).call(cwd = cwd)
-        ()
-      }
+      Sync[F]
+        .blocking {
+          os
+            .proc(command)
+            .call(cwd = cwd, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        }
+        .flatMap { result =>
+          for
+            stdout <- Sync[F].blocking(result.out.text().trim)
+            stderr <- Sync[F].blocking(result.err.text().trim)
+            _ <-
+              if stdout.nonEmpty then
+                TaskLogger.trace[F](s"command stdout ${truncate(stdout)}")
+              else Sync[F].unit
+            _ <-
+              if stderr.nonEmpty then
+                TaskLogger.trace[F](s"command stderr ${truncate(stderr)}")
+              else Sync[F].unit
+            _ <-
+              if result.exitCode === 0 then Sync[F].unit
+              else
+                Sync[F].raiseError(
+                  new RuntimeException(
+                    s"Command failed with exit code ${result.exitCode}: ${formatCommand(command)}"
+                  )
+                )
+          yield ()
+        }
 
   private def callOutput[F[_]: Sync](
       cwd: os.Path,
@@ -1020,7 +1044,30 @@ This parent task will not be implemented directly. Run child tasks first; when a
     TaskLogger.trace[F](
       s"command-output cwd=$cwd args=${formatCommand(command)}"
     ) *>
-      Sync[F].blocking(os.proc(command).call(cwd = cwd).out.text().trim)
+      Sync[F]
+        .blocking {
+          os
+            .proc(command)
+            .call(cwd = cwd, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        }
+        .flatMap { result =>
+          for
+            stdout <- Sync[F].blocking(result.out.text().trim)
+            stderr <- Sync[F].blocking(result.err.text().trim)
+            _ <-
+              if stderr.nonEmpty then
+                TaskLogger.trace[F](s"command stderr ${truncate(stderr)}")
+              else Sync[F].unit
+            output <-
+              if result.exitCode === 0 then stdout.pure[F]
+              else
+                Sync[F].raiseError(
+                  new RuntimeException(
+                    s"Command failed with exit code ${result.exitCode}: ${formatCommand(command)}"
+                  )
+                )
+          yield output
+        }
 
   private def callOutputUnchecked[F[_]: Sync](
       cwd: os.Path,
@@ -1029,10 +1076,22 @@ This parent task will not be implemented directly. Run child tasks first; when a
     TaskLogger.trace[F](
       s"command-output-unchecked cwd=$cwd args=${formatCommand(command)}"
     ) *>
-      Sync[F].blocking {
-        val result = os.proc(command).call(cwd = cwd, check = false)
-        result.out.text().trim
-      }
+      Sync[F]
+        .blocking {
+          os
+            .proc(command)
+            .call(cwd = cwd, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        }
+        .flatMap { result =>
+          for
+            stdout <- Sync[F].blocking(result.out.text().trim)
+            stderr <- Sync[F].blocking(result.err.text().trim)
+            _ <-
+              if stderr.nonEmpty then
+                TaskLogger.trace[F](s"command stderr ${truncate(stderr)}")
+              else Sync[F].unit
+          yield stdout
+        }
 
   private def formatCommand(command: Seq[String]): String =
     redactCommand(command.toList)

@@ -1,4 +1,5 @@
 import cats.effect.kernel.Sync
+import java.time.Instant
 
 object TaskLogger:
 
@@ -12,9 +13,12 @@ object TaskLogger:
     log("trace", message)
 
   private def log[F[_]: Sync](source: String, message: String): F[Unit] =
-    Sync[F].delay {
+    Sync[F].blocking {
+      val logDir = os.pwd / ".gh-tasks-llm-executor" / "logs"
+      val logFile = logDir / "executor.log"
+      os.makeDir.all(logDir)
       val prefixed = message.linesIterator
-        .map(line => s"[$source] $line")
+        .map(line => s"${Instant.now()} [$source] $line")
         .mkString(System.lineSeparator())
-      Console.err.println(prefixed)
+      os.write.append(logFile, prefixed + System.lineSeparator())
     }
