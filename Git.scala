@@ -1,50 +1,9 @@
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
-import scala.util.Try
-
 final class Git[F[_]](using F: Sync[F]):
 
-  def removeExistingWorktree(
-      root: os.Path,
-      worktreePath: os.Path,
-      progress: String => F[Unit]
-  ): F[Unit] =
-    F.blocking(os.exists(worktreePath)).flatMap {
-      case false => F.unit
-      case true =>
-        filesChanged(worktreePath).flatMap {
-          case true =>
-            progress(
-              s"Worktree directory $worktreePath already exists with local changes. Reusing it for replay."
-            )
-          case false =>
-            progress(
-              s"Clean worktree directory $worktreePath already exists. Cleaning up..."
-            ) *>
-              call(
-                root,
-                "git",
-                "worktree",
-                "remove",
-                "--force",
-                worktreePath.toString
-              ).attempt.void *>
-              F.blocking {
-                if os.exists(worktreePath) then os.remove.all(worktreePath)
-              }
-        }
-    }
-
-  def branchExists(root: os.Path, branchName: String): F[Boolean] =
-    F.blocking {
-      Try {
-        os.proc("git", "show-ref", "--verify", s"refs/heads/$branchName")
-          .call(cwd = root)
-      }.isSuccess
-    }
-
-  def addExistingBranchWorktree(
+  def acquireWorktree(
       root: os.Path,
       worktreePath: os.Path,
       branchName: String,
@@ -52,32 +11,13 @@ final class Git[F[_]](using F: Sync[F]):
   ): F[Unit] =
     F.blocking(os.exists(worktreePath)).flatMap {
       case true =>
-        progress(s"Reusing existing worktree at $worktreePath")
-      case false =>
-        progress(
-          s"Branch $branchName already exists, adding worktree for it"
-        ) *>
-          call(
-            root,
-            "git",
-            "worktree",
-            "add",
-            worktreePath.toString,
-            branchName
+        F.raiseError(
+          new RuntimeException(
+            s"Cannot acquire worktree: $worktreePath already exists."
           )
-    }
-
-  def addNewBranchWorktree(
-      root: os.Path,
-      worktreePath: os.Path,
-      branchName: String,
-      progress: String => F[Unit]
-  ): F[Unit] =
-    F.blocking(os.exists(worktreePath)).flatMap {
-      case true =>
-        progress(s"Reusing existing worktree at $worktreePath")
+        )
       case false =>
-        progress(s"Creating branch $branchName and adding worktree") *>
+        progress(s"Creating worktree at $worktreePath on branch $branchName") *>
           call(
             root,
             "git",
@@ -88,6 +28,31 @@ final class Git[F[_]](using F: Sync[F]):
             worktreePath.toString
           )
     }
+
+  def releaseWorktree(
+      root: os.Path,
+      worktreePath: os.Path,
+      branchName: String,
+      progress: String => F[Unit]
+  ): F[Unit] =
+    for
+      _ <- progress(s"Returning to project root at $root")
+      _ <- call(root, "git", "status", "--short").void
+      _ <- F.blocking(os.exists(worktreePath)).flatMap {
+        case false => F.unit
+        case true =>
+          progress(s"Removing worktree at $worktreePath") *>
+            call(
+              root,
+              "git",
+              "worktree",
+              "remove",
+              "--force",
+              worktreePath.toString
+            )
+      }
+      _ <- call(root, "git", "branch", "-D", branchName).attempt.void
+    yield ()
 
   def filesChanged(worktreePath: os.Path): F[Boolean] =
     F.blocking {

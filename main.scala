@@ -5,6 +5,7 @@ import cats.data.Kleisli
 import cats.effect.ExitCode
 import cats.effect.IO
 import cats.effect.IOApp
+import cats.effect.Resource
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
@@ -49,7 +50,10 @@ final case class TaskRunner(
 
 final case class RunnableTask(issue: Issue, runner: TaskRunner)
 
-final case class TaskSelection(context: RunContext, task: Option[RunnableTask])
+final case class TaskSelection(
+    context: RunContext,
+    candidates: List[RunnableTask]
+)
 
 final case class NoTask(context: RunContext)
 
@@ -178,34 +182,45 @@ object Main extends IOApp:
             s"Found ${candidates.size} runnable open tasks matching #$number."
           )
         )
-        nextTask = candidates.headOption
-      yield TaskSelection(context, nextTask)
+      yield TaskSelection(context, candidates)
     }
 
   private def executeTask[F[_]: Sync]: -->[F, TaskSelection, RunSummary] =
-    traced("selectedTask", selectedTask[F]) >>>
-      choose[F, NoTask, TaskRun, RunSummary](
-        traced("noTaskSummary", noTaskSummary[F]),
-        traced("runSelectedTask", runSelectedTask[F])
-      )
-
-  private def selectedTask[F[_]: Sync]
-      : -->[F, TaskSelection, Either[NoTask, TaskRun]] =
     Kleisli { selection =>
-      selection.task
-        .fold[Either[NoTask, TaskRun]](Left(NoTask(selection.context)))(task =>
-          Right(taskRun(selection.context, task.issue, task.runner))
-        )
-        .pure[F]
+      claimAndRunTask[F](selection.context, selection.candidates)
     }
+
+  // Try candidates in order, claiming each via IssueClaim before running it.
+  // A claim conflict means another process already owns that issue, so we
+  // move on to the next candidate instead of failing the whole run.
+  private def claimAndRunTask[F[_]: Sync](
+      context: RunContext,
+      candidates: List[RunnableTask]
+  ): F[RunSummary] =
+    candidates match
+      case Nil =>
+        noTaskSummary[F].run(NoTask(context))
+      case head :: tail =>
+        IssueClaim
+          .acquire[F](context.root, head.issue.number, progress)
+          .use { _ =>
+            taskExecution[F].run(
+              taskRun(context, head.issue, head.runner)
+            )
+          }
+          .recoverWith { case _: IssueAlreadyClaimedException =>
+            progress(
+              s"Task #${head.issue.number} is already claimed by another process. Trying next candidate..."
+            ) *> claimAndRunTask[F](context, tail)
+          }
 
   private def noTaskSummary[F[_]: Sync]: -->[F, NoTask, RunSummary] =
     Kleisli { noTask =>
       val context = noTask.context
       val message = context.taskNumber.fold(
-        "No tasks found without unresolved dependencies or open child tasks."
+        "No tasks found without unresolved dependencies, open child tasks, or another process already claiming them."
       )(number =>
-        s"No runnable open task found for #$number. It may be closed, blocked by dependencies or open child tasks, or marked needs-input."
+        s"No runnable open task found for #$number. It may be closed, blocked by dependencies or open child tasks, marked needs-input, or already claimed by another process."
       )
       RunSummary(
         status = "no-task",
@@ -213,9 +228,6 @@ object Main extends IOApp:
         task = None
       ).pure[F]
     }
-
-  private def runSelectedTask[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
-    taskExecution[F]
 
   private def taskExecution[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
     traced("announceTask", announceTask[F]) >>>
@@ -244,14 +256,16 @@ object Main extends IOApp:
       F[_]: Sync
   ]: -->[F, TaskWithPrompt, TaskRun] =
     traced("markInProgress", markInProgress[F]) >>>
-      traced("ensureTaskWorktree", ensureTaskWorktree[F]) >>>
-      traced("runExecutor", runExecutor[F]) >>>
-      traced("runProjectValidation", runProjectValidation[F]) >>>
-      traced("commentOutput", commentOutput[F]) >>>
-      traced("commitIfChanged", commitIfChanged[F]) >>>
-      traced("verifyReplayCi", verifyReplayCi[F]) >>>
-      traced("cleanupTaskWorktree", cleanupTaskWorktree[F]) >>>
-      traced("closeTask", closeTask[F])
+      Kleisli { task =>
+        worktreeResource[F](task).use { acquiredTask =>
+          (traced("runExecutor", runExecutor[F]) >>>
+            traced("runProjectValidation", runProjectValidation[F]) >>>
+            traced("commentOutput", commentOutput[F]) >>>
+            traced("commitIfChanged", commitIfChanged[F]) >>>
+            traced("verifyReplayCi", verifyReplayCi[F]) >>>
+            traced("closeTask", closeTask[F])).run(acquiredTask)
+        }
+      }
 
   private def needsUserInputSummary[
       F[_]: Sync
@@ -383,75 +397,45 @@ object Main extends IOApp:
           Right(Right(task.copy(run = updatedRun)))
     }
 
-  private def ensureTaskWorktree[
-      F[_]: Sync
-  ]: -->[F, TaskWithPrompt, TaskWithPrompt] =
-    traced("progressStartingWorktree", progressStartingWorktree[F]) >>>
-      traced("removeExistingTaskWorktree", removeExistingTaskWorktree[F]) >>>
-      traced("branchPlan", branchPlan[F]) >>>
-      choose[F, ExistingBranch, NewBranch, TaskWithPrompt](
-        traced("addExistingBranchWorktree", addExistingBranchWorktree[F]),
-        traced("addNewBranchWorktree", addNewBranchWorktree[F])
-      )
-
-  private def progressStartingWorktree[
-      F[_]: Sync
-  ]: -->[F, TaskWithPrompt, TaskWithPrompt] =
-    Kleisli { task =>
-      progress(s"Starting new worktree at ${task.run.worktreePath}").as(task)
-    }
-
-  private def removeExistingTaskWorktree[
-      F[_]: Sync
-  ]: -->[F, TaskWithPrompt, TaskWithPrompt] =
-    Kleisli { task =>
-      Git[F]
-        .removeExistingWorktree(
-          task.run.context.root,
-          task.run.worktreePath,
-          progress
+  private def worktreeResource[F[_]: Sync](
+      task: TaskWithPrompt
+  ): Resource[F, TaskWithPrompt] =
+    val run = task.run
+    Resource.make {
+      for
+        _ <- TaskLogger.trace[F](
+          s"enter acquireWorktree input=${summarize(task)}"
         )
-        .as(task)
-    }
-
-  private def branchPlan[
-      F[_]: Sync
-  ]: -->[F, TaskWithPrompt, Either[ExistingBranch, NewBranch]] =
-    Kleisli { task =>
-      Git[F].branchExists(task.run.context.root, task.run.branchName).map {
-        case true  => Left(ExistingBranch(task))
-        case false => Right(NewBranch(task))
-      }
-    }
-
-  private def addExistingBranchWorktree[
-      F[_]: Sync
-  ]: -->[F, ExistingBranch, TaskWithPrompt] =
-    Kleisli { branch =>
-      val run = branch.run.run
-      Git[F]
-        .addExistingBranchWorktree(
+        _ <- Git[F].acquireWorktree(
           run.context.root,
           run.worktreePath,
           run.branchName,
           progress
         )
-        .as(branch.run)
-    }
-
-  private def addNewBranchWorktree[
-      F[_]: Sync
-  ]: -->[F, NewBranch, TaskWithPrompt] =
-    Kleisli { branch =>
-      val run = branch.run.run
-      Git[F]
-        .addNewBranchWorktree(
-          run.context.root,
-          run.worktreePath,
-          run.branchName,
-          progress
+        _ <- TaskLogger.trace[F](
+          s"exit acquireWorktree output=${summarize(task)}"
         )
-        .as(branch.run)
+      yield task
+    } { acquiredTask =>
+      val acquiredRun = acquiredTask.run
+      TaskLogger.trace[F](
+        s"enter releaseWorktree input=${summarize(acquiredTask)}"
+      ) *>
+        Git[F]
+          .releaseWorktree(
+            acquiredRun.context.root,
+            acquiredRun.worktreePath,
+            acquiredRun.branchName,
+            progress
+          )
+          .handleErrorWith(error =>
+            TaskLogger.trace[F](
+              s"fail releaseWorktree error=${error.getClass.getSimpleName}: ${error.getMessage}"
+            )
+          ) *>
+        TaskLogger.trace[F](
+          s"exit releaseWorktree output=${summarize(acquiredTask)}"
+        )
     }
 
   private def runExecutor[F[_]: Sync]: -->[F, TaskWithPrompt, TaskWithOutput] =
@@ -669,8 +653,8 @@ object Main extends IOApp:
             .getOrElse("")},version=${version.getOrElse("")})"
       case RunnableTask(issue, runner) =>
         s"RunnableTask(issue=#${issue.number},runner=${runner.display})"
-      case TaskSelection(_, task) =>
-        s"TaskSelection(task=${task.map(_.issue.number).fold("none")(number => s"#$number")})"
+      case TaskSelection(_, candidates) =>
+        s"TaskSelection(candidates=${candidates.map(t => s"#${t.issue.number}").mkString(",")})"
       case NoTask(_) =>
         "NoTask"
       case TaskRun(_, task, runner, worktreePath, branchName) =>
