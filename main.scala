@@ -461,10 +461,15 @@ object Main extends IOApp:
   private def changedPlan[F[_]: Sync]
       : -->[F, TaskWithOutput, Either[ChangedTask, UnchangedTask]] =
     Kleisli { task =>
-      Git[F].filesChanged(task.run.worktreePath).map {
-        case true  => Left(ChangedTask(task))
-        case false => Right(UnchangedTask(task))
-      }
+      for
+        filesChanged <- Git[F].filesChanged(task.run.worktreePath)
+        hasPublishableCommits <- Git[F].hasPublishableCommits(
+          task.run.worktreePath,
+          task.run.branchName
+        )
+      yield
+        if filesChanged || hasPublishableCommits then Left(ChangedTask(task))
+        else Right(UnchangedTask(task))
     }
 
   private def commitChangedTask[
@@ -472,7 +477,7 @@ object Main extends IOApp:
   ]: -->[F, ChangedTask, TaskWithOutput] =
     Kleisli { changed =>
       val run = changed.run.run
-      commitAndMerge(
+      commitAndMergeOrPublish(
         run.context.root,
         run.worktreePath,
         run.branchName,
@@ -868,6 +873,41 @@ Execution: $execution
     for
       _ <- progress("Files changed. Committing and merging changes...")
       _ <- Git[F].commitAll(worktreePath, task)
+      hasRemote <- Git[F].hasRemote(root)
+      _ <-
+        if hasRemote then
+          GitHub.pushCreateAndMergePr(
+            root,
+            worktreePath,
+            branchName,
+            task,
+            progress
+          )
+        else Git[F].mergeLocally(root, worktreePath, branchName, progress)
+    yield ()
+
+  private def commitAndMergeOrPublish[F[_]](
+      root: os.Path,
+      worktreePath: os.Path,
+      branchName: String,
+      task: Issue
+  )(using Sync[F]): F[Unit] =
+    for
+      filesChanged <- Git[F].filesChanged(worktreePath)
+      _ <-
+        if filesChanged then
+          commitAndMerge(root, worktreePath, branchName, task)
+        else publishExistingCommits(root, worktreePath, branchName, task)
+    yield ()
+
+  private def publishExistingCommits[F[_]](
+      root: os.Path,
+      worktreePath: os.Path,
+      branchName: String,
+      task: Issue
+  )(using Sync[F]): F[Unit] =
+    for
+      _ <- progress("No file changes, publishing existing local commits...")
       hasRemote <- Git[F].hasRemote(root)
       _ <-
         if hasRemote then

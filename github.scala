@@ -1003,8 +1003,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       progress(
         s"Warning: Failed to update GitHub labels for task #$taskId: ${error.getMessage}"
       )
-    } *>
-      call(root, "ght", "status", taskId.toString, status).attempt.void
+    }
 
   private def call[F[_]: Sync](cwd: os.Path, command: String*): F[Unit] =
     TaskLogger.trace[F](s"command cwd=$cwd args=${formatCommand(command)}") *>

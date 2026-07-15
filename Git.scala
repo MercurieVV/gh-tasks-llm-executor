@@ -99,6 +99,33 @@ final class Git[F[_]](using F: Sync[F]):
         .nonEmpty
     }
 
+  def hasPublishableCommits(
+      worktreePath: os.Path,
+      branchName: String
+  ): F[Boolean] =
+    F.blocking {
+      val remoteBranch = s"origin/$branchName"
+      val hasRemoteBranch =
+        os.proc("git", "rev-parse", "--verify", remoteBranch)
+          .call(
+            cwd = worktreePath,
+            stdout = os.Pipe,
+            stderr = os.Pipe,
+            check = false
+          )
+          .exitCode === 0
+      val baseRef = if hasRemoteBranch then remoteBranch else "origin/HEAD"
+      val result =
+        os.proc("git", "rev-list", "--count", s"$baseRef..HEAD")
+          .call(
+            cwd = worktreePath,
+            stdout = os.Pipe,
+            stderr = os.Pipe,
+            check = false
+          )
+      result.exitCode === 0 && result.out.text().trim.toIntOption.exists(_ > 0)
+    }
+
   def runProjectValidation(
       worktreePath: os.Path,
       progress: String => F[Unit]
