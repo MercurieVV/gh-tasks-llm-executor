@@ -9,7 +9,6 @@ import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
 import scala.annotation.tailrec
-import scala.util.Try
 
 final case class AppInput(root: os.Path)
 
@@ -105,7 +104,7 @@ object Main extends IOApp:
     resolveContext[F] >>> selectTask[F] >>> executeTask[F]
 
   private def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =
-    Kleisli(input => RunContext(input.root).pure[F])
+    Kleisli.fromFunction(input => RunContext(input.root))
 
   private def selectTask[F[_]: Sync]: -->[F, RunContext, TaskSelection] =
     Kleisli { (context: RunContext) =>
@@ -115,9 +114,10 @@ object Main extends IOApp:
         openIssueNumbers = issues.map(_.number).toSet
         candidates = issues
           .filterNot(GitHub.hasUnresolvedDependencies(_, openIssueNumbers))
+          .filterNot(GitHub.hasOpenChildren(_, issues))
           .flatMap(task => GitHub.taskRunner(task).map(RunnableTask(task, _)))
         _ <- progress(
-          s"Found ${candidates.size} runnable open tasks with agent/model/version metadata."
+          s"Found ${candidates.size} runnable open tasks with preferred agent/model/version metadata."
         )
         nextTask = candidates.headOption
       yield TaskSelection(context, nextTask)
@@ -145,7 +145,7 @@ object Main extends IOApp:
       RunSummary(
         status = "no-task",
         message =
-          "No tasks found without unresolved dependencies and with agent/model/version metadata in the task description.",
+          "No tasks found without unresolved dependencies and with preferred agent/model/version metadata in the task description.",
         task = None
       ).pure[F]
     }
@@ -161,8 +161,8 @@ object Main extends IOApp:
 
   private def taskExecution[F[_]: Sync]: -->[F, TaskRun, TaskRun] =
     announceTask[F] >>>
+      fetchDependencyConclusion[F] >>>
       markInProgress[F] >>>
-      fetchParentConclusion[F] >>>
       ensureTaskWorktree[F] >>>
       runExecutor[F] >>>
       commentOutput[F] >>>
@@ -177,8 +177,11 @@ object Main extends IOApp:
       ).as(run)
     }
 
-  private def markInProgress[F[_]: Sync]: -->[F, TaskRun, TaskRun] =
-    Kleisli { run =>
+  private def markInProgress[
+      F[_]: Sync
+  ]: -->[F, TaskWithPrompt, TaskWithPrompt] =
+    Kleisli { task =>
+      val run = task.run
       GitHub
         .setIssueStatus(
           run.context.root,
@@ -186,16 +189,16 @@ object Main extends IOApp:
           "in progress",
           progress
         )
-        .as(run)
+        .as(task)
     }
 
-  private def fetchParentConclusion[
+  private def fetchDependencyConclusion[
       F[_]: Sync
   ]: -->[F, TaskRun, TaskWithPrompt] =
     Kleisli { run =>
       GitHub
-        .parentConclusion(run.context.root, run.task, progress)
-        .map(parentConclusion => TaskWithPrompt(run, parentConclusion))
+        .dependencyConclusion(run.context.root, run.task, progress)
+        .map(dependencyConclusion => TaskWithPrompt(run, dependencyConclusion))
     }
 
   private def ensureTaskWorktree[
@@ -220,17 +223,20 @@ object Main extends IOApp:
       F[_]: Sync
   ]: -->[F, TaskWithPrompt, TaskWithPrompt] =
     Kleisli { task =>
-      removeExistingWorktree(
-        task.run.context.root,
-        task.run.worktreePath
-      ).as(task)
+      Git[F]
+        .removeExistingWorktree(
+          task.run.context.root,
+          task.run.worktreePath,
+          progress
+        )
+        .as(task)
     }
 
   private def branchPlan[
       F[_]: Sync
   ]: -->[F, TaskWithPrompt, Either[ExistingBranch, NewBranch]] =
     Kleisli { task =>
-      branchExists(task.run.context.root, task.run.branchName).map {
+      Git[F].branchExists(task.run.context.root, task.run.branchName).map {
         case true  => Left(ExistingBranch(task))
         case false => Right(NewBranch(task))
       }
@@ -241,17 +247,14 @@ object Main extends IOApp:
   ]: -->[F, ExistingBranch, TaskWithPrompt] =
     Kleisli { branch =>
       val run = branch.run.run
-      progress(
-        s"Branch ${run.branchName} already exists, adding worktree for it"
-      ) *>
-        call(
+      Git[F]
+        .addExistingBranchWorktree(
           run.context.root,
-          "git",
-          "worktree",
-          "add",
-          run.worktreePath.toString,
-          run.branchName
-        ).as(branch.run)
+          run.worktreePath,
+          run.branchName,
+          progress
+        )
+        .as(branch.run)
     }
 
   private def addNewBranchWorktree[
@@ -259,16 +262,14 @@ object Main extends IOApp:
   ]: -->[F, NewBranch, TaskWithPrompt] =
     Kleisli { branch =>
       val run = branch.run.run
-      progress(s"Creating branch ${run.branchName} and adding worktree") *>
-        call(
+      Git[F]
+        .addNewBranchWorktree(
           run.context.root,
-          "git",
-          "worktree",
-          "add",
-          "-b",
+          run.worktreePath,
           run.branchName,
-          run.worktreePath.toString
-        ).as(branch.run)
+          progress
+        )
+        .as(branch.run)
     }
 
   private def runExecutor[F[_]: Sync]: -->[F, TaskWithPrompt, TaskWithOutput] =
@@ -279,10 +280,7 @@ object Main extends IOApp:
         _ <- progress(
           s"Running task #${run.task.number} with ${run.runner.display}..."
         )
-        output <- runCommandAndCapture(
-          run.runner.command(prompt),
-          run.worktreePath
-        )
+        output <- AgentExecutor[F].run(run.runner, prompt, run.worktreePath)
       yield TaskWithOutput(run, output)
     }
 
@@ -309,7 +307,7 @@ object Main extends IOApp:
   private def changedPlan[F[_]: Sync]
       : -->[F, TaskWithOutput, Either[ChangedTask, UnchangedTask]] =
     Kleisli { task =>
-      filesChanged(task.run.worktreePath).map {
+      Git[F].filesChanged(task.run.worktreePath).map {
         case true  => Left(ChangedTask(task))
         case false => Right(UnchangedTask(task))
       }
@@ -339,11 +337,14 @@ object Main extends IOApp:
       F[_]: Sync
   ]: -->[F, TaskWithOutput, TaskWithOutput] =
     Kleisli { task =>
-      cleanupWorktree(
-        task.run.context.root,
-        task.run.worktreePath,
-        task.run.branchName
-      ).as(task)
+      Git[F]
+        .cleanupWorktree(
+          task.run.context.root,
+          task.run.worktreePath,
+          task.run.branchName,
+          progress
+        )
+        .as(task)
     }
 
   private def closeTask[F[_]: Sync]: -->[F, TaskWithOutput, TaskRun] =
@@ -351,6 +352,12 @@ object Main extends IOApp:
       val run = task.run
       for
         _ <- progress(s"Closing task #${run.task.number} with comment...")
+        _ <- GitHub.commentConclusion(
+          run.context.root,
+          run.task,
+          run.runner,
+          progress
+        )
         _ <- GitHub.setIssueStatus(
           run.context.root,
           run.task.number,
@@ -358,6 +365,11 @@ object Main extends IOApp:
           progress
         )
         _ <- GitHub.closeIssue(run.context.root, run.task.number)
+        _ <- GitHub.checkParentsForCompletion(
+          run.context.root,
+          run.task,
+          progress
+        )
         _ <- progress("Task execution finished successfully.")
       yield run
     }
@@ -382,47 +394,13 @@ object Main extends IOApp:
       branchName = s"task-$taskId"
     )
 
-  private def removeExistingWorktree[F[_]](
-      root: os.Path,
-      worktreePath: os.Path
-  )(using F: Sync[F]): F[Unit] =
-    F.blocking(os.exists(worktreePath)).flatMap {
-      case false => F.unit
-      case true =>
-        progress(
-          s"Worktree directory $worktreePath already exists. Cleaning up..."
-        ) *>
-          call(
-            root,
-            "git",
-            "worktree",
-            "remove",
-            "--force",
-            worktreePath.toString
-          ).attempt.void *>
-          F.blocking {
-            if os.exists(worktreePath) then os.remove.all(worktreePath)
-          }
-    }
-
-  private def branchExists[F[_]: Sync](
-      root: os.Path,
-      branchName: String
-  ): F[Boolean] =
-    Sync[F].blocking {
-      Try {
-        os.proc("git", "show-ref", "--verify", s"refs/heads/$branchName")
-          .call(cwd = root)
-      }.isSuccess
-    }
-
   private def taskPrompt(
       task: Issue,
       runner: TaskRunner,
-      parentConclusion: Option[String]
+      dependencyConclusion: Option[String]
   ): String =
-    val parentConclusionStr = parentConclusion
-      .map(comment => s"\nParent Task Conclusion Comment:\n$comment\n")
+    val dependencyConclusionStr = dependencyConclusion
+      .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
       .getOrElse("")
 
     s"""Task ID: #${task.number}
@@ -433,40 +411,23 @@ Version: ${runner.version.getOrElse("")}
 
 Task Description:
 ${task.body}
-$parentConclusionStr
-Please implement this task in the current repository. Make any necessary file changes.
+$dependencyConclusionStr
+Workflow:
+1. First estimate the task size and complexity before editing files.
+2. If the task is too broad, ambiguous, risky, or naturally decomposes into independent steps, split it instead of implementing it directly.
+3. When splitting, create GitHub subtasks with clear, detailed descriptions and narrow scope. Each subtask should include:
+   - parent: #${task.number}
+   - dependencies on earlier subtasks when order matters
+   - concrete acceptance criteria
+   - preferred llms/models/versions as a ranked list
+4. Prefer splitting until each subtask is small enough that a weaker model such as Haiku could implement it without needing another split.
+5. Use this exact preferred-runner metadata format in every subtask description:
+   preferred llms/models/versions:
+   - claude/haiku/<version>
+   - codex/gpt-5/<version>
+6. If you split the task, do not implement the parent task. Comment on the parent with the created subtask numbers and the reason for the split.
+7. If the task is already narrow enough, implement it in the current repository and make any necessary file changes.
 """
-
-  private def runCommandAndCapture[F[_]: Sync](
-      cmd: Seq[String],
-      cwd: os.Path
-  ): F[String] =
-    Sync[F].blocking {
-      val result = os
-        .proc(cmd)
-        .call(cwd = cwd, stdout = os.Pipe, stderr = os.Pipe, check = false)
-      val stdout = result.out.text()
-      val stderr = result.err.text()
-      val output = stdout + stderr
-      if output.nonEmpty then Console.err.print(output)
-      Either.cond(
-        result.exitCode === 0,
-        output,
-        new RuntimeException(
-          s"${cmd.headOption.getOrElse("command")} exited with ${result.exitCode}"
-        )
-      )
-    }.rethrow
-
-  private def filesChanged[F[_]: Sync](worktreePath: os.Path): F[Boolean] =
-    Sync[F].blocking {
-      os.proc("git", "status", "--porcelain")
-        .call(cwd = worktreePath)
-        .out
-        .text()
-        .trim
-        .nonEmpty
-    }
 
   private def commitAndMerge[F[_]](
       root: os.Path,
@@ -476,76 +437,13 @@ Please implement this task in the current repository. Make any necessary file ch
   )(using Sync[F]): F[Unit] =
     for
       _ <- progress("Files changed. Committing and merging changes...")
-      _ <- call(worktreePath, "git", "add", "-A")
-      _ <- call(
-        worktreePath,
-        "git",
-        "commit",
-        "-m",
-        s"Implement task #${task.number}: ${task.title}"
-      )
-      hasRemote <- Sync[F].blocking(
-        os.proc("git", "remote").call(cwd = root).out.text().trim.nonEmpty
-      )
+      _ <- Git[F].commitAll(worktreePath, task)
+      hasRemote <- Git[F].hasRemote(root)
       _ <-
         if hasRemote then
           GitHub.pushCreateAndMergePr(worktreePath, branchName, task, progress)
-        else mergeLocally(root, worktreePath, branchName)
+        else Git[F].mergeLocally(root, worktreePath, branchName, progress)
     yield ()
-
-  private def mergeLocally[F[_]](
-      root: os.Path,
-      worktreePath: os.Path,
-      branchName: String
-  )(using Sync[F]): F[Unit] =
-    for
-      mainBranch <- Sync[F].blocking(
-        os.proc("git", "branch", "--show-current")
-          .call(cwd = root)
-          .out
-          .text()
-          .trim
-      )
-      _ <- progress(s"Removing worktree at $worktreePath")
-      _ <- call(
-        root,
-        "git",
-        "worktree",
-        "remove",
-        "--force",
-        worktreePath.toString
-      )
-      _ <- progress(s"Merging branch $branchName into $mainBranch...")
-      _ <- call(root, "git", "merge", branchName)
-      _ <- progress(s"Deleting local branch $branchName...")
-      _ <- call(root, "git", "branch", "-d", branchName)
-    yield ()
-
-  private def cleanupWorktree[F[_]](
-      root: os.Path,
-      worktreePath: os.Path,
-      branchName: String
-  )(using F: Sync[F]): F[Unit] =
-    F.blocking(os.exists(worktreePath)).flatMap {
-      case false => F.unit
-      case true =>
-        progress(s"Removing worktree at $worktreePath") *>
-          call(
-            root,
-            "git",
-            "worktree",
-            "remove",
-            "--force",
-            worktreePath.toString
-          ) *>
-          call(root, "git", "branch", "-D", branchName).attempt.void
-    }
-
-  private def call[F[_]: Sync](cwd: os.Path, command: String*): F[Unit] =
-    Sync[F].blocking {
-      os.proc(command).call(cwd = cwd)
-      ()
-    }
 
   private def progress[F[_]: Sync](message: String): F[Unit] =
     Sync[F].delay(Console.err.println(message))

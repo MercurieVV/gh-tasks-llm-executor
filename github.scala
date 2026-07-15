@@ -58,24 +58,34 @@ object GitHub:
       case _ => None
 
   def taskRunner(issue: Issue): Option[TaskRunner] =
+    taskRunners(issue).headOption
+
+  def taskRunners(issue: Issue): List[TaskRunner] =
     val fields = issue.body.linesIterator
       .flatMap(parseRunnerField)
       .toMap
 
-    fields.get("agent/model/version").flatMap(parseRunnerTriplet).orElse {
-      for
-        agent <- fields
-          .get("agent")
-          .orElse(fields.get("executor"))
-          .orElse(fields.get("llm"))
-        model <- fields.get("model")
-        version <- fields.get("version").orElse(fields.get("model version"))
-      yield TaskRunner(
-        agent = agent,
-        model = Some(model),
-        version = Some(version)
-      )
-    }
+    val listed = issue.body.linesIterator
+      .flatMap(parseRunnerTriplets)
+      .toList
+
+    val single =
+      fields.get("agent/model/version").flatMap(parseRunnerTriplet).orElse {
+        for
+          agent <- fields
+            .get("agent")
+            .orElse(fields.get("executor"))
+            .orElse(fields.get("llm"))
+          model <- fields.get("model")
+          version <- fields.get("version").orElse(fields.get("model version"))
+        yield TaskRunner(
+          agent = agent,
+          model = Some(model),
+          version = Some(version)
+        )
+      }
+
+    (listed ++ single.toList).distinct
 
   private val RunnerFieldRegex =
     """(?i)^\s*(?:[-*]\s*)?(?:preferred\s+)?(agent/model/version|agent|executor|llm|model|model\s+version|version)\s*(?:is\s+)?(?::|=)\s*(.+?)\s*$""".r
@@ -92,10 +102,20 @@ object GitHub:
         Some(TaskRunner(agent, Some(model), Some(version)))
       case _ => None
 
+  private def parseRunnerTriplets(line: String): List[TaskRunner] =
+    val normalized = line.trim.stripPrefix("-").stripPrefix("*").trim
+    val values =
+      normalized.split(":", 2).toList match
+        case _ :: tail :: Nil => tail
+        case _                => normalized
+
+    values.split(",").toList.flatMap(parseRunnerTriplet)
+
   private val DepLineKeywords =
-    List("depends on", "depend on", "dependency", "dependencies", "parent")
+    List("depends on", "depend on", "dependency", "dependencies")
 
   private val IssueNumRegex = """#(\d+)""".r
+  private val ParentRegex = """(?i)\bparent\b\s*:?\s*#(\d+)""".r
 
   private def getDependencies(body: String): List[Int] =
     body.linesIterator
@@ -108,23 +128,31 @@ object GitHub:
       .toList
       .distinct
 
+  def parentIds(issue: Issue): List[Int] =
+    issue.body.linesIterator
+      .flatMap(line => ParentRegex.findAllMatchIn(line).map(_.group(1).toInt))
+      .toList
+      .distinct
+
   def hasUnresolvedDependencies(
       issue: Issue,
       openIssueNumbers: Set[Int]
   ): Boolean =
     getDependencies(issue.body).exists(openIssueNumbers.contains)
 
-  def parentConclusion[F[_]](
+  def hasOpenChildren(issue: Issue, openIssues: List[Issue]): Boolean =
+    openIssues.exists(child => parentIds(child).contains(issue.number))
+
+  def dependencyConclusion[F[_]](
       root: os.Path,
       task: Issue,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Option[String]] =
-    val ParentRegex = """(?i)parent:?\s*#(\d+)""".r
-    ParentRegex.findFirstMatchIn(task.body).map(_.group(1).toInt) match
+    getDependencies(task.body).headOption match
       case None => F.pure(None)
-      case Some(parentId) =>
+      case Some(dependencyId) =>
         progress(
-          s"Found parent task #$parentId. Fetching conclusion comment..."
+          s"Found dependency task #$dependencyId. Fetching conclusion comment..."
         ) *>
           F.blocking {
             Try {
@@ -133,7 +161,7 @@ object GitHub:
                   "gh",
                   "issue",
                   "view",
-                  parentId.toString,
+                  dependencyId.toString,
                   "--json",
                   "comments"
                 )
@@ -150,7 +178,7 @@ object GitHub:
             case Right(comment) => F.pure(comment)
             case Left(error) =>
               progress(
-                s"Failed to read comments for parent task #$parentId: ${error.getMessage}"
+                s"Failed to read comments for dependency task #$dependencyId: ${error.getMessage}"
               ).as(None)
           }
 
@@ -184,6 +212,62 @@ $output
         tempFile.toString
       )
     yield ()
+
+  def commentConclusion[F[_]](
+      root: os.Path,
+      task: Issue,
+      runner: TaskRunner,
+      progress: String => F[Unit]
+  )(using Sync[F]): F[Unit] =
+    val body =
+      s"""Conclusion:
+Task #${task.number} completed successfully.
+
+Runner:
+${runner.display}
+"""
+    progress(s"Leaving conclusion comment on task #${task.number}...") *>
+      call(
+        root,
+        "gh",
+        "issue",
+        "comment",
+        task.number.toString,
+        "--body",
+        body
+      )
+
+  def checkParentsForCompletion[F[_]](
+      root: os.Path,
+      task: Issue,
+      progress: String => F[Unit]
+  )(using Sync[F]): F[Unit] =
+    parentIds(task).traverse_ { parentId =>
+      for
+        openIssues <- fetchIssues(root)
+        openChildren = openIssues.filter(child =>
+          parentIds(child).contains(parentId)
+        )
+        _ <-
+          if openChildren.isEmpty then
+            progress(
+              s"All child tasks for parent #$parentId are completed. Leaving completion-check comment..."
+            ) *>
+              call(
+                root,
+                "gh",
+                "issue",
+                "comment",
+                parentId.toString,
+                "--body",
+                s"All child tasks for parent #$parentId are completed. Parent task is ready for completion check."
+              )
+          else
+            progress(
+              s"Parent #$parentId still has ${openChildren.size} open child task(s)."
+            )
+      yield ()
+    }
 
   def pushCreateAndMergePr[F[_]](
       worktreePath: os.Path,
