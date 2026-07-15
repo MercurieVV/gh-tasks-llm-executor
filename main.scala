@@ -9,6 +9,7 @@ import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
 import scala.annotation.tailrec
+import scala.util.Try
 
 final case class AppInput(root: os.Path)
 
@@ -25,8 +26,13 @@ final case class TaskRunner(
     s"agent: $agent$modelPart$versionPart"
 
   def command(prompt: String): Seq[String] =
-    Seq(agent) ++ model.toList.flatMap(value => Seq("-m", value)) ++
-      Seq("-p", prompt)
+    agent match
+      case "claude" =>
+        Seq(agent) ++ model.toList.flatMap(value => Seq("--model", value)) ++
+          Seq("-p", prompt)
+      case _ =>
+        Seq(agent) ++ model.toList.flatMap(value => Seq("-m", value)) ++
+          Seq("-p", prompt)
 
 final case class RunnableTask(issue: Issue, runner: TaskRunner)
 
@@ -48,6 +54,16 @@ final case class TaskWithPrompt(
 )
 
 final case class TaskWithOutput(run: TaskRun, output: String)
+
+final case class NeedsUserInput(run: TaskRun, questions: String)
+
+final case class SplitTask(run: TaskRun)
+
+final case class TaskEvaluation(
+    body: String,
+    questions: Option[String],
+    execution: String
+)
 
 final case class ExistingBranch(run: TaskWithPrompt)
 
@@ -83,6 +99,8 @@ object Main extends IOApp:
 
   type -->[F[_], A, B] = Kleisli[F, A, B]
   type Flow[F[_]] = [A, B] =>> Kleisli[F, A, B]
+  private val evaluatorRunner: TaskRunner =
+    TaskRunner("claude", Some("opus"), None)
   def run(args: List[String]): IO[ExitCode] =
     val arrowstepArgs = removeRunnerArgs(args)
     AgentMain
@@ -115,7 +133,16 @@ object Main extends IOApp:
         candidates = issues
           .filterNot(GitHub.hasUnresolvedDependencies(_, openIssueNumbers))
           .filterNot(GitHub.hasOpenChildren(_, issues))
-          .flatMap(task => GitHub.taskRunner(task).map(RunnableTask(task, _)))
+          .filterNot(task =>
+            evaluationStatus(task.body).contains("needs-input") ||
+              executionStatus(task.body).contains("needs-input")
+          )
+          .map(task =>
+            RunnableTask(
+              task,
+              GitHub.taskRunner(task).getOrElse(evaluatorRunner)
+            )
+          )
         _ <- progress(
           s"Found ${candidates.size} runnable open tasks with preferred agent/model/version metadata."
         )
@@ -145,13 +172,30 @@ object Main extends IOApp:
       RunSummary(
         status = "no-task",
         message =
-          "No tasks found without unresolved dependencies and with preferred agent/model/version metadata in the task description.",
+          "No tasks found without unresolved dependencies or open child tasks.",
         task = None
       ).pure[F]
     }
 
   private def runSelectedTask[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
-    taskExecution[F].map { run =>
+    taskExecution[F]
+
+  private def taskExecution[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
+    announceTask[F] >>>
+      fetchDependencyConclusion[F] >>>
+      evaluateTask[F] >>>
+      choose[F, NeedsUserInput, Either[SplitTask, TaskWithPrompt], RunSummary](
+        needsUserInputSummary[F],
+        choose[F, SplitTask, TaskWithPrompt, RunSummary](
+          splitTaskSummary[F],
+          executePreparedTask[F]
+        )
+      )
+
+  private def executePreparedTask[
+      F[_]: Sync
+  ]: -->[F, TaskWithPrompt, RunSummary] =
+    runPreparedTask[F].map { run =>
       RunSummary(
         status = "completed",
         message = s"Task #${run.task.number} completed successfully.",
@@ -159,16 +203,55 @@ object Main extends IOApp:
       )
     }
 
-  private def taskExecution[F[_]: Sync]: -->[F, TaskRun, TaskRun] =
-    announceTask[F] >>>
-      fetchDependencyConclusion[F] >>>
-      markInProgress[F] >>>
+  private def runPreparedTask[
+      F[_]: Sync
+  ]: -->[F, TaskWithPrompt, TaskRun] =
+    markInProgress[F] >>>
       ensureTaskWorktree[F] >>>
       runExecutor[F] >>>
       commentOutput[F] >>>
       commitIfChanged[F] >>>
       cleanupTaskWorktree[F] >>>
       closeTask[F]
+
+  private def needsUserInputSummary[
+      F[_]: Sync
+  ]: -->[F, NeedsUserInput, RunSummary] =
+    Kleisli { input =>
+      GitHub
+        .commentNeedsUserInput(
+          input.run.context.root,
+          input.run.task,
+          input.questions,
+          progress
+        )
+        .as(
+          RunSummary(
+            status = "needs-input",
+            message =
+              s"Task #${input.run.task.number} needs user input before execution.",
+            task = Some(input.run.task)
+          )
+        )
+    }
+
+  private def splitTaskSummary[F[_]: Sync]: -->[F, SplitTask, RunSummary] =
+    Kleisli { split =>
+      GitHub
+        .commentSplitEvaluation(
+          split.run.context.root,
+          split.run.task,
+          progress
+        )
+        .as(
+          RunSummary(
+            status = "split",
+            message =
+              s"Task #${split.run.task.number} was evaluated for splitting and will not be implemented directly.",
+            task = Some(split.run.task)
+          )
+        )
+    }
 
   private def announceTask[F[_]: Sync]: -->[F, TaskRun, TaskRun] =
     Kleisli { run =>
@@ -199,6 +282,51 @@ object Main extends IOApp:
       GitHub
         .dependencyConclusion(run.context.root, run.task, progress)
         .map(dependencyConclusion => TaskWithPrompt(run, dependencyConclusion))
+    }
+
+  private def evaluateTask[
+      F[_]: Sync
+  ]: -->[F, TaskWithPrompt, Either[
+    NeedsUserInput,
+    Either[SplitTask, TaskWithPrompt]
+  ]] =
+    Kleisli { task =>
+      val run = task.run
+      for
+        _ <- progress(
+          s"Evaluating task #${run.task.number} with ${evaluatorRunner.display}..."
+        )
+        evaluation <- existingEvaluation(run.task).fold(
+          AgentExecutor[F]
+            .run(
+              evaluatorRunner,
+              evaluateTaskPrompt(run.task, task.parentConclusion),
+              run.context.root
+            )
+            .map(parseTaskEvaluation(_, run.task.body))
+        )(_.pure[F])
+        cleanBody = ensureEvaluationMetadata(
+          stripMarkdownFence(evaluation.body).trim,
+          evaluation
+        )
+        updatedTask = run.task.copy(body = cleanBody)
+        updatedRunner = GitHub.taskRunner(updatedTask).getOrElse(run.runner)
+        updatedRun = run.copy(task = updatedTask, runner = updatedRunner)
+        _ <-
+          if cleanBody.nonEmpty && cleanBody =!= run.task.body.trim then
+            GitHub.updateIssueBody(
+              run.context.root,
+              run.task.number,
+              cleanBody,
+              progress
+            )
+          else Sync[F].unit
+      yield evaluation.questions.filter(_.trim.nonEmpty) match
+        case Some(questions) => Left(NeedsUserInput(updatedRun, questions.trim))
+        case None if evaluation.execution === "split" =>
+          Right(Left(SplitTask(updatedRun)))
+        case None =>
+          Right(Right(task.copy(run = updatedRun)))
     }
 
   private def ensureTaskWorktree[
@@ -429,6 +557,168 @@ Workflow:
 7. If the task is already narrow enough, implement it in the current repository and make any necessary file changes.
 """
 
+  private def evaluateTaskPrompt(
+      task: Issue,
+      dependencyConclusion: Option[String]
+  ): String =
+    val dependencyConclusionStr = dependencyConclusion
+      .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
+      .getOrElse("")
+    val descriptionState =
+      if task.body.trim.isEmpty then "missing"
+      else if strongDescription(task.body) then "strong"
+      else "weak"
+
+    s"""Evaluate and prepare this GitHub task before implementation.
+
+Task ID: #${task.number}
+Title: ${task.title}
+Description state: $descriptionState
+
+Current Task Description:
+${task.body}
+$dependencyConclusionStr
+Return only JSON, with this shape:
+{
+  "status": "ready" | "split" | "questions",
+  "body": "updated GitHub issue body",
+  "questions": "questions for the user, only when status is questions"
+}
+
+Rules:
+- If the task is simple enough for implementation, write this metadata into the body:
+  Task metadata:
+  Evaluation: ready
+  Execution: implement
+- If the task should be split, create subtasks and write this metadata into the parent body:
+  Task metadata:
+  Evaluation: ready
+  Execution: split
+- If questions are needed, write this metadata into the body:
+  Task metadata:
+  Evaluation: needs-input
+  Execution: needs-input
+- Use Claude/Opus-level judgment to evaluate task clarity, scope, and split-readiness.
+- If the description is missing or weak, create a clear, structured, detailed GitHub issue body.
+- Keep the task narrow and implementation-oriented.
+- Preserve existing parent/dependency references.
+- Preserve existing preferred llms/models/versions metadata, or add it if missing.
+- Include Context, Goal, Scope, Acceptance Criteria, and Notes/Risks when useful.
+- Evaluate whether the task should be split before implementation. Record the evaluation in the body.
+- If splitting is needed, create GitHub subtasks before returning. Each subtask must have parent, dependencies if needed, acceptance criteria, narrow scope, and preferred llms/models/versions.
+- Prefer a target scope that a weaker model such as Haiku could implement without another split.
+- If important information is missing and cannot be inferred, set status to "questions" and put concrete user questions in "questions".
+- If questions are needed, still provide the best improved body possible in "body".
+- Do not implement code changes.
+"""
+
+  private def parseTaskEvaluation(
+      output: String,
+      fallbackBody: String
+  ): TaskEvaluation =
+    val stripped =
+      extractJsonObject(output).getOrElse(stripMarkdownFence(output)).trim
+    Try {
+      val json = ujson.read(stripped)
+      TaskEvaluation(
+        body = json.obj
+          .get("body")
+          .collect { case ujson.Str(value) => value }
+          .filter(_.trim.nonEmpty)
+          .getOrElse(fallbackBody),
+        questions = json.obj
+          .get("questions")
+          .collect { case ujson.Str(value) => value }
+          .filter(_.trim.nonEmpty),
+        execution = json.obj
+          .get("status")
+          .collect { case ujson.Str(value) => normalizeExecution(value) }
+          .getOrElse("needs-input")
+      )
+    }.getOrElse(TaskEvaluation(stripped, None, execution = "needs-input"))
+
+  private def extractJsonObject(value: String): Option[String] =
+    val jsonFence = "(?s)```json\\s*(\\{.*?\\})\\s*```".r
+    val anyFence = "(?s)```\\s*(\\{.*?\\})\\s*```".r
+    jsonFence
+      .findFirstMatchIn(value)
+      .orElse(anyFence.findFirstMatchIn(value))
+      .map(_.group(1))
+      .orElse {
+        val start = value.indexOf('{')
+        val end = value.lastIndexOf('}')
+        Option.when(start >= 0 && end > start)(value.substring(start, end + 1))
+      }
+
+  private def existingEvaluation(task: Issue): Option[TaskEvaluation] =
+    (evaluationStatus(task.body), executionStatus(task.body)) match
+      case (Some("ready"), Some("implement")) =>
+        Some(TaskEvaluation(task.body, None, execution = "implement"))
+      case (Some("ready"), Some("split")) =>
+        Some(TaskEvaluation(task.body, None, execution = "split"))
+      case (Some("needs-input"), _) | (_, Some("needs-input")) =>
+        TaskEvaluation(
+          task.body,
+          Some("Task is already marked as needing user input."),
+          execution = "needs-input"
+        ).some
+      case _ => None
+
+  private def evaluationStatus(body: String): Option[String] =
+    metadataValue(body, "evaluation")
+
+  private def executionStatus(body: String): Option[String] =
+    metadataValue(body, "execution").map(normalizeExecution)
+
+  private def metadataValue(body: String, key: String): Option[String] =
+    val prefix = s"$key:"
+    body.linesIterator
+      .map(_.trim.toLowerCase)
+      .collectFirst {
+        case line if line.startsWith(prefix) =>
+          line.stripPrefix(prefix).trim
+      }
+
+  private def ensureEvaluationMetadata(
+      body: String,
+      evaluation: TaskEvaluation
+  ): String =
+    if evaluationStatus(body).nonEmpty && executionStatus(body).nonEmpty then
+      body
+    else
+      val execution =
+        if evaluation.questions.exists(_.trim.nonEmpty) then "needs-input"
+        else normalizeExecution(evaluation.execution)
+      val evaluationStatus =
+        if execution === "needs-input" then "needs-input" else "ready"
+      s"""$body
+
+Task metadata:
+Evaluation: $evaluationStatus
+Execution: $execution
+"""
+
+  private def normalizeExecution(value: String): String =
+    value.trim.toLowerCase match
+      case "ready" | "implement" => "implement"
+      case "split"               => "split"
+      case _                     => "needs-input"
+
+  private def strongDescription(body: String): Boolean =
+    val lower = body.toLowerCase
+    val hasStructure =
+      List("context", "goal", "scope", "acceptance").count(lower.contains) >= 2
+    val hasEnoughDetail = body.trim.length >= 500
+    val hasRunnerMetadata = lower.contains("preferred llms/models/versions") ||
+      lower.contains("agent/model/version")
+    hasStructure && hasEnoughDetail && hasRunnerMetadata
+
+  private def stripMarkdownFence(value: String): String =
+    val trimmed = value.trim
+    if trimmed.startsWith("```") && trimmed.endsWith("```") then
+      trimmed.linesIterator.toList.drop(1).dropRight(1).mkString("\n")
+    else trimmed
+
   private def commitAndMerge[F[_]](
       root: os.Path,
       worktreePath: os.Path,
@@ -441,7 +731,13 @@ Workflow:
       hasRemote <- Git[F].hasRemote(root)
       _ <-
         if hasRemote then
-          GitHub.pushCreateAndMergePr(worktreePath, branchName, task, progress)
+          GitHub.pushCreateAndMergePr(
+            root,
+            worktreePath,
+            branchName,
+            task,
+            progress
+          )
         else Git[F].mergeLocally(root, worktreePath, branchName, progress)
     yield ()
 

@@ -104,12 +104,19 @@ object GitHub:
 
   private def parseRunnerTriplets(line: String): List[TaskRunner] =
     val normalized = line.trim.stripPrefix("-").stripPrefix("*").trim
-    val values =
-      normalized.split(":", 2).toList match
-        case _ :: tail :: Nil => tail
-        case _                => normalized
+    val lower = normalized.toLowerCase
+    val explicitRunnerLine =
+      lower.contains("preferred llms/models/versions") ||
+        lower.contains("agent/model/version")
 
-    values.split(",").toList.flatMap(parseRunnerTriplet)
+    if explicitRunnerLine then
+      val values =
+        normalized.split(":", 2).toList match
+          case _ :: tail :: Nil => tail
+          case _                => normalized
+
+      values.split(",").toList.flatMap(parseRunnerTriplet)
+    else Nil
 
   private val DepLineKeywords =
     List("depends on", "depend on", "dependency", "dependencies")
@@ -237,6 +244,68 @@ ${runner.display}
         body
       )
 
+  def updateIssueBody[F[_]](
+      root: os.Path,
+      taskId: Int,
+      body: String,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    for
+      _ <- progress(s"Updating task #$taskId description...")
+      tempFile <- F.blocking(os.temp(body))
+      _ <- call(
+        root,
+        "gh",
+        "issue",
+        "edit",
+        taskId.toString,
+        "--body-file",
+        tempFile.toString
+      )
+    yield ()
+
+  def commentNeedsUserInput[F[_]](
+      root: os.Path,
+      task: Issue,
+      questions: String,
+      progress: String => F[Unit]
+  )(using Sync[F]): F[Unit] =
+    val body =
+      s"""Questions before execution:
+$questions
+"""
+    progress(s"Leaving questions on task #${task.number}...") *>
+      call(
+        root,
+        "gh",
+        "issue",
+        "comment",
+        task.number.toString,
+        "--body",
+        body
+      )
+
+  def commentSplitEvaluation[F[_]](
+      root: os.Path,
+      task: Issue,
+      progress: String => F[Unit]
+  )(using Sync[F]): F[Unit] =
+    val body =
+      s"""Task #${task.number} was evaluated as needing split subtasks.
+
+This parent task will not be implemented directly. Run child tasks first; when all children are completed, the parent will be eligible for completion check.
+"""
+    progress(s"Leaving split-evaluation comment on task #${task.number}...") *>
+      call(
+        root,
+        "gh",
+        "issue",
+        "comment",
+        task.number.toString,
+        "--body",
+        body
+      )
+
   def checkParentsForCompletion[F[_]](
       root: os.Path,
       task: Issue,
@@ -270,6 +339,7 @@ ${runner.display}
     }
 
   def pushCreateAndMergePr[F[_]](
+      root: os.Path,
       worktreePath: os.Path,
       branchName: String,
       task: Issue,
@@ -292,7 +362,7 @@ ${runner.display}
         branchName
       )
       _ <- progress("Merging Pull Request...")
-      _ <- call(worktreePath, "gh", "pr", "merge", "--merge", "--delete-branch")
+      _ <- call(root, "gh", "pr", "merge", branchName, "--merge")
     yield ()
 
   def closeIssue[F[_]: Sync](root: os.Path, taskId: Int): F[Unit] =
