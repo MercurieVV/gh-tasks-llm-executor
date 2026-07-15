@@ -11,9 +11,13 @@ import cats.syntax.all.*
 import scala.annotation.tailrec
 import scala.util.Try
 
-final case class AppInput(root: os.Path)
+final case class AppInput(root: os.Path, taskNumber: Option[Int])
 
-final case class RunContext(root: os.Path, agentInventory: AgentInventory)
+final case class RunContext(
+    root: os.Path,
+    agentInventory: AgentInventory,
+    taskNumber: Option[Int]
+)
 
 final case class TaskRunner(
     agent: String,
@@ -117,9 +121,12 @@ object Main extends IOApp:
   private val evaluatorRunner: TaskRunner =
     TaskRunner("claude", Some("opus"), None, None)
   def run(args: List[String]): IO[ExitCode] =
-    val arrowstepArgs = removeRunnerArgs(args)
+    val taskNumber = parseTaskNumber(args)
+    val arrowstepArgs = removeScriptArgs(args)
     AgentMain
-      .run[IO](arrowstepArgs, os.pwd)(_ => program(AppInput(os.pwd)))
+      .run[IO](arrowstepArgs, os.pwd)(_ =>
+        program(AppInput(os.pwd, taskNumber))
+      )
       .flatMap { outcome =>
         IO.print(outcome.stdout) *>
           IO.pure(ExitCode(outcome.exitCode))
@@ -137,7 +144,9 @@ object Main extends IOApp:
 
   private def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =
     Kleisli { input =>
-      AgentInventory.load[F](input.root).map(RunContext(input.root, _))
+      AgentInventory
+        .load[F](input.root)
+        .map(RunContext(input.root, _, input.taskNumber))
     }
 
   private def selectTask[F[_]: Sync]: -->[F, RunContext, TaskSelection] =
@@ -147,6 +156,7 @@ object Main extends IOApp:
         issues <- GitHub.fetchIssues(context.root)
         openIssueNumbers = issues.map(_.number).toSet
         candidates = issues
+          .filter(task => context.taskNumber.forall(_ === task.number))
           .filterNot(GitHub.hasUnresolvedDependencies(_, openIssueNumbers))
           .filterNot(GitHub.hasOpenChildren(_, issues))
           .filterNot(task =>
@@ -162,7 +172,11 @@ object Main extends IOApp:
             )
           )
         _ <- progress(
-          s"Found ${candidates.size} runnable open tasks with preferred runner metadata."
+          context.taskNumber.fold(
+            s"Found ${candidates.size} runnable open tasks with preferred runner metadata."
+          )(number =>
+            s"Found ${candidates.size} runnable open tasks matching #$number."
+          )
         )
         nextTask = candidates.headOption
       yield TaskSelection(context, nextTask)
@@ -188,10 +202,14 @@ object Main extends IOApp:
   private def noTaskSummary[F[_]: Sync]: -->[F, NoTask, RunSummary] =
     Kleisli { noTask =>
       val context = noTask.context
+      val message = context.taskNumber.fold(
+        "No tasks found without unresolved dependencies or open child tasks."
+      )(number =>
+        s"No runnable open task found for #$number. It may be closed, blocked by dependencies or open child tasks, or marked needs-input."
+      )
       RunSummary(
         status = "no-task",
-        message =
-          "No tasks found without unresolved dependencies or open child tasks.",
+        message = message,
         task = None
       ).pure[F]
     }
@@ -640,10 +658,10 @@ object Main extends IOApp:
   private def summarize(value: Any): String =
     value match
       case null => "null"
-      case AppInput(root) =>
-        s"AppInput(root=$root)"
-      case RunContext(root, agentInventory) =>
-        s"RunContext(root=$root,availableAgents=${agentInventory.availableTools.size})"
+      case AppInput(root, taskNumber) =>
+        s"AppInput(root=$root,task=${taskNumber.fold("auto")(_.toString)})"
+      case RunContext(root, agentInventory, taskNumber) =>
+        s"RunContext(root=$root,task=${taskNumber.fold("auto")(_.toString)},availableAgents=${agentInventory.availableTools.size})"
       case Issue(number, title, body, state) =>
         s"Issue(#$number,title=${quote(title)},state=$state,bodyChars=${body.length})"
       case TaskRunner(agent, model, effort, version) =>
@@ -1086,7 +1104,22 @@ Execution: $execution
   private def progress[F[_]: Sync](message: String): F[Unit] =
     TaskLogger.script(message)
 
-  private def removeRunnerArgs(args: List[String]): List[String] =
+  private def parseTaskNumber(args: List[String]): Option[Int] =
+    args
+      .collectFirst {
+        case value if value.startsWith("--task=") =>
+          value.stripPrefix("--task=")
+        case value if value.startsWith("--issue=") =>
+          value.stripPrefix("--issue=")
+      }
+      .orElse {
+        args.sliding(2).collectFirst { case List("--task" | "--issue", value) =>
+          value
+        }
+      }
+      .flatMap(_.trim.stripPrefix("#").toIntOption)
+
+  private def removeScriptArgs(args: List[String]): List[String] =
     @tailrec
     def loop(
         remaining: List[String],
@@ -1094,12 +1127,17 @@ Execution: $execution
     ): List[String] =
       remaining match
         case Nil => clean.reverse
-        case ("--executor" | "--llm" | "--agent" | "--model") :: _ :: tail =>
+        case ("--executor" | "--llm" | "--agent" | "--model" | "--task" |
+            "--issue") :: _ :: tail =>
           loop(tail, clean)
         case flag :: Nil
             if flag === "--executor" || flag === "--llm" ||
-              flag === "--agent" || flag === "--model" =>
+              flag === "--agent" || flag === "--model" ||
+              flag === "--task" || flag === "--issue" =>
           loop(Nil, clean)
+        case flag :: tail
+            if flag.startsWith("--task=") || flag.startsWith("--issue=") =>
+          loop(tail, clean)
         case head :: tail =>
           loop(tail, head :: clean)
 
