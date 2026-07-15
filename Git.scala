@@ -174,14 +174,20 @@ final class Git[F[_]](using F: Sync[F]):
       ).find(path => os.exists(path) && os.isFile(path))
     }
 
-  def commitAll(worktreePath: os.Path, task: Issue): F[Unit] =
+  def commitAll(
+      worktreePath: os.Path,
+      task: Issue,
+      commitTitle: Option[String] = None
+  ): F[Unit] =
     call(worktreePath, "git", "add", "-A") *>
       call(
         worktreePath,
         "git",
         "commit",
         "-m",
-        s"Implement task #${task.number}: ${task.title}"
+        commitTitle
+          .filter(_.trim.nonEmpty)
+          .getOrElse(s"Implement task #${task.number}: ${task.title}")
       )
 
   def hasRemote(root: os.Path): F[Boolean] =

@@ -4,14 +4,15 @@ import cats.syntax.all.*
 import java.io.BufferedReader
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import scala.collection.mutable.StringBuilder
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 final class AgentExecutor[F[_]](using F: Sync[F]):
 
-  private val InactivityTimeoutMillis = 5.minutes.toMillis
   private val TotalTimeoutMillis = 45.minutes.toMillis
   private val PollMillis = 5.seconds.toMillis
 
@@ -49,19 +50,46 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     val started = System.currentTimeMillis()
     val lastActivity = AtomicLong(started)
     val output = StringBuilder()
-    val process = ProcessBuilder(runner.command(prompt)*)
+    val command = runner.command(prompt)
+    TaskLogger.unsafeTrace(
+      s"agent command cwd=$cwd args=${commandForLog(command, prompt)} promptChars=${prompt.length}"
+    )
+    val process = ProcessBuilder(command*)
       .directory(cwd.toIO)
       .start()
+    process.getOutputStream.close()
+    val runLogDir =
+      os.RelPath(s"agent-${process.pid()}-${fileSafe(runner.agent)}")
+    TaskLogger.unsafeWriteArtifact(
+      runLogDir / "prompt.txt",
+      prompt + System.lineSeparator()
+    )
+    TaskLogger.unsafeTrace(
+      s"agent process started pid=${process.pid()} alive=${process.isAlive} logDir=$runLogDir"
+    )
     val stdout =
-      streamReader("stdout", process.getInputStream, output, lastActivity)
+      streamReader(
+        "stdout",
+        process.getInputStream,
+        output,
+        lastActivity,
+        runLogDir / "stdout.log"
+      )
     val stderr =
-      streamReader("stderr", process.getErrorStream, output, lastActivity)
+      streamReader(
+        "stderr",
+        process.getErrorStream,
+        output,
+        lastActivity,
+        runLogDir / "stderr.log"
+      )
     stdout.start()
     stderr.start()
 
     var lastStatus = worktreeStatus(cwd)
     var finished = false
     var timedOut = Option.empty[String]
+    var lastDescendantLog = 0L
 
     while !finished && timedOut.isEmpty do
       finished = process.waitFor(PollMillis, TimeUnit.MILLISECONDS)
@@ -77,13 +105,17 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       val idleFor = now - lastActivity.get()
       val totalFor = now - started
       TaskLogger.unsafeTrace(
-        s"agent monitor cwd=$cwd running=${!finished} idleMs=$idleFor totalMs=$totalFor"
+        s"agent monitor cwd=$cwd ${processState(process)} running=${!finished} idleMs=$idleFor totalMs=$totalFor"
       )
-      if idleFor >= InactivityTimeoutMillis then
-        timedOut = Some(
-          s"Agent had no observable output or worktree changes for ${InactivityTimeoutMillis / 1000}s."
+      if now - lastDescendantLog >= 30.seconds.toMillis then
+        lastDescendantLog = now
+        val descendants = processDescendants(process)
+        TaskLogger.unsafeTrace(s"agent descendants:\n$descendants")
+        TaskLogger.unsafeAppendArtifact(
+          runLogDir / "descendants.log",
+          s"${Instant.now()} idleMs=$idleFor totalMs=$totalFor\n$descendants\n\n"
         )
-      else if totalFor >= TotalTimeoutMillis then
+      if totalFor >= TotalTimeoutMillis then
         timedOut = Some(
           s"Agent exceeded total timeout of ${TotalTimeoutMillis / 1000}s."
         )
@@ -103,7 +135,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       name: String,
       stream: InputStream,
       output: StringBuilder,
-      lastActivity: AtomicLong
+      lastActivity: AtomicLong,
+      artifactPath: os.RelPath
   ): Thread =
     Thread.ofPlatform().name(s"agent-$name-reader").unstarted { () =>
       val reader = BufferedReader(InputStreamReader(stream))
@@ -115,6 +148,10 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
           }
           lastActivity.set(System.currentTimeMillis())
           TaskLogger.unsafeLlm(s"agent $name: $line")
+          TaskLogger.unsafeAppendArtifact(
+            artifactPath,
+            s"${Instant.now()} $line${System.lineSeparator()}"
+          )
           line = reader.readLine()
       finally reader.close()
     }
@@ -129,6 +166,47 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       }
       .getOrElse("")
 
+  private def commandForLog(command: Seq[String], prompt: String): String =
+    command.zipWithIndex
+      .map { case (part, index) =>
+        val value =
+          if part === prompt || index > 0 && command(index - 1) === "-p" then
+            s"<prompt:${part.length} chars>"
+          else quote(part)
+        value
+      }
+      .mkString(" ")
+
+  private def quote(value: String): String =
+    "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+  private def processState(process: Process): String =
+    val handle = process.toHandle
+    val info = handle.info()
+    val cpuMs = info
+      .totalCpuDuration()
+      .map(_.toMillis.toString)
+      .orElse("unknown")
+    val command = info.command().orElse("unknown")
+    val descendants = handle.descendants().count()
+    s"pid=${handle.pid()} alive=${handle.isAlive} cpuMs=$cpuMs descendants=$descendants command=${quote(command)}"
+
+  private def processDescendants(process: Process): String =
+    val lines = process.toHandle
+      .descendants()
+      .iterator()
+      .asScala
+      .map { handle =>
+        val info = handle.info()
+        val command = info.command().orElse("unknown")
+        val args = info.arguments().map(_.toList).orElse(Nil).mkString(" ")
+        val cpuMs =
+          info.totalCpuDuration().map(_.toMillis.toString).orElse("unknown")
+        s"pid=${handle.pid()} alive=${handle.isAlive} cpuMs=$cpuMs command=${quote(command)} args=${quote(args)}"
+      }
+      .toList
+    if lines.isEmpty then "(none)" else lines.mkString(System.lineSeparator())
+
   private def stopProcessTree(process: Process): Unit =
     val handle = process.toHandle
     handle.descendants().forEach(_.destroy())
@@ -136,6 +214,14 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     if !process.waitFor(5, TimeUnit.SECONDS) then
       handle.descendants().forEach(_.destroyForcibly())
       process.destroyForcibly()
+
+  private def fileSafe(value: String): String =
+    value.map {
+      case char if char.isLetterOrDigit => char
+      case '-'                          => '-'
+      case '_'                          => '_'
+      case _                            => '-'
+    }
 
 object AgentExecutor:
   def apply[F[_]: Sync]: AgentExecutor[F] = new AgentExecutor[F]

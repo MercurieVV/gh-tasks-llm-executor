@@ -13,23 +13,32 @@ import scala.util.Try
 
 final case class AppInput(root: os.Path)
 
-final case class RunContext(root: os.Path)
+final case class RunContext(root: os.Path, agentInventory: AgentInventory)
 
 final case class TaskRunner(
     agent: String,
     model: Option[String],
+    effort: Option[String],
     version: Option[String]
 ):
   def display: String =
     val modelPart = model.fold("")(value => s", model: $value")
+    val effortPart = effort.fold("")(value => s", effort: $value")
     val versionPart = version.fold("")(value => s", version: $value")
-    s"agent: $agent$modelPart$versionPart"
+    s"agent: $agent$modelPart$effortPart$versionPart"
 
   def command(prompt: String): Seq[String] =
     agent match
       case "claude" =>
         Seq(agent) ++ model.toList.flatMap(value => Seq("--model", value)) ++
           Seq("-p", prompt)
+      case "codex" =>
+        Seq(agent, "exec") ++
+          model.toList.flatMap(value => Seq("--model", value)) ++
+          effort.toList.flatMap(value =>
+            Seq("--config", s"model_reasoning_effort=$value")
+          ) ++
+          Seq(prompt)
       case _ =>
         Seq(agent) ++ model.toList.flatMap(value => Seq("-m", value)) ++
           Seq("-p", prompt)
@@ -74,6 +83,11 @@ final case class ChangedTask(run: TaskWithOutput)
 
 final case class UnchangedTask(run: TaskWithOutput)
 
+final case class AgentFinalization(
+    commitTitle: Option[String],
+    pullRequestBody: Option[String]
+)
+
 final case class RunSummary(
     status: String,
     message: String,
@@ -101,7 +115,7 @@ object Main extends IOApp:
   type -->[F[_], A, B] = Kleisli[F, A, B]
   type Flow[F[_]] = [A, B] =>> Kleisli[F, A, B]
   private val evaluatorRunner: TaskRunner =
-    TaskRunner("claude", Some("opus"), None)
+    TaskRunner("claude", Some("opus"), None, None)
   def run(args: List[String]): IO[ExitCode] =
     val arrowstepArgs = removeRunnerArgs(args)
     AgentMain
@@ -122,7 +136,9 @@ object Main extends IOApp:
       traced("executeTask", executeTask[F])
 
   private def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =
-    Kleisli.fromFunction(input => RunContext(input.root))
+    Kleisli { input =>
+      AgentInventory.load[F](input.root).map(RunContext(input.root, _))
+    }
 
   private def selectTask[F[_]: Sync]: -->[F, RunContext, TaskSelection] =
     Kleisli { (context: RunContext) =>
@@ -140,11 +156,13 @@ object Main extends IOApp:
           .map(task =>
             RunnableTask(
               task,
-              GitHub.taskRunner(task).getOrElse(evaluatorRunner)
+              context.agentInventory
+                .selectRunner(GitHub.taskRunners(task))
+                .getOrElse(evaluatorRunner)
             )
           )
         _ <- progress(
-          s"Found ${candidates.size} runnable open tasks with preferred agent/model/version metadata."
+          s"Found ${candidates.size} runnable open tasks with preferred runner metadata."
         )
         nextTask = candidates.headOption
       yield TaskSelection(context, nextTask)
@@ -213,6 +231,7 @@ object Main extends IOApp:
       traced("runProjectValidation", runProjectValidation[F]) >>>
       traced("commentOutput", commentOutput[F]) >>>
       traced("commitIfChanged", commitIfChanged[F]) >>>
+      traced("verifyReplayCi", verifyReplayCi[F]) >>>
       traced("cleanupTaskWorktree", cleanupTaskWorktree[F]) >>>
       traced("closeTask", closeTask[F])
 
@@ -311,7 +330,11 @@ object Main extends IOApp:
           AgentExecutor[F]
             .run(
               evaluatorRunner,
-              evaluateTaskPrompt(run.task, task.parentConclusion),
+              evaluateTaskPrompt(
+                run.task,
+                task.parentConclusion,
+                run.context.agentInventory
+              ),
               run.context.root
             )
             .map(parseTaskEvaluation(_, run.task.body))
@@ -321,7 +344,9 @@ object Main extends IOApp:
           evaluation
         )
         updatedTask = run.task.copy(body = cleanBody)
-        updatedRunner = GitHub.taskRunner(updatedTask).getOrElse(run.runner)
+        updatedRunner = run.context.agentInventory
+          .selectRunner(GitHub.taskRunners(updatedTask))
+          .getOrElse(run.runner)
         updatedRun = run.copy(task = updatedTask, runner = updatedRunner)
         _ <-
           if cleanBody.nonEmpty && cleanBody =!= run.task.body.trim then
@@ -413,21 +438,41 @@ object Main extends IOApp:
 
   private def runExecutor[F[_]: Sync]: -->[F, TaskWithPrompt, TaskWithOutput] =
     Kleisli { task =>
-      val run = task.run
-      val prompt =
-        taskPrompt(
-          run.task,
-          run.runner,
-          task.parentConclusion,
-          task.replayContext
-        )
-      for
-        _ <- progress(
-          s"Running task #${run.task.number} with ${run.runner.display}..."
-        )
-        output <- AgentExecutor[F].run(run.runner, prompt, run.worktreePath)
-      yield TaskWithOutput(run, output)
+      runTaskWithRunner[F](task).handleErrorWith { error =>
+        task.run.context.agentInventory
+          .nextStrongerImplementor(task.run.runner) match
+          case Some(fallbackRunner) =>
+            val fallbackTask =
+              task.copy(run = task.run.copy(runner = fallbackRunner))
+            progress(
+              s"Runner ${task.run.runner.display} failed after retries: ${error.getMessage}. Retrying task #${task.run.task.number} with stronger fallback ${fallbackRunner.display}..."
+            ) *>
+              runTaskWithRunner[F](fallbackTask)
+          case None =>
+            progress(
+              s"Runner ${task.run.runner.display} failed after retries and no stronger fallback runner is available."
+            ) *>
+              Sync[F].raiseError(error)
+      }
     }
+
+  private def runTaskWithRunner[F[_]: Sync](
+      task: TaskWithPrompt
+  ): F[TaskWithOutput] =
+    val run = task.run
+    val prompt =
+      taskPrompt(
+        run.task,
+        run.runner,
+        task.parentConclusion,
+        task.replayContext
+      )
+    for
+      _ <- progress(
+        s"Running task #${run.task.number} with ${run.runner.display}..."
+      )
+      output <- AgentExecutor[F].run(run.runner, prompt, run.worktreePath)
+    yield TaskWithOutput(run, output)
 
   private def commentOutput[F[_]: Sync]
       : -->[F, TaskWithOutput, TaskWithOutput] =
@@ -467,8 +512,13 @@ object Main extends IOApp:
           task.run.worktreePath,
           task.run.branchName
         )
+        hasOpenPullRequest <- GitHub.hasOpenPullRequestForBranch(
+          task.run.worktreePath,
+          task.run.branchName
+        )
       yield
-        if filesChanged || hasPublishableCommits then Left(ChangedTask(task))
+        if filesChanged || hasPublishableCommits || hasOpenPullRequest then
+          Left(ChangedTask(task))
         else Right(UnchangedTask(task))
     }
 
@@ -481,7 +531,8 @@ object Main extends IOApp:
         run.context.root,
         run.worktreePath,
         run.branchName,
-        run.task
+        run.task,
+        extractAgentFinalization(changed.run.output)
       ).as(changed.run)
     }
 
@@ -490,6 +541,28 @@ object Main extends IOApp:
   ]: -->[F, UnchangedTask, TaskWithOutput] =
     Kleisli { unchanged =>
       progress("No files changed.").as(unchanged.run)
+    }
+
+  private def verifyReplayCi[F[_]: Sync]
+      : -->[F, TaskWithOutput, TaskWithOutput] =
+    Kleisli { task =>
+      GitHub
+        .verifyTaskReplayCi(
+          task.run.context.root,
+          task.run.task,
+          task.run.branchName,
+          progress
+        )
+        .handleErrorWith { error =>
+          GitHub
+            .commentTaskFailure(
+              task.run.context.root,
+              task.run.task,
+              error.getMessage,
+              progress
+            ) *> Sync[F].raiseError(error)
+        }
+        .as(task)
     }
 
   private def cleanupTaskWorktree[
@@ -569,12 +642,13 @@ object Main extends IOApp:
       case null => "null"
       case AppInput(root) =>
         s"AppInput(root=$root)"
-      case RunContext(root) =>
-        s"RunContext(root=$root)"
+      case RunContext(root, agentInventory) =>
+        s"RunContext(root=$root,availableAgents=${agentInventory.availableTools.size})"
       case Issue(number, title, body, state) =>
         s"Issue(#$number,title=${quote(title)},state=$state,bodyChars=${body.length})"
-      case TaskRunner(agent, model, version) =>
-        s"TaskRunner(agent=$agent,model=${model.getOrElse("")},version=${version.getOrElse("")})"
+      case TaskRunner(agent, model, effort, version) =>
+        s"TaskRunner(agent=$agent,model=${model.getOrElse("")},effort=${effort
+            .getOrElse("")},version=${version.getOrElse("")})"
       case RunnableTask(issue, runner) =>
         s"RunnableTask(issue=#${issue.number},runner=${runner.display})"
       case TaskSelection(_, task) =>
@@ -639,7 +713,7 @@ object Main extends IOApp:
       context = context,
       task = task,
       runner = runner,
-      worktreePath = context.root / os.up / s"$taskName-$taskId",
+      worktreePath = context.root / ".worktrees" / s"$taskName-$taskId",
       branchName = s"task-$taskId"
     )
 
@@ -679,6 +753,7 @@ Replay rules:
 Title: ${task.title}
 Agent: ${runner.agent}
 Model: ${runner.model.getOrElse("")}
+Effort: ${runner.effort.getOrElse("")}
 Version: ${runner.version.getOrElse("")}
 
 Task Description:
@@ -692,19 +767,36 @@ Workflow:
    - parent: #${task.number}
    - dependencies on earlier subtasks when order matters
    - concrete acceptance criteria
-   - preferred llms/models/versions as a ranked list
+   - preferred llms/models/efforts/versions as a ranked list
 4. Prefer splitting until each subtask is small enough that a weaker model such as Haiku could implement it without needing another split.
 5. Use this exact preferred-runner metadata format in every subtask description:
-   preferred llms/models/versions:
-   - claude/haiku/<version>
-   - codex/gpt-5/<version>
+   preferred llms/models/efforts/versions:
+   - claude/haiku//<version>
+   - codex/gpt-5/high/<version>
 6. If you split the task, do not implement the parent task. Comment on the parent with the created subtask numbers and the reason for the split.
 7. If the task is already narrow enough, implement it in the current repository and make any necessary file changes.
+
+Agent boundary:
+- Do not run tree2m.
+- Do not run git worktree commands.
+- Do not run git commit.
+- Do not run git push.
+- Do not create, update, merge, or close pull requests.
+- The executor script owns worktree setup, commit, push, pull request creation/merge, and cleanup after you return.
+- You may run local inspection, edit, format, compile, and test commands needed to complete and verify the implementation.
+- If you need a commit or pull request message, include it in your final answer instead of running the command.
+
+Final answer contract:
+- Summarize the implementation.
+- List validation commands you ran and whether they passed.
+- Include a proposed commit title.
+- Include a proposed pull request body when useful.
 """
 
   private def evaluateTaskPrompt(
       task: Issue,
-      dependencyConclusion: Option[String]
+      dependencyConclusion: Option[String],
+      agentInventory: AgentInventory
   ): String =
     val dependencyConclusionStr = dependencyConclusion
       .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
@@ -719,6 +811,9 @@ Workflow:
 Task ID: #${task.number}
 Title: ${task.title}
 Description state: $descriptionState
+
+Available local implementor tools:
+${agentInventory.promptBlock}
 
 Current Task Description:
 ${task.body}
@@ -747,10 +842,14 @@ Rules:
 - If the description is missing or weak, create a clear, structured, detailed GitHub issue body.
 - Keep the task narrow and implementation-oriented.
 - Preserve existing parent/dependency references.
-- Preserve existing preferred llms/models/versions metadata, or add it if missing.
+- Preserve existing preferred runner metadata, or add it if missing.
+- Prefer the new metadata key "preferred llms/models/efforts/versions" when adding or replacing runner metadata.
+- Choose implementor runners only from the available local implementor tools above.
+- Match the chosen runner to the job type, scope, and risk: small mechanical tasks can use cheaper/weaker tools, while broad Scala refactors, failing CI repair, and ambiguous debugging should use stronger tools.
+- Write preferred runners as a ranked list. Each item must be exactly agent/model/effort/version; leave effort or version empty when the tool has no value, for example claude/sonnet//1.0.0.
 - Include Context, Goal, Scope, Acceptance Criteria, and Notes/Risks when useful.
 - Evaluate whether the task should be split before implementation. Record the evaluation in the body.
-- If splitting is needed, create GitHub subtasks before returning. Each subtask must have parent, dependencies if needed, acceptance criteria, narrow scope, and preferred llms/models/versions.
+- If splitting is needed, create GitHub subtasks before returning. Each subtask must have parent, dependencies if needed, acceptance criteria, narrow scope, and preferred llms/models/efforts/versions.
 - Prefer a target scope that a weaker model such as Haiku could implement without another split.
 - If important information is missing and cannot be inferred, set status to "questions" and put concrete user questions in "questions".
 - If questions are needed, still provide the best improved body possible in "body".
@@ -797,9 +896,9 @@ Rules:
 
   private def existingEvaluation(task: Issue): Option[TaskEvaluation] =
     (evaluationStatus(task.body), executionStatus(task.body)) match
-      case (Some("ready"), Some("implement")) =>
+      case (Some("ready"), Some("implement")) if hasRunnerMetadata(task.body) =>
         Some(TaskEvaluation(task.body, None, execution = "implement"))
-      case (Some("ready"), Some("split")) =>
+      case (Some("ready"), Some("split")) if hasRunnerMetadata(task.body) =>
         Some(TaskEvaluation(task.body, None, execution = "split"))
       case (Some("needs-input"), _) | (_, Some("needs-input")) =>
         TaskEvaluation(
@@ -854,9 +953,14 @@ Execution: $execution
     val hasStructure =
       List("context", "goal", "scope", "acceptance").count(lower.contains) >= 2
     val hasEnoughDetail = body.trim.length >= 500
-    val hasRunnerMetadata = lower.contains("preferred llms/models/versions") ||
-      lower.contains("agent/model/version")
-    hasStructure && hasEnoughDetail && hasRunnerMetadata
+    hasStructure && hasEnoughDetail && hasRunnerMetadata(body)
+
+  private def hasRunnerMetadata(body: String): Boolean =
+    val lower = body.toLowerCase
+    lower.contains("preferred llms/models/versions") ||
+    lower.contains("preferred llms/models/efforts/versions") ||
+    lower.contains("agent/model/version") ||
+    lower.contains("agent/model/effort/version")
 
   private def stripMarkdownFence(value: String): String =
     val trimmed = value.trim
@@ -864,15 +968,60 @@ Execution: $execution
       trimmed.linesIterator.toList.drop(1).dropRight(1).mkString("\n")
     else trimmed
 
+  private def extractAgentFinalization(output: String): AgentFinalization =
+    AgentFinalization(
+      commitTitle = extractPrefixedLine(output, "Proposed commit title"),
+      pullRequestBody = extractSection(output, "Proposed pull request body")
+    )
+
+  private def extractPrefixedLine(
+      output: String,
+      label: String
+  ): Option[String] =
+    val prefix = s"$label:"
+    output.linesIterator
+      .map(_.trim)
+      .collectFirst {
+        case line if line.toLowerCase.startsWith(prefix.toLowerCase) =>
+          line.drop(prefix.length).trim
+      }
+      .filter(_.nonEmpty)
+
+  private def extractSection(output: String, label: String): Option[String] =
+    val prefix = s"$label:"
+    val lines = output.linesIterator.toList
+    val start =
+      lines.indexWhere(_.trim.toLowerCase.startsWith(prefix.toLowerCase))
+    Option
+      .when(start >= 0) {
+        val firstLine = lines(start).trim.drop(prefix.length).trim
+        val following = lines.drop(start + 1)
+        val body =
+          if firstLine.nonEmpty then firstLine
+          else
+            following
+              .takeWhile(line => !isFinalizationLabel(line))
+              .mkString("\n")
+              .trim
+        body
+      }
+      .filter(_.nonEmpty)
+
+  private def isFinalizationLabel(line: String): Boolean =
+    val normalized = line.trim.toLowerCase
+    normalized.startsWith("proposed commit title:") ||
+    normalized.startsWith("proposed pull request body:")
+
   private def commitAndMerge[F[_]](
       root: os.Path,
       worktreePath: os.Path,
       branchName: String,
-      task: Issue
+      task: Issue,
+      finalization: AgentFinalization
   )(using Sync[F]): F[Unit] =
     for
       _ <- progress("Files changed. Committing and merging changes...")
-      _ <- Git[F].commitAll(worktreePath, task)
+      _ <- Git[F].commitAll(worktreePath, task, finalization.commitTitle)
       hasRemote <- Git[F].hasRemote(root)
       _ <-
         if hasRemote then
@@ -881,6 +1030,8 @@ Execution: $execution
             worktreePath,
             branchName,
             task,
+            finalization.commitTitle,
+            finalization.pullRequestBody,
             progress
           )
         else Git[F].mergeLocally(root, worktreePath, branchName, progress)
@@ -890,21 +1041,30 @@ Execution: $execution
       root: os.Path,
       worktreePath: os.Path,
       branchName: String,
-      task: Issue
+      task: Issue,
+      finalization: AgentFinalization
   )(using Sync[F]): F[Unit] =
     for
       filesChanged <- Git[F].filesChanged(worktreePath)
       _ <-
         if filesChanged then
-          commitAndMerge(root, worktreePath, branchName, task)
-        else publishExistingCommits(root, worktreePath, branchName, task)
+          commitAndMerge(root, worktreePath, branchName, task, finalization)
+        else
+          publishExistingCommits(
+            root,
+            worktreePath,
+            branchName,
+            task,
+            finalization
+          )
     yield ()
 
   private def publishExistingCommits[F[_]](
       root: os.Path,
       worktreePath: os.Path,
       branchName: String,
-      task: Issue
+      task: Issue,
+      finalization: AgentFinalization
   )(using Sync[F]): F[Unit] =
     for
       _ <- progress("No file changes, publishing existing local commits...")
@@ -916,6 +1076,8 @@ Execution: $execution
             worktreePath,
             branchName,
             task,
+            finalization.commitTitle,
+            finalization.pullRequestBody,
             progress
           )
         else Git[F].mergeLocally(root, worktreePath, branchName, progress)

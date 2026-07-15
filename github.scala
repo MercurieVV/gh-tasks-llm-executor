@@ -15,6 +15,7 @@ object GitHub:
 
   private val PullRequestCheckTimeoutMillis = 30.minutes.toMillis
   private val PullRequestCheckPollMillis = 30.seconds.toMillis
+  private val PullRequestNoChecksGraceMillis = 3.minutes.toMillis
 
   def fetchIssues[F[_]: Sync](root: os.Path): F[List[Issue]] =
     Sync[F].blocking {
@@ -65,34 +66,39 @@ object GitHub:
     taskRunners(issue).headOption
 
   def taskRunners(issue: Issue): List[TaskRunner] =
-    val fields = issue.body.linesIterator
+    val lines = issue.body.linesIterator.toList
+    val fields = lines
       .flatMap(parseRunnerField)
       .toMap
 
-    val listed = issue.body.linesIterator
-      .flatMap(parseRunnerTriplets)
-      .toList
+    val listed = parseRunnerList(lines)
 
     val single =
-      fields.get("agent/model/version").flatMap(parseRunnerTriplet).orElse {
-        for
-          agent <- fields
-            .get("agent")
-            .orElse(fields.get("executor"))
-            .orElse(fields.get("llm"))
-          model <- fields.get("model")
-          version <- fields.get("version").orElse(fields.get("model version"))
-        yield TaskRunner(
-          agent = agent,
-          model = Some(model),
-          version = Some(version)
-        )
-      }
+      fields
+        .get("agent/model/effort/version")
+        .orElse(fields.get("agent/model/version"))
+        .flatMap(parseRunnerTriplet)
+        .orElse {
+          for
+            agent <- fields
+              .get("agent")
+              .orElse(fields.get("executor"))
+              .orElse(fields.get("llm"))
+            model <- fields.get("model")
+            effort = fields.get("effort")
+            version <- fields.get("version").orElse(fields.get("model version"))
+          yield TaskRunner(
+            agent = agent,
+            model = Some(model),
+            effort = effort,
+            version = Some(version)
+          )
+        }
 
     (listed ++ single.toList).distinct
 
   private val RunnerFieldRegex =
-    """(?i)^\s*(?:[-*]\s*)?(?:preferred\s+)?(agent/model/version|agent|executor|llm|model|model\s+version|version)\s*(?:is\s+)?(?::|=)\s*(.+?)\s*$""".r
+    """(?i)^\s*(?:[-*]\s*)?(?:preferred\s+)?(agent/model/effort/version|agent/model/version|agent|executor|llm|model|effort|model\s+version|version)\s*(?:is\s+)?(?::|=)\s*(.+?)\s*$""".r
 
   private def parseRunnerField(line: String): Option[(String, String)] =
     line match
@@ -101,32 +107,73 @@ object GitHub:
       case _ => None
 
   private def parseRunnerTriplet(value: String): Option[TaskRunner] =
-    value.split("/").toList.map(_.trim).filter(_.nonEmpty) match
-      case agent :: model :: version :: Nil =>
-        Some(TaskRunner(agent, Some(model), Some(version)))
+    value.split("/", -1).toList.map(_.trim) match
+      case agent :: model :: effort :: version :: Nil
+          if agent.nonEmpty && model.nonEmpty =>
+        Some(
+          TaskRunner(
+            agent,
+            Some(model),
+            Option(effort).filter(_.nonEmpty),
+            Option(version).filter(_.nonEmpty)
+          )
+        )
+      case agent :: model :: version :: Nil
+          if agent.nonEmpty && model.nonEmpty =>
+        Some(
+          TaskRunner(
+            agent,
+            Some(model),
+            None,
+            Option(version).filter(_.nonEmpty)
+          )
+        )
       case _ => None
+
+  private def parseRunnerList(lines: List[String]): List[TaskRunner] =
+    val (_, runners) = lines.foldLeft((false, List.empty[TaskRunner])) {
+      case ((inRunnerBlock, found), line) =>
+        val normalized = line.trim
+        val lower = normalized.toLowerCase
+        if isRunnerHeader(lower) then
+          val inline = parseRunnerTriplets(normalized)
+          (true, found ++ inline)
+        else if inRunnerBlock && (normalized.startsWith("-") || normalized
+            .startsWith("*"))
+        then
+          val bullet = normalized.stripPrefix("-").stripPrefix("*").trim
+          (inRunnerBlock, found ++ parseRunnerTriplets(bullet))
+        else if inRunnerBlock && normalized.isEmpty then (false, found)
+        else (inRunnerBlock, found)
+    }
+    runners
 
   private def parseRunnerTriplets(line: String): List[TaskRunner] =
     val normalized = line.trim.stripPrefix("-").stripPrefix("*").trim
     val lower = normalized.toLowerCase
-    val explicitRunnerLine =
-      lower.contains("preferred llms/models/versions") ||
-        lower.contains("agent/model/version")
 
-    if explicitRunnerLine then
-      val values =
+    val values =
+      if isRunnerHeader(lower) then
         normalized.split(":", 2).toList match
           case _ :: tail :: Nil => tail
-          case _                => normalized
+          case _                => ""
+      else normalized
 
-      values.split(",").toList.flatMap(parseRunnerTriplet)
-    else Nil
+    values.split(",").toList.flatMap(parseRunnerTriplet)
+
+  private def isRunnerHeader(lower: String): Boolean =
+    lower.contains("preferred llms/models/efforts/versions") ||
+      lower.contains("preferred llms/models/versions") ||
+      lower.contains("agent/model/effort/version") ||
+      lower.contains("agent/model/version")
 
   private val DepLineKeywords =
     List("depends on", "depend on", "dependency", "dependencies")
 
   private val IssueNumRegex = """#(\d+)""".r
   private val ParentRegex = """(?i)\bparent\b\s*:?\s*#(\d+)""".r
+  private val PullRequestMentionRegex =
+    """(?i)\bPR\s*#(\d+)|/pull/(\d+)""".r
 
   private def getDependencies(body: String): List[Int] =
     body.linesIterator
@@ -216,6 +263,76 @@ object GitHub:
       )
     yield replay
 
+  def verifyTaskReplayCi[F[_]](
+      root: os.Path,
+      task: Issue,
+      branchName: String,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    def pullRequests: F[List[PullRequestReplay]] =
+      for
+        currentPullRequest <- pullRequestReplayForBranch(root, branchName)
+        historicalPullRequests <-
+          currentPullRequest.fold {
+            for
+              history <- issueHistory(root, task.number).handleErrorWith {
+                error =>
+                  progress(
+                    s"Failed to read replay CI history for task #${task.number}: ${error.getMessage}"
+                  ).as(IssueHistory(Nil, Nil))
+              }
+              pullRequests <- history.pullRequests.traverse(pr =>
+                pullRequestReplayContext(root, pr)
+              )
+            yield pullRequests.flatten
+          }(pullRequest => List(pullRequest).pure[F])
+      yield historicalPullRequests
+
+    def loop(deadlineMillis: Long): F[Unit] =
+      for
+        now <- F.blocking(System.currentTimeMillis())
+        pullRequests <- pullRequests
+        failure = replayCiFailure(pullRequests)
+        pending = replayCiPending(pullRequests)
+        _ <- failure match
+          case Some(message) =>
+            F.raiseError(new RuntimeException(message))
+          case None if now >= deadlineMillis && pending.nonEmpty =>
+            F.raiseError(
+              new RuntimeException(
+                s"Timed out waiting for related replay CI: ${pending.get}"
+              )
+            )
+          case None =>
+            pending match
+              case Some(message) =>
+                progress(message) *>
+                  F.blocking(Thread.sleep(PullRequestCheckPollMillis)) *>
+                  loop(deadlineMillis)
+              case None if pullRequests.nonEmpty =>
+                progress(
+                  s"Related replay CI is passing for task #${task.number}."
+                )
+              case None =>
+                progress(
+                  s"No related replay CI found for task #${task.number}."
+                )
+      yield ()
+
+    for
+      _ <- progress(
+        s"Waiting for related replay CI on task #${task.number} with ${PullRequestCheckTimeoutMillis / 1000}s timeout..."
+      )
+      started <- F.blocking(System.currentTimeMillis())
+      _ <- loop(started + PullRequestCheckTimeoutMillis)
+    yield ()
+
+  def hasOpenPullRequestForBranch[F[_]: Sync](
+      root: os.Path,
+      branchName: String
+  ): F[Boolean] =
+    pullRequestForBranch(root, branchName).map(_.exists(_.state === "OPEN"))
+
   private final case class IssueHistory(
       comments: List[IssueComment],
       pullRequests: List[Int]
@@ -256,8 +373,9 @@ object GitHub:
             values.toList.flatMap(parsePullRequestNumber)
           }
           .getOrElse(Nil)
-          .distinct
-        IssueHistory(comments, pullRequests)
+        val mentionedPullRequests =
+          comments.flatMap(comment => pullRequestMentions(comment.body))
+        IssueHistory(comments, (pullRequests ++ mentionedPullRequests).distinct)
     }
 
   private def parseIssueComment(value: ujson.Value): Option[IssueComment] =
@@ -290,6 +408,18 @@ object GitHub:
         fields.get("number").collect { case ujson.Num(value) => value.toInt }
       case _ => None
 
+  private def pullRequestMentions(value: String): List[Int] =
+    PullRequestMentionRegex
+      .findAllMatchIn(value)
+      .flatMap(matchResult =>
+        List(
+          Option(matchResult.group(1)),
+          Option(matchResult.group(2))
+        ).flatten.headOption
+          .flatMap(_.toIntOption)
+      )
+      .toList
+
   private final case class PullRequestReplay(
       number: Int,
       state: String,
@@ -319,6 +449,16 @@ object GitHub:
             .map(runs => replay.copy(runs = runs))
         }
       }
+    }
+
+  private def pullRequestReplayForBranch[F[_]](
+      root: os.Path,
+      branchName: String
+  )(using F: Sync[F]): F[Option[PullRequestReplay]] =
+    pullRequestForBranch(root, branchName).flatMap {
+      case Some(pullRequest) =>
+        pullRequestReplayContext(root, pullRequest.number)
+      case None => F.pure(None)
     }
 
   private def parsePullRequestReplay(
@@ -419,6 +559,43 @@ $commentsText
 Related pull requests and CI runs:
 $prText
 """
+
+  private def replayCiFailure(
+      pullRequests: List[PullRequestReplay]
+  ): Option[String] =
+    val prsWithRuns = pullRequests.filter(_.runs.nonEmpty)
+    val failed =
+      prsWithRuns.flatMap(pr => pr.runs.filter(_.failed).map(pr -> _))
+
+    if failed.nonEmpty then
+      Some(
+        "Related replay CI failed: " + failed
+          .map { case (pr, run) =>
+            s"PR #${pr.number} ${run.name}=${run.status}/${run.conclusion} ${run.url}"
+          }
+          .mkString(", ")
+      )
+    else None
+
+  private def replayCiPending(
+      pullRequests: List[PullRequestReplay]
+  ): Option[String] =
+    val prsWithRuns = pullRequests.filter(_.runs.nonEmpty)
+    val pending =
+      prsWithRuns.flatMap(pr => pr.runs.filterNot(_.passed).map(pr -> _))
+
+    if pending.nonEmpty then
+      Some(
+        "Related replay CI is still pending: " + pending
+          .map { case (pr, run) =>
+            val state =
+              if run.conclusion.nonEmpty then s"${run.status}/${run.conclusion}"
+              else run.status
+            s"PR #${pr.number} ${run.name}=$state ${run.url}"
+          }
+          .mkString(", ")
+      )
+    else None
 
   private def truncate(value: String, maxLength: Int): String =
     val normalized = value.linesIterator.mkString("\\n")
@@ -521,6 +698,29 @@ $questions
         body
       )
 
+  def commentTaskFailure[F[_]](
+      root: os.Path,
+      task: Issue,
+      reason: String,
+      progress: String => F[Unit]
+  )(using Sync[F]): F[Unit] =
+    val body =
+      s"""Script stopped before closing task #${task.number}.
+
+Reason:
+$reason
+"""
+    progress(s"Leaving failure comment on task #${task.number}...") *>
+      call(
+        root,
+        "gh",
+        "issue",
+        "comment",
+        task.number.toString,
+        "--body",
+        body
+      )
+
   def commentSplitEvaluation[F[_]](
       root: os.Path,
       task: Issue,
@@ -579,12 +779,21 @@ This parent task will not be implemented directly. Run child tasks first; when a
       worktreePath: os.Path,
       branchName: String,
       task: Issue,
+      pullRequestTitle: Option[String],
+      pullRequestBody: Option[String],
       progress: String => F[Unit]
   )(using Sync[F]): F[Unit] =
     for
       _ <- progress("Pushing branch to origin...")
       _ <- call(worktreePath, "git", "push", "-u", "origin", branchName)
-      pullRequest <- ensurePullRequest(worktreePath, branchName, task, progress)
+      pullRequest <- ensurePullRequest(
+        worktreePath,
+        branchName,
+        task,
+        pullRequestTitle,
+        pullRequestBody,
+        progress
+      )
       _ <- awaitPullRequestChecks(
         root,
         pullRequest.number.toString,
@@ -618,6 +827,8 @@ This parent task will not be implemented directly. Run child tasks first; when a
       worktreePath: os.Path,
       branchName: String,
       task: Issue,
+      pullRequestTitle: Option[String],
+      pullRequestBody: Option[String],
       progress: String => F[Unit]
   )(using F: Sync[F]): F[PullRequest] =
     pullRequestForBranch(worktreePath, branchName).flatMap {
@@ -633,9 +844,13 @@ This parent task will not be implemented directly. Run child tasks first; when a
             "pr",
             "create",
             "--title",
-            s"Task #${task.number}: ${task.title}",
+            pullRequestTitle
+              .filter(_.trim.nonEmpty)
+              .getOrElse(s"Task #${task.number}: ${task.title}"),
             "--body",
-            s"Closes #${task.number}",
+            pullRequestBody
+              .filter(_.trim.nonEmpty)
+              .getOrElse(s"Closes #${task.number}"),
             "--head",
             branchName
           ) *>
@@ -684,7 +899,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       pollMillis: Long,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Unit] =
-    def loop(deadlineMillis: Long): F[Unit] =
+    def loop(deadlineMillis: Long, noChecksSince: Option[Long]): F[Unit] =
       for
         now <- F.blocking(System.currentTimeMillis())
         _ <-
@@ -699,7 +914,17 @@ This parent task will not be implemented directly. Run child tasks first; when a
               case PullRequestChecksPending(message) =>
                 progress(message) *>
                   F.blocking(Thread.sleep(pollMillis)) *>
-                  loop(deadlineMillis)
+                  loop(deadlineMillis, None)
+              case PullRequestChecksUnavailable(message) =>
+                val firstSeen = noChecksSince.getOrElse(now)
+                if now - firstSeen >= PullRequestNoChecksGraceMillis then
+                  progress(
+                    s"$message Proceeding after ${PullRequestNoChecksGraceMillis / 1000}s with no PR checks."
+                  )
+                else
+                  progress(message) *>
+                    F.blocking(Thread.sleep(pollMillis)) *>
+                    loop(deadlineMillis, Some(firstSeen))
               case PullRequestChecksPassed(message) =>
                 progress(message)
               case PullRequestChecksFailed(message) =>
@@ -712,12 +937,15 @@ This parent task will not be implemented directly. Run child tasks first; when a
         s"Waiting for Pull Request checks on $branchName with ${timeoutMillis / 1000}s timeout..."
       )
       started <- F.blocking(System.currentTimeMillis())
-      _ <- loop(started + timeoutMillis)
+      _ <- loop(started + timeoutMillis, None)
     yield ()
 
   private sealed trait PullRequestCheckStatus
 
   private final case class PullRequestChecksPending(message: String)
+      extends PullRequestCheckStatus
+
+  private final case class PullRequestChecksUnavailable(message: String)
       extends PullRequestCheckStatus
 
   private final case class PullRequestChecksPassed(message: String)
@@ -749,7 +977,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
           .contains(check.state)
       )
       if output.trim.isEmpty || checks.isEmpty then
-        PullRequestChecksPending(
+        PullRequestChecksUnavailable(
           s"Pull Request checks for $branchName are not available yet."
         )
       else if failed.nonEmpty then
