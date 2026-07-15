@@ -12,3 +12,15 @@ approval_mode = "approve"
 
 [mcp_servers.scala-semantic.tools.document_outline]
 approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.structure]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.get_workspace_root]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.search_text]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.symbol_source]
+approval_mode = "approve"

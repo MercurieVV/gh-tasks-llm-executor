@@ -1,6 +1,4 @@
 //> using scala 3.8.4
-//> using options -Ysemanticdb
-//> using options -sourceroot:.
 //> using options -Wunused:imports
 // //> using options -Werror
 //> using exclude Setup.scala

@@ -8,14 +8,37 @@ Use shell for builds, tests, git, config, docs, scripts, and non-Scala text work
 
 ## Scala CLI SemanticDB
 
-Enable with Scala CLI directives: `--semanticdb`
+For one-off compilation, pass Scala CLI's SemanticDB flags on the command line:
 
-Not raw scalac flags:
+```bash
+scripts/refresh-semanticdb.sh
+```
+
+This script removes stale generated SemanticDB outputs and recompiles into
+`.semanticdb/META-INF/semanticdb`, the location used by ScalaSemantic for this
+script-style repository. If compiling manually, include an explicit target root:
+
+```bash
+scala-cli compile . --semanticdb --semanticdb-sourceroot . --semanticdb-targetroot .semanticdb --server=false
+```
+
+For persistent per-file or per-project configuration, use Scala CLI directives:
+
 ```scala
 //> using semanticdb
 //> using semanticdbSourceroot .
 ```
-Avoid `//> using options -Ysemanticdb and //> using options -sourceroot:..`
+
+Do not use raw scalac flags for this. Avoid:
+
+```scala
+//> using options -Ysemanticdb
+//> using options -sourceroot:..
+```
 
 If SemanticDB tools report an empty index, verify generation with:
-`find .scala-build -name '*.semanticdb'`
+`find .semanticdb -name '*.semanticdb'`
+
+If ScalaSemantic still returns an old outline after refresh, the running MCP
+server has cached the previous root index. Restart the MCP/client session so it
+loads the refreshed `.semanticdb` files.
