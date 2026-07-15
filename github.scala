@@ -362,6 +362,15 @@ This parent task will not be implemented directly. Run child tasks first; when a
       )
       _ <- progress("Merging Pull Request...")
       _ <- call(root, "gh", "pr", "merge", branchName, "--merge")
+      merged <- mergedPullRequest(root, branchName)
+      _ <- awaitBranchChecks(
+        root,
+        merged.baseRefName,
+        merged.mergeCommit,
+        PullRequestCheckTimeoutMillis,
+        PullRequestCheckPollMillis,
+        progress
+      )
     yield ()
 
   private def ensurePullRequest[F[_]](
@@ -493,6 +502,190 @@ This parent task will not be implemented directly. Run child tasks first; when a
   private def formatChecks(checks: List[PullRequestCheck]): String =
     checks.map(check => s"${check.name}=${check.state}").mkString(", ")
 
+  private final case class MergedPullRequest(
+      baseRefName: String,
+      mergeCommit: String
+  )
+
+  private def mergedPullRequest[F[_]](
+      root: os.Path,
+      branchName: String
+  )(using F: Sync[F]): F[MergedPullRequest] =
+    callOutput(
+      root,
+      "gh",
+      "pr",
+      "view",
+      branchName,
+      "--json",
+      "baseRefName,mergeCommit"
+    ).flatMap { output =>
+      parseMergedPullRequest(output).liftTo[F](
+        new RuntimeException(
+          s"Could not read merged Pull Request metadata for $branchName."
+        )
+      )
+    }
+
+  private def parseMergedPullRequest(
+      output: String
+  ): Option[MergedPullRequest] =
+    Try(ujson.read(output).obj).toOption.flatMap { fields =>
+      for
+        baseRefName <- fields.get("baseRefName").collect {
+          case ujson.Str(value) => value
+        }
+        mergeCommit <- fields
+          .get("mergeCommit")
+          .collect { case ujson.Obj(commitFields) =>
+            commitFields.get("oid").collect { case ujson.Str(value) => value }
+          }
+          .flatten
+      yield MergedPullRequest(baseRefName, mergeCommit)
+    }
+
+  private def awaitBranchChecks[F[_]](
+      root: os.Path,
+      branchName: String,
+      commitSha: String,
+      timeoutMillis: Long,
+      pollMillis: Long,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    def loop(deadlineMillis: Long): F[Unit] =
+      for
+        now <- F.blocking(System.currentTimeMillis())
+        _ <-
+          if now >= deadlineMillis then
+            F.raiseError(
+              new RuntimeException(
+                s"Timed out waiting for CI on $branchName at $commitSha."
+              )
+            )
+          else
+            branchCheckStatus(root, branchName, commitSha).flatMap {
+              case BranchChecksPending(message) =>
+                progress(message) *>
+                  F.blocking(Thread.sleep(pollMillis)) *>
+                  loop(deadlineMillis)
+              case BranchChecksPassed(message) =>
+                progress(message)
+              case BranchChecksFailed(message) =>
+                F.raiseError(new RuntimeException(message))
+            }
+      yield ()
+
+    for
+      _ <- progress(
+        s"Waiting for CI on $branchName at $commitSha with ${timeoutMillis / 1000}s timeout..."
+      )
+      started <- F.blocking(System.currentTimeMillis())
+      _ <- loop(started + timeoutMillis)
+    yield ()
+
+  private sealed trait BranchCheckStatus
+
+  private final case class BranchChecksPending(message: String)
+      extends BranchCheckStatus
+
+  private final case class BranchChecksPassed(message: String)
+      extends BranchCheckStatus
+
+  private final case class BranchChecksFailed(message: String)
+      extends BranchCheckStatus
+
+  private def branchCheckStatus[F[_]](
+      root: os.Path,
+      branchName: String,
+      commitSha: String
+  )(using F: Sync[F]): F[BranchCheckStatus] =
+    callOutputUnchecked(
+      root,
+      "gh",
+      "run",
+      "list",
+      "--branch",
+      branchName,
+      "--commit",
+      commitSha,
+      "--limit",
+      "100",
+      "--json",
+      "name,status,conclusion,url"
+    ).map { output =>
+      val runs = parseWorkflowRuns(output)
+      val failed = runs.filter(_.failed)
+      val pending = runs.filterNot(_.passed)
+      if output.trim.isEmpty || runs.isEmpty then
+        BranchChecksPending(
+          s"No CI runs found yet for $branchName at $commitSha."
+        )
+      else if failed.nonEmpty then
+        BranchChecksFailed(
+          s"CI failed on $branchName at $commitSha: ${formatRuns(failed)}"
+        )
+      else if pending.nonEmpty then
+        BranchChecksPending(
+          s"CI pending on $branchName at $commitSha: ${formatRuns(pending)}"
+        )
+      else BranchChecksPassed(s"CI passed on $branchName at $commitSha.")
+    }
+
+  private final case class WorkflowRun(
+      name: String,
+      status: String,
+      conclusion: String,
+      url: String
+  ):
+    def passed: Boolean =
+      status === "COMPLETED" &&
+        Set("SUCCESS", "SKIPPED", "NEUTRAL").contains(conclusion)
+
+    def failed: Boolean =
+      status === "COMPLETED" &&
+        Set(
+          "FAILURE",
+          "CANCELLED",
+          "TIMED_OUT",
+          "ACTION_REQUIRED",
+          "STARTUP_FAILURE",
+          "STALE"
+        ).contains(conclusion)
+
+  private def parseWorkflowRuns(output: String): List[WorkflowRun] =
+    Try(ujson.read(output).arr.toList).toOption.toList.flatten.flatMap {
+      case ujson.Obj(fields) =>
+        for
+          name <- fields.get("name").collect { case ujson.Str(value) => value }
+          status <- fields.get("status").collect { case ujson.Str(value) =>
+            value.trim.toUpperCase
+          }
+        yield WorkflowRun(
+          name = name,
+          status = status,
+          conclusion = fields
+            .get("conclusion")
+            .collect { case ujson.Str(value) => value.trim.toUpperCase }
+            .getOrElse(""),
+          url = fields
+            .get("url")
+            .collect { case ujson.Str(value) => value }
+            .getOrElse("")
+        )
+      case _ => None
+    }
+
+  private def formatRuns(runs: List[WorkflowRun]): String =
+    runs
+      .map(run =>
+        val state =
+          if run.conclusion.nonEmpty then s"${run.status}/${run.conclusion}"
+          else run.status
+        val urlPart = if run.url.nonEmpty then s" ${run.url}" else ""
+        s"${run.name}=$state$urlPart"
+      )
+      .mkString(", ")
+
   def closeIssue[F[_]: Sync](root: os.Path, taskId: Int): F[Unit] =
     call(
       root,
@@ -539,6 +732,12 @@ This parent task will not be implemented directly. Run child tasks first; when a
       os.proc(command).call(cwd = cwd)
       ()
     }
+
+  private def callOutput[F[_]: Sync](
+      cwd: os.Path,
+      command: String*
+  ): F[String] =
+    Sync[F].blocking(os.proc(command).call(cwd = cwd).out.text().trim)
 
   private def callOutputUnchecked[F[_]: Sync](
       cwd: os.Path,
