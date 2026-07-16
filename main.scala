@@ -551,8 +551,38 @@ object Main extends IOApp:
       _ <- progress(
         s"Running task #${run.task.number} with ${run.runner.display}..."
       )
-      output <- AgentExecutor[F].run(run.runner, prompt, run.worktreePath)
+      output <- AgentExecutor[F].run(
+        run.runner,
+        prompt,
+        run.worktreePath,
+        ImplementerAllowedTools
+      )
+      _ <- Sync[F]
+        .raiseError(
+          RuntimeException(
+            s"Agent ${run.runner.display} reported it could not proceed (permission/tool wall). Output: ${output.trim}"
+          )
+        )
+        .whenA(looksBlocked(output))
     yield TaskWithOutput(run, output)
+
+  // Exit code 0 only means the process returned; a stuck agent that gave up
+  // after every tool call was denied also exits 0 with prose explaining why,
+  // and with no files changed that reads as a legitimate no-op success
+  // (see reportUnchangedTask/closeTask). Catch that specific failure shape
+  // here so it surfaces as a real error (and triggers runExecutor's
+  // stronger-runner fallback) instead of silently closing the task.
+  private val BlockedSignals = List(
+    "tool calls (and file-creating bash) are being denied",
+    "being denied",
+    "need approval i'm not getting",
+    "hit wall:",
+    "permission denied and cannot continue"
+  )
+
+  private def looksBlocked(output: String): Boolean =
+    val lower = output.toLowerCase
+    BlockedSignals.exists(lower.contains)
 
   private def commentOutput[F[_]: Sync]
       : -->[F, TaskWithOutput, TaskWithOutput] =
@@ -895,6 +925,22 @@ Final answer contract:
   // (TaskRunner.command) — a no-op for other evaluator runners.
   private val EvaluationJsonSchema =
     """{"type":"object","properties":{"status":{"type":"string","enum":["ready","split","questions"]},"body":{"type":"string"},"questions":{"type":"string"}},"required":["status","body"]}"""
+
+  // Implementer runs unattended (`-p`, stdin closed) with zero tool grants
+  // previously: no --allowedTools meant every Edit/Write/Bash call hit the
+  // permission wall with nobody to approve it, so the agent gave up, printed
+  // an explanation, and exited 0 with no files changed — which the pipeline
+  // then read as a legitimate no-op success. Grant the tools implementation
+  // actually needs; cwd is already confined to the task's own worktree.
+  private val ImplementerAllowedTools = Seq(
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "Read",
+    "Glob",
+    "Grep",
+    "Bash"
+  )
 
   private def evaluateTaskPrompt(
       task: Issue,
