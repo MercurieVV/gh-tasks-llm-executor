@@ -71,10 +71,15 @@ def tool(
   val outputPath = configDir / "agent-runners.json"
   val claude = probe("claude")
   val codex = probe("codex")
+  val aider = probe("aider")
 
   val claudeModels = envList("AGENT_RUNNER_CLAUDE_MODELS", List("opus", "sonnet", "haiku"))
   val codexModels = envList("AGENT_RUNNER_CODEX_MODELS", List("gpt-5", "gpt-5-codex"))
   val codexEfforts = envList("AGENT_RUNNER_CODEX_EFFORTS", List("high", "medium", "low"))
+  val aiderDeepseekModels = envList(
+    "AGENT_RUNNER_AIDER_DEEPSEEK_MODELS",
+    List("deepseek/deepseek-chat", "deepseek/deepseek-reasoner")
+  )
 
   val claudeTools =
     claudeModels.zipWithIndex.map { case (model, index) =>
@@ -129,12 +134,33 @@ def tool(
         probe = codex
       )
 
+  val aiderTools =
+    aiderDeepseekModels.zipWithIndex.map { case (model, index) =>
+      val strengths =
+        if model.contains("reasoner") then
+          List("complex-reasoning", "scala-code", "debugging")
+        else List("scala-code", "focused-fixes", "mechanical-changes")
+      tool(
+        id = s"aider-${model.replace('/', '-')}",
+        agent = "aider",
+        model = model,
+        effort = None,
+        version = aider.version,
+        roles = List("implementor"),
+        jobTypes = List("scala", "tests", "repo-editing", "debugging"),
+        strengths = strengths,
+        available = aider.available,
+        priority = 200 + index,
+        probe = aider
+      )
+    }
+
   val json = ujson.Obj(
     "schemaVersion" -> 1,
     "generatedBy" -> "scripts/discover-agent-runners.scala",
     "generatedAtEpochMillis" -> System.currentTimeMillis(),
     "metadataFormat" -> "preferred llms/models/efforts/versions",
-    "tools" -> (claudeTools ++ codexTools)
+    "tools" -> (claudeTools ++ codexTools ++ aiderTools)
   )
 
   os.makeDir.all(configDir)

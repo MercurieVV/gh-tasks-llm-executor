@@ -44,6 +44,9 @@ final case class TaskRunner(
             Seq("--config", s"model_reasoning_effort=$value")
           ) ++
           Seq(prompt)
+      case "aider" =>
+        Seq(agent) ++ model.toList.flatMap(value => Seq("--model", value)) ++
+          Seq("--yes-always", "--no-auto-commits", "--message", prompt)
       case _ =>
         Seq(agent) ++ model.toList.flatMap(value => Seq("-m", value)) ++
           Seq("-p", prompt)
