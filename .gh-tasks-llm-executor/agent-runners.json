@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedBy": "scripts/discover-agent-runners.scala",
-  "generatedAtEpochMillis": "1784211819169",
+  "generatedAtEpochMillis": "1784237103527",
   "metadataFormat": "preferred llms/models/efforts/versions",
   "tools": [
     {
@@ -18,13 +18,19 @@
         "scala",
         "tests",
         "docs",
-        "github-issues"
+        "github-issues",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
       ],
       "strengths": [
         "evaluation",
         "complex-reasoning",
         "architecture",
-        "failure-analysis"
+        "failure-analysis",
+        "plan",
+        "source-of-truth"
       ],
       "available": true,
       "priority": 10,
@@ -47,13 +53,19 @@
         "scala",
         "tests",
         "docs",
-        "github-issues"
+        "github-issues",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
       ],
       "strengths": [
         "scala-code",
         "debugging",
         "refactoring",
-        "docs"
+        "docs",
+        "source-of-truth",
+        "implement"
       ],
       "available": true,
       "priority": 30,
@@ -76,12 +88,18 @@
         "scala",
         "tests",
         "docs",
-        "github-issues"
+        "github-issues",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
       ],
       "strengths": [
         "small-edits",
         "docs",
-        "mechanical-changes"
+        "mechanical-changes",
+        "implement",
+        "test"
       ],
       "available": true,
       "priority": 60,
@@ -104,12 +122,19 @@
         "scala",
         "tests",
         "repo-editing",
-        "debugging"
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
       ],
       "strengths": [
         "deep-code-reasoning",
         "multi-file-edits",
-        "tests"
+        "tests",
+        "plan",
+        "source-of-truth",
+        "implement"
       ],
       "available": true,
       "priority": 100,
@@ -132,12 +157,18 @@
         "scala",
         "tests",
         "repo-editing",
-        "debugging"
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
       ],
       "strengths": [
         "scala-code",
         "focused-fixes",
-        "tests"
+        "tests",
+        "implement",
+        "test"
       ],
       "available": true,
       "priority": 101,
@@ -160,11 +191,17 @@
         "scala",
         "tests",
         "repo-editing",
-        "debugging"
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
       ],
       "strengths": [
         "small-edits",
-        "mechanical-changes"
+        "mechanical-changes",
+        "implement",
+        "test"
       ],
       "available": true,
       "priority": 102,
@@ -187,12 +224,19 @@
         "scala",
         "tests",
         "repo-editing",
-        "debugging"
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
       ],
       "strengths": [
         "deep-code-reasoning",
         "multi-file-edits",
-        "tests"
+        "tests",
+        "plan",
+        "source-of-truth",
+        "implement"
       ],
       "available": true,
       "priority": 110,
@@ -215,12 +259,18 @@
         "scala",
         "tests",
         "repo-editing",
-        "debugging"
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
       ],
       "strengths": [
         "scala-code",
         "focused-fixes",
-        "tests"
+        "tests",
+        "implement",
+        "test"
       ],
       "available": true,
       "priority": 111,
@@ -243,11 +293,17 @@
         "scala",
         "tests",
         "repo-editing",
-        "debugging"
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
       ],
       "strengths": [
         "small-edits",
-        "mechanical-changes"
+        "mechanical-changes",
+        "implement",
+        "test"
       ],
       "available": true,
       "priority": 112,
@@ -270,12 +326,18 @@
         "scala",
         "tests",
         "repo-editing",
-        "debugging"
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
       ],
       "strengths": [
         "scala-code",
         "focused-fixes",
-        "mechanical-changes"
+        "mechanical-changes",
+        "implement",
+        "test"
       ],
       "available": true,
       "priority": 200,
@@ -298,12 +360,19 @@
         "scala",
         "tests",
         "repo-editing",
-        "debugging"
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
       ],
       "strengths": [
         "complex-reasoning",
         "scala-code",
-        "debugging"
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement"
       ],
       "available": true,
       "priority": 201,

@@ -1036,6 +1036,25 @@ Rules:
 - If important information is missing and cannot be inferred, set status to "questions" and put concrete user questions in "questions".
 - If questions are needed, still provide the best improved body possible in "body".
 - Do not implement code changes.
+
+Phase-typed decomposition:
+- After deciding a task should split, also decide which PHASES it needs from {plan, source-of-truth, implement, test}. Only emit a phase when it adds value. Phase decomposition COMPOSES WITH scope split: a scope-piece may itself carry a "Phase:" tag, and a phase subtask may be scoped narrower.
+- Bias toward FEWER phases. A trivial, fully-specified task -> a single "implement" subtask (or no split at all, status "ready"). Never force 4-phase overhead; over-splitting tiny tasks wastes evaluation tokens and adds issue noise.
+- When you do phase-split, emit one subtask per chosen phase, dependency-ordered plan -> source-of-truth -> implement -> test. Give each subtask a "Phase:" tag inside its Task metadata block, e.g.:
+  Task metadata:
+  Evaluation: ready
+  Execution: implement
+  Phase: implement
+- For "source-of-truth": pick, per concrete task, what the authoritative reference is (a spec / definition-of-done, a pinned existing artifact + versions, or the test oracle) and state it EXPLICITLY in that subtask's acceptance criteria so later phases conform to it.
+- Actively narrow "implement" and "test" leaves toward the cheapest tier: split further while a leaf is too big or ambiguous for a weak model such as Haiku. When a leaf resists narrowing (irreducible complexity, cross-cutting reasoning, high risk), STOP and route it to the cheapest runner that actually fits. Set a real capability floor per leaf; never down-tier below that floor for price alone. Under-powering a leaf is the primary failure mode: a too-weak model produces wrong code, forcing repair/replay and a net token LOSS.
+- Token savings depend on plan/source-of-truth producing acceptance criteria tight enough for the cheaper implement/test model to succeed. Cross-phase context handoff rides through the issue bodies + dependency conclusion, so plan/source-of-truth subtasks must write their conclusions back into the issue body explicitly.
+
+Phase -> capability-tier routing (select concrete runners from the available local implementor tools above by cost vs. fit across ALL vendors; never hardcode a vendor):
+- plan            -> strong reasoning / decomposition        -> high tier
+- source-of-truth -> judgment on authority / spec            -> high-medium tier
+- implement       -> narrow, well-specified code change      -> medium (task-dependent); cheap ONLY when genuinely trivial + fully specified
+- test            -> narrow verification                     -> low-medium; cheapest capable
+Match each phase's ranked "preferred llms/models/efforts/versions" to this table: primary = cheapest runner that still fits the phase's required capability, fallbacks = progressively stronger runners for escalation. Prefer runners whose jobTypes/strengths advertise the phase name.
 """
 
   private def parseTaskEvaluation(
