@@ -657,26 +657,6 @@ ${runner.display}
         body
       )
 
-  def updateIssueBody[F[_]](
-      root: os.Path,
-      taskId: Int,
-      body: String,
-      progress: String => F[Unit]
-  )(using F: Sync[F]): F[Unit] =
-    for
-      _ <- progress(s"Updating task #$taskId description...")
-      tempFile <- F.blocking(os.temp(body))
-      _ <- call(
-        root,
-        "gh",
-        "issue",
-        "edit",
-        taskId.toString,
-        "--body-file",
-        tempFile.toString
-      )
-    yield ()
-
   private val ScriptCommentPrefixes = List(
     "llm run output:",
     "script conclusion:",
@@ -684,8 +664,41 @@ ${runner.display}
     "script stopped before closing task",
     "was evaluated as needing split subtasks",
     "are completed. parent task is ready for completion check",
-    "completed successfully. worktree closed"
+    "completed successfully. worktree closed",
+    TaskMetadata.MetadataCommentPrefix
   )
+
+  // Chronological (oldest first) bodies of comments this script posted to
+  // persist TaskMetadata, so TaskMetadataStore can fold them into one merged
+  // view without ever touching the issue body.
+  def metadataCommentBodies[F[_]](
+      root: os.Path,
+      taskId: Int
+  )(using F: Sync[F]): F[List[String]] =
+    issueHistory(root, taskId)
+      .handleErrorWith(_ => F.pure(IssueHistory(Nil, Nil)))
+      .map(
+        _.comments
+          .map(_.body)
+          .filter(_.trim.toLowerCase.startsWith(TaskMetadata.MetadataCommentPrefix))
+      )
+
+  def commentTaskMetadata[F[_]](
+      root: os.Path,
+      taskId: Int,
+      metadataText: String,
+      progress: String => F[Unit]
+  )(using Sync[F]): F[Unit] =
+    progress(s"Leaving metadata comment on task #$taskId...") *>
+      call(
+        root,
+        "gh",
+        "issue",
+        "comment",
+        taskId.toString,
+        "--body",
+        metadataText
+      )
 
   private def isScriptComment(body: String): Boolean =
     val lower = body.trim.toLowerCase

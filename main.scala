@@ -1,5 +1,6 @@
 import arrowstep.core.*
 import arrowstep.runtime.AgentMain
+import cats.Monoid
 import cats.arrow.ArrowChoice
 import cats.data.Kleisli
 import cats.effect.ExitCode
@@ -160,7 +161,8 @@ object Main extends IOApp:
     Kleisli { (context: RunContext) =>
       for
         _ <- progress("Fetching open issues from GitHub...")
-        issues <- GitHub.fetchIssues(context.root)
+        rawIssues <- GitHub.fetchIssues(context.root)
+        issues <- rawIssues.traverse(effectiveIssue[F](context.root, _))
         openIssueNumbers = issues.map(_.number).toSet
         filteredByDeps = issues
           .filter(task => context.taskNumber.forall(_ === task.number))
@@ -198,6 +200,15 @@ object Main extends IOApp:
         )
       yield TaskSelection(context, candidates)
     }
+
+  // Merges an issue's original body with every TaskMetadata comment posted
+  // for it into one synthesized view, so the existing body-based parsers
+  // (evaluationStatus, taskRunners, ...) keep working unchanged while the
+  // real issue body is never rewritten.
+  private def effectiveIssue[F[_]: Sync](root: os.Path, issue: Issue): F[Issue] =
+    TaskMetadataStore.commentBased[F]
+      .read(root, issue)
+      .map(merged => issue.copy(body = TaskMetadata.render(merged)))
 
   private def executeTask[F[_]: Sync]: -->[F, TaskSelection, RunSummary] =
     Kleisli { selection =>
@@ -396,27 +407,60 @@ object Main extends IOApp:
               )
               .map(parseTaskEvaluation(_, run.task.body))
           )(_.pure[F])
-        cleanBody = ensureEvaluationMetadata(
-          stripMarkdownFence(evaluation.body).trim,
-          evaluation
+        verifiedEvaluation <-
+          if evaluation.execution === "split" then
+            GitHub.fetchIssues(run.context.root).map { allIssues =>
+              if GitHub.hasOpenChildren(run.task, allIssues) then evaluation
+              else
+                // Evaluator claimed "split" but created no child issues referencing
+                // this task as parent. Do not accept its proposed body (it may be
+                // garbage/placeholder text) and do not silently proceed; surface a
+                // real, explicit failure instead so the task can be retried.
+                TaskEvaluation(
+                  body = run.task.body,
+                  questions = Some(
+                    "Evaluator marked this task as needing a split but did not create any child issues referencing it as parent. Task evaluation failed; re-run evaluation or split the task manually."
+                  ),
+                  execution = "needs-input"
+                )
+            }
+          else evaluation.pure[F]
+        cleanBody = stripMarkdownFence(verifiedEvaluation.body).trim
+        // Evaluation/Execution are always taken from verifiedEvaluation, not
+        // from whatever text happens to be embedded in cleanBody: for the
+        // split-verification fallback above, cleanBody is the task's old
+        // (pre-fallback) body, and trusting its stale "Execution: split"
+        // would silently re-persist the wrong status.
+        priorMetadata = TaskMetadata.parse(run.task.body)
+        newMetadata = TaskMetadata.parse(cleanBody).copy(
+          evaluation = Some(
+            if verifiedEvaluation.questions.exists(_.trim.nonEmpty) then
+              "needs-input"
+            else "ready"
+          ),
+          execution = Some(normalizeExecution(verifiedEvaluation.execution))
         )
-        updatedTask = run.task.copy(body = cleanBody)
+        finalMetadata = Monoid[TaskMetadata].combine(priorMetadata, newMetadata)
+        updatedTask = run.task.copy(body = TaskMetadata.render(finalMetadata))
         updatedRunner = run.context.agentInventory
           .selectRunner(GitHub.taskRunners(updatedTask))
           .getOrElse(run.runner)
         updatedRun = run.copy(task = updatedTask, runner = updatedRunner)
+        // Never rewrite the issue body: persist the evaluator's decision as a
+        // new "Task metadata:" comment instead, folded back in on the next
+        // read by TaskMetadataStore (see effectiveIssue).
         _ <-
-          if cleanBody.nonEmpty && cleanBody =!= run.task.body.trim then
-            GitHub.updateIssueBody(
+          if updatedTask.body.trim =!= run.task.body.trim then
+            TaskMetadataStore.commentBased[F].write(
               run.context.root,
               run.task.number,
-              cleanBody,
+              newMetadata,
               progress
             )
           else Sync[F].unit
-      yield evaluation.questions.filter(_.trim.nonEmpty) match
+      yield verifiedEvaluation.questions.filter(_.trim.nonEmpty) match
         case Some(questions) => Left(NeedsUserInput(updatedRun, questions.trim))
-        case None if evaluation.execution === "split" =>
+        case None if verifiedEvaluation.execution === "split" =>
           Right(Left(SplitTask(updatedRun)))
         case None =>
           Right(Right(task.copy(run = updatedRun)))
@@ -980,25 +1024,6 @@ Rules:
         case line if line.startsWith(prefix) =>
           line.stripPrefix(prefix).trim
       }
-
-  private def ensureEvaluationMetadata(
-      body: String,
-      evaluation: TaskEvaluation
-  ): String =
-    if evaluationStatus(body).nonEmpty && executionStatus(body).nonEmpty then
-      body
-    else
-      val execution =
-        if evaluation.questions.exists(_.trim.nonEmpty) then "needs-input"
-        else normalizeExecution(evaluation.execution)
-      val evaluationStatus =
-        if execution === "needs-input" then "needs-input" else "ready"
-      s"""$body
-
-Task metadata:
-Evaluation: $evaluationStatus
-Execution: $execution
-"""
 
   private def normalizeExecution(value: String): String =
     value.trim.toLowerCase match
