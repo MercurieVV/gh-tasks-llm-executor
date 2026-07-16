@@ -33,10 +33,17 @@ final case class TaskRunner(
     val versionPart = version.fold("")(value => s", version: $value")
     s"agent: $agent$modelPart$effortPart$versionPart"
 
-  def command(prompt: String): Seq[String] =
+  def command(
+      prompt: String,
+      allowedTools: Seq[String] = Nil,
+      jsonSchema: Option[String] = None
+  ): Seq[String] =
     agent match
       case "claude" =>
         Seq(agent) ++ model.toList.flatMap(value => Seq("--model", value)) ++
+          (if allowedTools.isEmpty then Nil
+           else Seq("--allowedTools") ++ allowedTools) ++
+          jsonSchema.toList.flatMap(schema => Seq("--json-schema", schema)) ++
           Seq("-p", prompt)
       case "codex" =>
         Seq(agent, "exec") ++
@@ -403,7 +410,9 @@ object Main extends IOApp:
                   run.context.agentInventory,
                   userAnswer
                 ),
-                run.context.root
+                run.context.root,
+                EvaluatorAllowedTools,
+                Some(EvaluationJsonSchema)
               )
               .map(parseTaskEvaluation(_, run.task.body))
           )(_.pure[F])
@@ -863,6 +872,29 @@ Final answer contract:
 - Include a proposed commit title.
 - Include a proposed pull request body when useful.
 """
+
+  // Scoped tool permission for the evaluator run only: "split" verdicts
+  // require it to actually create child issues, which a non-interactive
+  // `claude -p` run otherwise can't do — there's no TTY to approve the Bash
+  // call, so it stalls out asking for confirmation instead of producing the
+  // required JSON. `gh issue edit` is deliberately NOT granted: that would
+  // let the evaluator rewrite an issue body directly, bypassing the
+  // comment-only TaskMetadata architecture (see taskMetadata.scala) the same
+  // way the old updateIssueBody call used to. Linking a new subtask back to
+  // its parent should go through `gh issue comment` instead.
+  private val EvaluatorAllowedTools = Seq(
+    "Bash(gh issue create:*)",
+    "Bash(gh issue comment:*)"
+  )
+
+  // Forces the claude CLI's final response to conform to this shape (via
+  // --json-schema) instead of relying on the prompt's "Return only JSON"
+  // instruction and hoping the model complies. This is what parseTaskEvaluation
+  // expects; matching it here should turn most JSON-parse failures into
+  // guaranteed-valid output instead. Only "claude" consumes jsonSchema
+  // (TaskRunner.command) — a no-op for other evaluator runners.
+  private val EvaluationJsonSchema =
+    """{"type":"object","properties":{"status":{"type":"string","enum":["ready","split","questions"]},"body":{"type":"string"},"questions":{"type":"string"}},"required":["status","body"]}"""
 
   private def evaluateTaskPrompt(
       task: Issue,

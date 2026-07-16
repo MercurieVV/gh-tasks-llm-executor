@@ -16,12 +16,20 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
   private val TotalTimeoutMillis = 45.minutes.toMillis
   private val PollMillis = 5.seconds.toMillis
 
-  def run(runner: TaskRunner, prompt: String, cwd: os.Path): F[String] =
+  def run(
+      runner: TaskRunner,
+      prompt: String,
+      cwd: os.Path,
+      allowedTools: Seq[String] = Nil,
+      jsonSchema: Option[String] = None
+  ): F[String] =
     for
       _ <- TaskLogger.llm(
         s"Starting agent execution with ${runner.display} in $cwd"
       )
-      result <- F.blocking(runMonitored(runner, prompt, cwd))
+      result <- F.blocking(
+        runMonitored(runner, prompt, cwd, allowedTools, jsonSchema)
+      )
       output = result.output
       _ <-
         if output.nonEmpty then TaskLogger.llm(output.trim)
@@ -45,12 +53,14 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
   private def runMonitored(
       runner: TaskRunner,
       prompt: String,
-      cwd: os.Path
+      cwd: os.Path,
+      allowedTools: Seq[String],
+      jsonSchema: Option[String]
   ): AgentResult =
     val started = System.currentTimeMillis()
     val lastActivity = AtomicLong(started)
     val output = StringBuilder()
-    val command = runner.command(prompt)
+    val command = runner.command(prompt, allowedTools, jsonSchema)
     TaskLogger.unsafeTrace(
       s"agent command cwd=$cwd args=${commandForLog(command, prompt)} promptChars=${prompt.length}"
     )
