@@ -162,22 +162,25 @@ object Main extends IOApp:
         _ <- progress("Fetching open issues from GitHub...")
         issues <- GitHub.fetchIssues(context.root)
         openIssueNumbers = issues.map(_.number).toSet
-        candidates = issues
+        filteredByDeps = issues
           .filter(task => context.taskNumber.forall(_ === task.number))
           .filterNot(GitHub.hasUnresolvedDependencies(_, openIssueNumbers))
           .filterNot(GitHub.hasOpenChildren(_, issues))
-          .filterNot(task =>
+        eligible <- filteredByDeps.filterA { task =>
+          val needsInput =
             evaluationStatus(task.body).contains("needs-input") ||
               executionStatus(task.body).contains("needs-input")
+          if !needsInput then true.pure[F]
+          else GitHub.userAnswer(context.root, task, progress).map(_.nonEmpty)
+        }
+        candidates = eligible.map(task =>
+          RunnableTask(
+            task,
+            context.agentInventory
+              .selectRunner(GitHub.taskRunners(task))
+              .getOrElse(evaluatorRunner)
           )
-          .map(task =>
-            RunnableTask(
-              task,
-              context.agentInventory
-                .selectRunner(GitHub.taskRunners(task))
-                .getOrElse(evaluatorRunner)
-            )
-          )
+        )
         _ <- progress(
           context.taskNumber.fold(
             s"Found ${candidates.size} runnable open tasks with preferred runner metadata."
@@ -367,19 +370,23 @@ object Main extends IOApp:
         _ <- progress(
           s"Evaluating task #${run.task.number} with ${evaluatorRunner.display}..."
         )
-        evaluation <- existingEvaluation(run.task).fold(
-          AgentExecutor[F]
-            .run(
-              evaluatorRunner,
-              evaluateTaskPrompt(
-                run.task,
-                task.parentConclusion,
-                run.context.agentInventory
-              ),
-              run.context.root
-            )
-            .map(parseTaskEvaluation(_, run.task.body))
-        )(_.pure[F])
+        userAnswer <- GitHub.userAnswer(run.context.root, run.task, progress)
+        evaluation <- existingEvaluation(run.task)
+          .filter(_ => userAnswer.isEmpty)
+          .fold(
+            AgentExecutor[F]
+              .run(
+                evaluatorRunner,
+                evaluateTaskPrompt(
+                  run.task,
+                  task.parentConclusion,
+                  run.context.agentInventory,
+                  userAnswer
+                ),
+                run.context.root
+              )
+              .map(parseTaskEvaluation(_, run.task.body))
+          )(_.pure[F])
         cleanBody = ensureEvaluationMetadata(
           stripMarkdownFence(evaluation.body).trim,
           evaluation
@@ -807,10 +814,16 @@ Final answer contract:
   private def evaluateTaskPrompt(
       task: Issue,
       dependencyConclusion: Option[String],
-      agentInventory: AgentInventory
+      agentInventory: AgentInventory,
+      userAnswer: Option[String] = None
   ): String =
     val dependencyConclusionStr = dependencyConclusion
       .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
+      .getOrElse("")
+    val userAnswerStr = userAnswer
+      .map(answer =>
+        s"\nUser's answer to previous clarifying questions:\n$answer\n\nIncorporate this answer. Only set status to \"questions\" again if the answer still leaves essential information missing.\n"
+      )
       .getOrElse("")
     val descriptionState =
       if task.body.trim.isEmpty then "missing"
@@ -828,7 +841,7 @@ ${agentInventory.promptBlock}
 
 Current Task Description:
 ${task.body}
-$dependencyConclusionStr
+$dependencyConclusionStr$userAnswerStr
 Return only JSON, with this shape:
 {
   "status": "ready" | "split" | "questions",

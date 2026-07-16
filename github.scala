@@ -677,6 +677,52 @@ ${runner.display}
       )
     yield ()
 
+  private val ScriptCommentPrefixes = List(
+    "llm run output:",
+    "script conclusion:",
+    "questions before execution:",
+    "script stopped before closing task",
+    "was evaluated as needing split subtasks",
+    "are completed. parent task is ready for completion check",
+    "completed successfully. worktree closed"
+  )
+
+  private def isScriptComment(body: String): Boolean =
+    val lower = body.trim.toLowerCase
+    ScriptCommentPrefixes.exists(prefix =>
+      lower.startsWith(prefix) || lower.contains(prefix)
+    )
+
+  // Looks for a human reply left after the script's most recent
+  // "Questions before execution:" comment, so a needs-input task can be
+  // unblocked without a manual issue-body edit.
+  def userAnswer[F[_]](
+      root: os.Path,
+      task: Issue,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Option[String]] =
+    issueHistory(root, task.number)
+      .handleErrorWith(_ => F.pure(IssueHistory(Nil, Nil)))
+      .flatMap { history =>
+        val comments = history.comments
+        val lastQuestionIndex = comments.lastIndexWhere(comment =>
+          comment.body.trim.toLowerCase.startsWith("questions before execution:")
+        )
+        if lastQuestionIndex < 0 then F.pure(None)
+        else
+          val replies = comments
+            .drop(lastQuestionIndex + 1)
+            .filterNot(comment => isScriptComment(comment.body))
+          if replies.isEmpty then F.pure(None)
+          else
+            val answer = replies
+              .map(comment => s"@${comment.author}: ${comment.body.trim}")
+              .mkString("\n\n")
+            progress(
+              s"Found user answer to prior questions on task #${task.number}."
+            ).as(Some(answer))
+      }
+
   def commentNeedsUserInput[F[_]](
       root: os.Path,
       task: Issue,
