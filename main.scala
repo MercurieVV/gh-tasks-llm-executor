@@ -1009,6 +1009,22 @@ Rules:
 - If important information is missing and cannot be inferred, set status to "questions" and put concrete user questions in "questions".
 - If questions are needed, still provide the best improved body possible in "body".
 - Do not implement code changes.
+
+Phase-typed decomposition (optional; composes with the scope split above, does not replace it):
+- After you decide a task should split, also decide which *kinds of work* (phases) it needs from {plan, source-of-truth, implement, test}. Only include a phase when it adds value.
+- Bias toward FEWER phases. A trivial task stays a single "implement" (or plain "ready") — never force a 4-phase fan-out. A scope-piece from the split above may itself carry a single Phase; phase decomposition and scope split compose.
+- When you do emit phase-typed subtasks, tag each with a "Phase:" line in its Task metadata and order them by dependency: plan -> source-of-truth -> implement -> test. Give each its own ranked "preferred llms/models/efforts/versions" list.
+- Untyped path is byte-for-byte unchanged: if a task needs no phase typing, omit "Phase:" entirely and behave exactly as before.
+- source-of-truth: for that subtask, pick and NAME the authoritative reference (a spec / definition-of-done, a pinned artifact + version, or the test oracle) inside its acceptance criteria, so later phases conform to it.
+- Actively try to NARROW implement/test leaves until the cheapest tier (e.g. Haiku) can run them — split further while a leaf is still too big or ambiguous. When a leaf resists narrowing, stop and set a capability floor from the residual risk, then pick the cheapest runner at or above that floor. Never down-tier below the floor for price alone: under-powering a leaf produces wrong code -> repair/replay -> net token loss.
+- Cross-phase context rides through issue bodies + the dependency conclusion comment. If that is not enough for a cheap implement model, the plan / source-of-truth subtasks must write their output back into the issue explicitly.
+
+Phase -> capability-tier routing (map tiers to the live "Available local implementor tools" above; do NOT hardcode vendor ids — the best leaf runner may be claude/*, codex/*, gemini/*, aider/*, etc.):
+- plan            -> high tier (strongest reasoning)
+- source-of-truth -> high to medium tier
+- implement       -> medium tier, task-dependent (narrow, well-specified leaves drop toward the cheapest tier)
+- test            -> low to medium tier
+Choose the primary runner as the cheapest tool that still fits the leaf's floor, and list stronger tools as fallbacks so escalation is possible.
 """
 
   private def parseTaskEvaluation(
