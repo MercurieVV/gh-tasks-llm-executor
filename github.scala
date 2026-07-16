@@ -693,6 +693,19 @@ ${runner.display}
       lower.startsWith(prefix) || lower.contains(prefix)
     )
 
+  // True only if the script actually asked something. Metadata alone can
+  // claim needs-input (manual edit, stale state) without any question ever
+  // being posted; that must not count as a real block.
+  def hasQuestionComment[F[_]](
+      root: os.Path,
+      task: Issue
+  )(using F: Sync[F]): F[Boolean] =
+    issueHistory(root, task.number)
+      .handleErrorWith(_ => F.pure(IssueHistory(Nil, Nil)))
+      .map(_.comments.exists { comment =>
+        comment.body.trim.toLowerCase.startsWith("questions before execution:")
+      })
+
   // Looks for a human reply left after the script's most recent
   // "Questions before execution:" comment, so a needs-input task can be
   // unblocked without a manual issue-body edit.

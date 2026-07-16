@@ -167,11 +167,19 @@ object Main extends IOApp:
           .filterNot(GitHub.hasUnresolvedDependencies(_, openIssueNumbers))
           .filterNot(GitHub.hasOpenChildren(_, issues))
         eligible <- filteredByDeps.filterA { task =>
-          val needsInput =
+          val needsInputMetadata =
             evaluationStatus(task.body).contains("needs-input") ||
               executionStatus(task.body).contains("needs-input")
-          if !needsInput then true.pure[F]
-          else GitHub.userAnswer(context.root, task, progress).map(_.nonEmpty)
+          if !needsInputMetadata then true.pure[F]
+          else
+            GitHub.hasQuestionComment(context.root, task).flatMap {
+              case false =>
+                // needs-input metadata with no real question ever posted:
+                // not a genuine block, let evaluation resolve it.
+                true.pure[F]
+              case true =>
+                GitHub.userAnswer(context.root, task, progress).map(_.nonEmpty)
+            }
         }
         candidates = eligible.map(task =>
           RunnableTask(
@@ -371,7 +379,8 @@ object Main extends IOApp:
           s"Evaluating task #${run.task.number} with ${evaluatorRunner.display}..."
         )
         userAnswer <- GitHub.userAnswer(run.context.root, run.task, progress)
-        evaluation <- existingEvaluation(run.task)
+        hasRealQuestion <- GitHub.hasQuestionComment(run.context.root, run.task)
+        evaluation <- existingEvaluation(run.task, hasRealQuestion)
           .filter(_ => userAnswer.isEmpty)
           .fold(
             AgentExecutor[F]
@@ -903,7 +912,24 @@ Rules:
           .collect { case ujson.Str(value) => normalizeExecution(value) }
           .getOrElse("needs-input")
       )
-    }.getOrElse(TaskEvaluation(stripped, None, execution = "needs-input"))
+    }.getOrElse {
+      // Evaluator output wasn't valid JSON: don't corrupt the issue body with
+      // raw output, and don't silently fall through to "ready" either. Post
+      // an explicit, real reason so this is a genuine, explainable block.
+      val preview = stripped.take(500)
+      TaskEvaluation(
+        body = fallbackBody,
+        questions = Some(
+          s"""Evaluator output could not be parsed as JSON, so task evaluation failed.
+             |
+             |Raw output (truncated):
+             |$preview
+             |
+             |Reply here once this can be re-run, or fix the underlying evaluator issue.""".stripMargin
+        ),
+        execution = "needs-input"
+      )
+    }
 
   private def extractJsonObject(value: String): Option[String] =
     val jsonFence = "(?s)```json\\s*(\\{.*?\\})\\s*```".r
@@ -918,18 +944,26 @@ Rules:
         Option.when(start >= 0 && end > start)(value.substring(start, end + 1))
       }
 
-  private def existingEvaluation(task: Issue): Option[TaskEvaluation] =
+  private def existingEvaluation(
+      task: Issue,
+      hasRealQuestion: Boolean
+  ): Option[TaskEvaluation] =
     (evaluationStatus(task.body), executionStatus(task.body)) match
       case (Some("ready"), Some("implement")) if hasRunnerMetadata(task.body) =>
         Some(TaskEvaluation(task.body, None, execution = "implement"))
       case (Some("ready"), Some("split")) if hasRunnerMetadata(task.body) =>
         Some(TaskEvaluation(task.body, None, execution = "split"))
-      case (Some("needs-input"), _) | (_, Some("needs-input")) =>
+      case (Some("needs-input"), _) | (_, Some("needs-input"))
+          if hasRealQuestion =>
         TaskEvaluation(
           task.body,
-          Some("Task is already marked as needing user input."),
+          Some(
+            "Task is already marked as needing user input. See the \"Questions before execution:\" comment on this issue for details."
+          ),
           execution = "needs-input"
         ).some
+      // needs-input metadata but no question was ever actually posted:
+      // not a genuine block, fall through to a real evaluation.
       case _ => None
 
   private def evaluationStatus(body: String): Option[String] =
