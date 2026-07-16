@@ -179,16 +179,33 @@ object Main extends IOApp:
           val needsInputMetadata =
             evaluationStatus(task.body).contains("needs-input") ||
               executionStatus(task.body).contains("needs-input")
-          if !needsInputMetadata then true.pure[F]
-          else
-            GitHub.hasQuestionComment(context.root, task).flatMap {
-              case false =>
-                // needs-input metadata with no real question ever posted:
-                // not a genuine block, let evaluation resolve it.
-                true.pure[F]
-              case true =>
-                GitHub.userAnswer(context.root, task, progress).map(_.nonEmpty)
-            }
+          val needsInputCheck =
+            if !needsInputMetadata then true.pure[F]
+            else
+              GitHub.hasQuestionComment(context.root, task).flatMap {
+                case false =>
+                  // needs-input metadata with no real question ever posted:
+                  // not a genuine block, let evaluation resolve it.
+                  true.pure[F]
+                case true =>
+                  GitHub
+                    .userAnswer(context.root, task, progress)
+                    .map(_.nonEmpty)
+              }
+          needsInputCheck.flatMap {
+            case false => false.pure[F]
+            case true =>
+              // A branch/PR from an earlier run may still be open (e.g. its
+              // CI is still failing or awaiting review): re-running the
+              // implementer would create a second local branch of the same
+              // name and diverge, so skip the task until that PR closes.
+              GitHub
+                .hasOpenPullRequestForBranch(
+                  context.root,
+                  s"task-${task.number}"
+                )
+                .map(!_)
+          }
         }
         candidates = eligible.map(task =>
           RunnableTask(
