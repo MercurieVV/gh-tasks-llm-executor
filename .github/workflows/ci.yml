@@ -25,5 +25,7 @@ jobs:
           ${{ runner.os }}-scala-cli-
     - name: Set up scala-cli
       uses: VirtusLab/scala-cli-setup@main
+      with:
+        jvm: temurin:21
     - name: Run tests
       run: scala-cli test .
