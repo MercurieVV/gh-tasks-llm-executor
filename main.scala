@@ -73,7 +73,13 @@ final case class TaskRun(
     task: Issue,
     runner: TaskRunner,
     worktreePath: os.Path,
-    branchName: String
+    branchName: String,
+    // Base to branch off of / merge into. A subtask of a split task
+    // (see GitHub.parentIds) integrates into its parent's shared branch
+    // instead of the default branch, so sibling subtasks land together in
+    // one final merge (GitHub.checkParentsForCompletion) rather than each
+    // hitting the default branch independently.
+    baseBranch: Option[String]
 )
 
 final case class TaskWithPrompt(
@@ -505,6 +511,7 @@ object Main extends IOApp:
           run.context.root,
           run.worktreePath,
           run.branchName,
+          run.baseBranch,
           progress
         )
         _ <- TaskLogger.trace[F](
@@ -658,6 +665,7 @@ object Main extends IOApp:
         run.context.root,
         run.worktreePath,
         run.branchName,
+        run.baseBranch,
         run.task,
         extractAgentFinalization(changed.run.output)
       ).as(changed.run)
@@ -782,8 +790,9 @@ object Main extends IOApp:
         s"TaskSelection(candidates=${candidates.map(t => s"#${t.issue.number}").mkString(",")})"
       case NoTask(_) =>
         "NoTask"
-      case TaskRun(_, task, runner, worktreePath, branchName) =>
-        s"TaskRun(issue=#${task.number},runner=${runner.display},worktree=$worktreePath,branch=$branchName)"
+      case TaskRun(_, task, runner, worktreePath, branchName, baseBranch) =>
+        s"TaskRun(issue=#${task.number},runner=${runner.display},worktree=$worktreePath,branch=$branchName,base=${baseBranch
+            .getOrElse("default")})"
       case TaskWithPrompt(run, parentConclusion, replayContext) =>
         s"TaskWithPrompt(issue=#${run.task.number},hasDependencyConclusion=${parentConclusion.nonEmpty},hasReplayContext=${replayContext.nonEmpty})"
       case TaskWithOutput(run, output) =>
@@ -841,7 +850,8 @@ object Main extends IOApp:
       task = task,
       runner = runner,
       worktreePath = context.root / ".worktrees" / s"$taskName-$taskId",
-      branchName = s"task-$taskId"
+      branchName = s"task-$taskId",
+      baseBranch = GitHub.parentIds(task).headOption.map(parentId => s"task-$parentId")
     )
 
   private def taskSlug(title: String): Option[String] =
@@ -1194,6 +1204,7 @@ Rules:
       root: os.Path,
       worktreePath: os.Path,
       branchName: String,
+      baseBranch: Option[String],
       task: Issue,
       finalization: AgentFinalization
   )(using Sync[F]): F[Unit] =
@@ -1207,18 +1218,20 @@ Rules:
             root,
             worktreePath,
             branchName,
+            baseBranch,
             task,
             finalization.commitTitle,
             finalization.pullRequestBody,
             progress
           )
-        else Git[F].mergeLocally(root, worktreePath, branchName, progress)
+        else Git[F].mergeLocally(root, worktreePath, branchName, baseBranch, progress)
     yield ()
 
   private def commitAndMergeOrPublish[F[_]](
       root: os.Path,
       worktreePath: os.Path,
       branchName: String,
+      baseBranch: Option[String],
       task: Issue,
       finalization: AgentFinalization
   )(using Sync[F]): F[Unit] =
@@ -1226,12 +1239,13 @@ Rules:
       filesChanged <- Git[F].filesChanged(worktreePath)
       _ <-
         if filesChanged then
-          commitAndMerge(root, worktreePath, branchName, task, finalization)
+          commitAndMerge(root, worktreePath, branchName, baseBranch, task, finalization)
         else
           publishExistingCommits(
             root,
             worktreePath,
             branchName,
+            baseBranch,
             task,
             finalization
           )
@@ -1241,6 +1255,7 @@ Rules:
       root: os.Path,
       worktreePath: os.Path,
       branchName: String,
+      baseBranch: Option[String],
       task: Issue,
       finalization: AgentFinalization
   )(using Sync[F]): F[Unit] =
@@ -1253,12 +1268,13 @@ Rules:
             root,
             worktreePath,
             branchName,
+            baseBranch,
             task,
             finalization.commitTitle,
             finalization.pullRequestBody,
             progress
           )
-        else Git[F].mergeLocally(root, worktreePath, branchName, progress)
+        else Git[F].mergeLocally(root, worktreePath, branchName, baseBranch, progress)
     yield ()
 
   private def progress[F[_]: Sync](message: String): F[Unit] =

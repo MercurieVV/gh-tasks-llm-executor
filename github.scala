@@ -814,11 +814,17 @@ This parent task will not be implemented directly. Run child tasks first; when a
         body
       )
 
+  // A split task's subtasks merge into a shared integration branch
+  // (task-<parentId>, see main.scala's taskRun) rather than each landing on
+  // the default branch independently. Once every subtask issue is closed,
+  // that integration branch is itself merged into the default branch in one
+  // shot, and only then is the parent issue closed - so a split feature
+  // always lands atomically, never part-by-part.
   def checkParentsForCompletion[F[_]](
       root: os.Path,
       task: Issue,
       progress: String => F[Unit]
-  )(using Sync[F]): F[Unit] =
+  )(using F: Sync[F]): F[Unit] =
     parentIds(task).traverse_ { parentId =>
       for
         openIssues <- fetchIssues(root)
@@ -828,17 +834,8 @@ This parent task will not be implemented directly. Run child tasks first; when a
         _ <-
           if openChildren.isEmpty then
             progress(
-              s"All child tasks for parent #$parentId are completed. Leaving completion-check comment..."
-            ) *>
-              call(
-                root,
-                "gh",
-                "issue",
-                "comment",
-                parentId.toString,
-                "--body",
-                s"All child tasks for parent #$parentId are completed. Parent task is ready for completion check."
-              )
+              s"All child tasks for parent #$parentId are completed. Merging integration branch into the default branch..."
+            ) *> mergeIntegrationBranch(root, parentId, progress)
           else
             progress(
               s"Parent #$parentId still has ${openChildren.size} open child task(s)."
@@ -846,10 +843,63 @@ This parent task will not be implemented directly. Run child tasks first; when a
       yield ()
     }
 
+  private def mergeIntegrationBranch[F[_]](
+      root: os.Path,
+      parentId: Int,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    val branchName = s"task-$parentId"
+    F.blocking {
+      os.proc("git", "rev-parse", "--verify", branchName)
+        .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        .exitCode === 0
+    }.flatMap {
+      case false =>
+        progress(
+          s"No integration branch $branchName found for parent #$parentId; nothing to merge."
+        )
+      case true =>
+        for
+          pullRequest <- ensurePullRequest(
+            root,
+            branchName,
+            None,
+            parentId,
+            s"Integrate subtasks for #$parentId",
+            Some(s"Integrate subtasks for #$parentId"),
+            Some(
+              s"Merges completed subtasks of #$parentId into the default branch.\n\nCloses #$parentId"
+            ),
+            progress
+          )
+          _ <- awaitPullRequestChecks(
+            root,
+            pullRequest.number.toString,
+            PullRequestCheckTimeoutMillis,
+            PullRequestCheckPollMillis,
+            progress
+          )
+          _ <- progress("Merging integration Pull Request...")
+          _ <- call(root, "gh", "pr", "merge", pullRequest.number.toString, "--merge")
+          merged <- mergedPullRequest(root, pullRequest.number)
+          _ <- awaitBranchChecks(
+            root,
+            merged.baseRefName,
+            merged.mergeCommit,
+            PullRequestCheckTimeoutMillis,
+            PullRequestCheckPollMillis,
+            progress
+          )
+          _ <- setIssueStatus(root, parentId, "completed", progress)
+          _ <- closeIssue(root, parentId)
+        yield ()
+    }
+
   def pushCreateAndMergePr[F[_]](
       root: os.Path,
       worktreePath: os.Path,
       branchName: String,
+      baseBranch: Option[String],
       task: Issue,
       pullRequestTitle: Option[String],
       pullRequestBody: Option[String],
@@ -861,7 +911,9 @@ This parent task will not be implemented directly. Run child tasks first; when a
       pullRequest <- ensurePullRequest(
         worktreePath,
         branchName,
-        task,
+        baseBranch,
+        task.number,
+        task.title,
         pullRequestTitle,
         pullRequestBody,
         progress
@@ -898,7 +950,9 @@ This parent task will not be implemented directly. Run child tasks first; when a
   private def ensurePullRequest[F[_]](
       worktreePath: os.Path,
       branchName: String,
-      task: Issue,
+      baseBranch: Option[String],
+      taskNumber: Int,
+      taskTitle: String,
       pullRequestTitle: Option[String],
       pullRequestBody: Option[String],
       progress: String => F[Unit]
@@ -912,19 +966,21 @@ This parent task will not be implemented directly. Run child tasks first; when a
         progress("Creating Pull Request...") *>
           call(
             worktreePath,
-            "gh",
-            "pr",
-            "create",
-            "--title",
-            pullRequestTitle
-              .filter(_.trim.nonEmpty)
-              .getOrElse(s"Task #${task.number}: ${task.title}"),
-            "--body",
-            pullRequestBody
-              .filter(_.trim.nonEmpty)
-              .getOrElse(s"Closes #${task.number}"),
-            "--head",
-            branchName
+            Seq(
+              "gh",
+              "pr",
+              "create",
+              "--title",
+              pullRequestTitle
+                .filter(_.trim.nonEmpty)
+                .getOrElse(s"Task #$taskNumber: $taskTitle"),
+              "--body",
+              pullRequestBody
+                .filter(_.trim.nonEmpty)
+                .getOrElse(s"Closes #$taskNumber"),
+              "--head",
+              branchName
+            ) ++ baseBranch.toList.flatMap(base => Seq("--base", base))*
           ) *>
           pullRequestForBranch(worktreePath, branchName).flatMap {
             case Some(pullRequest) if pullRequest.state === "OPEN" =>

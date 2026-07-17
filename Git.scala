@@ -7,6 +7,7 @@ final class Git[F[_]](using F: Sync[F]):
       root: os.Path,
       worktreePath: os.Path,
       branchName: String,
+      baseBranch: Option[String],
       progress: String => F[Unit]
   ): F[Unit] =
     F.blocking(os.exists(worktreePath)).flatMap {
@@ -17,16 +18,68 @@ final class Git[F[_]](using F: Sync[F]):
           )
         )
       case false =>
-        progress(s"Creating worktree at $worktreePath on branch $branchName") *>
+        baseBranch.traverse_(ensureBranch(root, _, progress)) *>
+          progress(
+            s"Creating worktree at $worktreePath on branch $branchName${baseBranch
+                .fold("")(base => s" (base: $base)")}"
+          ) *>
           call(
             root,
-            "git",
-            "worktree",
-            "add",
-            "-b",
-            branchName,
-            worktreePath.toString
+            (Seq("git", "worktree", "add", "-b", branchName, worktreePath.toString) ++
+              baseBranch.toList)*
           )
+    }
+
+  // Creates a shared integration branch used as the base for a family of
+  // subtask branches, so those subtasks merge into it rather than directly
+  // into the default branch (see taskRun's baseBranch computation). A
+  // subtask branch always exists locally once created; an integration
+  // branch may not, so create (and, if there's a remote, publish) it once,
+  // on first use, from wherever HEAD currently is.
+  def ensureBranch(
+      root: os.Path,
+      branchName: String,
+      progress: String => F[Unit]
+  ): F[Unit] =
+    branchExistsLocally(root, branchName).flatMap {
+      case true => F.unit
+      case false =>
+        hasRemote(root).flatMap { remote =>
+          if remote then
+            branchExistsOnOrigin(root, branchName).flatMap {
+              case true =>
+                progress(
+                  s"Creating local integration branch $branchName tracking origin/$branchName..."
+                ) *> call(root, "git", "branch", branchName, s"origin/$branchName")
+              case false =>
+                progress(s"Creating integration branch $branchName...") *>
+                  call(root, "git", "branch", branchName) *>
+                  call(root, "git", "push", "-u", "origin", branchName)
+            }
+          else
+            progress(s"Creating integration branch $branchName...") *>
+              call(root, "git", "branch", branchName)
+        }
+    }
+
+  private def branchExistsLocally(
+      root: os.Path,
+      branchName: String
+  ): F[Boolean] =
+    F.blocking {
+      os.proc("git", "rev-parse", "--verify", branchName)
+        .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        .exitCode === 0
+    }
+
+  private def branchExistsOnOrigin(
+      root: os.Path,
+      branchName: String
+  ): F[Boolean] =
+    F.blocking {
+      os.proc("git", "rev-parse", "--verify", s"origin/$branchName")
+        .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        .exitCode === 0
     }
 
   def releaseWorktree(
@@ -192,16 +245,19 @@ final class Git[F[_]](using F: Sync[F]):
       root: os.Path,
       worktreePath: os.Path,
       branchName: String,
+      baseBranch: Option[String],
       progress: String => F[Unit]
   ): F[Unit] =
     for
-      mainBranch <- F.blocking(
+      currentBranch <- F.blocking(
         os.proc("git", "branch", "--show-current")
           .call(cwd = root)
           .out
           .text()
           .trim
       )
+      targetBranch = baseBranch.getOrElse(currentBranch)
+      switchesBranch = targetBranch =!= currentBranch
       _ <- progress(s"Removing worktree at $worktreePath")
       _ <- call(
         root,
@@ -211,10 +267,13 @@ final class Git[F[_]](using F: Sync[F]):
         "--force",
         worktreePath.toString
       )
-      _ <- progress(s"Merging branch $branchName into $mainBranch...")
+      _ <- baseBranch.traverse_(ensureBranch(root, _, progress))
+      _ <- if switchesBranch then call(root, "git", "checkout", targetBranch) else F.unit
+      _ <- progress(s"Merging branch $branchName into $targetBranch...")
       _ <- call(root, "git", "merge", branchName)
       _ <- progress(s"Deleting local branch $branchName...")
       _ <- call(root, "git", "branch", "-d", branchName)
+      _ <- if switchesBranch then call(root, "git", "checkout", currentBranch) else F.unit
     yield ()
 
   def cleanupWorktree(
