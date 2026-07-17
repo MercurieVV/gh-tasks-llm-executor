@@ -37,28 +37,36 @@ object Main extends IOApp:
 
   private def businessLogic[F[_]: Sync]: BusinessLogic[Flow[F]] =
     BusinessLogic[Flow[F]](
-      resolveContext = traced("resolveContext", resolveContext[F]),
-      selectTask = traced("selectTask", selectTask[F]),
-      executeTask = traced("executeTask", executeTask[F]),
-      resumeExistingPullRequest =
-        traced("resumeExistingPullRequest", resumeExistingPullRequest[F]),
-      announceTask = traced("announceTask", announceTask[F]),
-      fetchTaskContext = traced("fetchTaskContext", fetchTaskContext[F]),
-      evaluateTask = traced("evaluateTask", evaluateTask[F]),
-      needsUserInputSummary =
-        traced("needsUserInputSummary", needsUserInputSummary[F]),
-      splitTaskSummary = traced("splitTaskSummary", splitTaskSummary[F]),
-      runPreparedTask = runPreparedTask[F],
-      completedTaskSummary = completedTaskSummary[F],
-      changedPlan = traced("changedPlan", changedPlan[F]),
-      commitChangedTask = traced("commitChangedTask", commitChangedTask[F]),
-      reportUnchangedTask =
-        traced("reportUnchangedTask", reportUnchangedTask[F]),
-      publicationPlan = publicationPlan[F],
-      commitChangedPublication = commitChangedPublication[F],
-      publishExistingPublication = publishExistingPublication[F],
-      toProgramSays =
-        Kleisli(summary => Sync[F].pure(ProgramSays.Done(summary.toJson)))
+      programArrows = ProgramArrows[Flow[F]](
+        resolveContext = traced("resolveContext", resolveContext[F]),
+        selectTask = traced("selectTask", selectTask[F]),
+        executeTask = traced("executeTask", executeTask[F]),
+        toProgramSays =
+          Kleisli(summary => Sync[F].pure(ProgramSays.Done(summary.toJson)))
+      ),
+      taskArrows = TaskArrows[Flow[F]](
+        resumeExistingPullRequest =
+          traced("resumeExistingPullRequest", resumeExistingPullRequest[F]),
+        announceTask = traced("announceTask", announceTask[F]),
+        fetchTaskContext = traced("fetchTaskContext", fetchTaskContext[F]),
+        evaluateTask = traced("evaluateTask", evaluateTask[F]),
+        needsUserInputSummary =
+          traced("needsUserInputSummary", needsUserInputSummary[F]),
+        splitTaskSummary = traced("splitTaskSummary", splitTaskSummary[F]),
+        runPreparedTask = runPreparedTask[F],
+        completedTaskSummary = completedTaskSummary[F]
+      ),
+      changeArrows = ChangeArrows[Flow[F]](
+        changedPlan = traced("changedPlan", changedPlan[F]),
+        commitChangedTask = traced("commitChangedTask", commitChangedTask[F]),
+        reportUnchangedTask =
+          traced("reportUnchangedTask", reportUnchangedTask[F])
+      ),
+      publicationArrows = PublicationArrows[Flow[F]](
+        publicationPlan = publicationPlan[F],
+        commitChangedPublication = commitChangedPublication[F],
+        publishExistingPublication = publishExistingPublication[F]
+      )
     )
 
   private def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =

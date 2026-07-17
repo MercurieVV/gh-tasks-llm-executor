@@ -144,58 +144,84 @@ final case class RunSummary(
       )
     )
 
-final case class BusinessLogic[ArrowK[_, _]](
-    resolveContext: ArrowK[AppInput, RunContext],
-    selectTask: ArrowK[RunContext, TaskSelection],
-    executeTask: ArrowK[TaskSelection, RunSummary],
-    resumeExistingPullRequest: ArrowK[TaskRun, RunSummary],
-    announceTask: ArrowK[TaskRun, TaskRun],
-    fetchTaskContext: ArrowK[TaskRun, TaskWithPrompt],
-    evaluateTask: ArrowK[
-      TaskWithPrompt,
-      Either[NeedsUserInput, Either[SplitTask, TaskWithPrompt]]
-    ],
-    needsUserInputSummary: ArrowK[NeedsUserInput, RunSummary],
-    splitTaskSummary: ArrowK[SplitTask, RunSummary],
-    runPreparedTask: ArrowK[TaskWithPrompt, TaskRun],
-    completedTaskSummary: ArrowK[TaskRun, RunSummary],
-    changedPlan: ArrowK[TaskWithOutput, Either[ChangedTask, UnchangedTask]],
-    commitChangedTask: ArrowK[ChangedTask, TaskWithOutput],
-    reportUnchangedTask: ArrowK[UnchangedTask, TaskWithOutput],
-    publicationPlan: ArrowK[
-      PublishRequest,
-      Either[ChangedPublication, ExistingPublication]
-    ],
-    commitChangedPublication: ArrowK[ChangedPublication, Unit],
-    publishExistingPublication: ArrowK[ExistingPublication, Unit],
-    toProgramSays: ArrowK[RunSummary, ProgramSays[ujson.Value]]
-)(using arrowChoice: ArrowChoice[ArrowK]):
+final case class ProgramArrows[-->[_, _]](
+    resolveContext: AppInput --> RunContext,
+    selectTask: RunContext --> TaskSelection,
+    executeTask: TaskSelection --> RunSummary,
+    toProgramSays: RunSummary --> ProgramSays[ujson.Value]
+)
 
-  def program: ArrowK[AppInput, ProgramSays[ujson.Value]] =
-    taskFlow >>> toProgramSays
+final case class TaskArrows[-->[_, _]](
+    resumeExistingPullRequest: TaskRun --> RunSummary,
+    announceTask: TaskRun --> TaskRun,
+    fetchTaskContext: TaskRun --> TaskWithPrompt,
+    evaluateTask: TaskWithPrompt -->
+      Either[
+        NeedsUserInput,
+        Either[SplitTask, TaskWithPrompt]
+      ],
+    needsUserInputSummary: NeedsUserInput --> RunSummary,
+    splitTaskSummary: SplitTask --> RunSummary,
+    runPreparedTask: TaskWithPrompt --> TaskRun,
+    completedTaskSummary: TaskRun --> RunSummary
+)
 
-  def taskFlow: ArrowK[AppInput, RunSummary] =
-    resolveContext >>> selectTask >>> executeTask
+final case class ChangeArrows[-->[_, _]](
+    changedPlan: TaskWithOutput --> Either[ChangedTask, UnchangedTask],
+    commitChangedTask: ChangedTask --> TaskWithOutput,
+    reportUnchangedTask: UnchangedTask --> TaskWithOutput
+)
 
-  def resumeChoice: ArrowK[Either[TaskRun, TaskRun], RunSummary] =
-    arrowChoice.choice(resumeExistingPullRequest, taskExecution)
+final case class PublicationArrows[-->[_, _]](
+    publicationPlan: PublishRequest -->
+      Either[
+        ChangedPublication,
+        ExistingPublication
+      ],
+    commitChangedPublication: ChangedPublication --> Unit,
+    publishExistingPublication: ExistingPublication --> Unit
+)
 
-  def taskExecution: ArrowK[TaskRun, RunSummary] =
-    announceTask >>>
-      fetchTaskContext >>>
-      evaluateTask >>>
+final case class BusinessLogic[-->[_, _]](
+    programArrows: ProgramArrows[-->],
+    taskArrows: TaskArrows[-->],
+    changeArrows: ChangeArrows[-->],
+    publicationArrows: PublicationArrows[-->]
+)(using arrowChoice: ArrowChoice[-->]):
+
+  def program: AppInput --> ProgramSays[ujson.Value] =
+    taskFlow >>> programArrows.toProgramSays
+
+  def taskFlow: AppInput --> RunSummary =
+    programArrows.resolveContext >>>
+      programArrows.selectTask >>>
+      programArrows.executeTask
+
+  def resumeChoice: Either[TaskRun, TaskRun] --> RunSummary =
+    arrowChoice.choice(taskArrows.resumeExistingPullRequest, taskExecution)
+
+  def taskExecution: TaskRun --> RunSummary =
+    taskArrows.announceTask >>>
+      taskArrows.fetchTaskContext >>>
+      taskArrows.evaluateTask >>>
       arrowChoice.choice(
-        needsUserInputSummary,
-        arrowChoice.choice(splitTaskSummary, executePreparedTask)
+        taskArrows.needsUserInputSummary,
+        arrowChoice.choice(taskArrows.splitTaskSummary, executePreparedTask)
       )
 
-  def executePreparedTask: ArrowK[TaskWithPrompt, RunSummary] =
-    runPreparedTask >>> completedTaskSummary
+  def executePreparedTask: TaskWithPrompt --> RunSummary =
+    taskArrows.runPreparedTask >>> taskArrows.completedTaskSummary
 
-  def commitIfChanged: ArrowK[TaskWithOutput, TaskWithOutput] =
-    changedPlan >>>
-      arrowChoice.choice(commitChangedTask, reportUnchangedTask)
+  def commitIfChanged: TaskWithOutput --> TaskWithOutput =
+    changeArrows.changedPlan >>>
+      arrowChoice.choice(
+        changeArrows.commitChangedTask,
+        changeArrows.reportUnchangedTask
+      )
 
-  def publishChanges: ArrowK[PublishRequest, Unit] =
-    publicationPlan >>>
-      arrowChoice.choice(commitChangedPublication, publishExistingPublication)
+  def publishChanges: PublishRequest --> Unit =
+    publicationArrows.publicationPlan >>>
+      arrowChoice.choice(
+        publicationArrows.commitChangedPublication,
+        publicationArrows.publishExistingPublication
+      )
