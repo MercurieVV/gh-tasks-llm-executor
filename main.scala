@@ -1,8 +1,6 @@
 import arrowstep.core.*
 import arrowstep.runtime.AgentMain
 import cats.Monoid
-import cats.arrow.Arrow
-import cats.arrow.ArrowChoice
 import cats.data.Kleisli
 import cats.effect.ExitCode
 import cats.effect.IO
@@ -13,148 +11,6 @@ import cats.syntax.all.*
 
 import scala.annotation.tailrec
 import scala.util.Try
-
-final case class AppInput(root: os.Path, taskNumber: Option[Int])
-
-final case class RunContext(
-    root: os.Path,
-    agentInventory: AgentInventory,
-    taskNumber: Option[Int]
-)
-
-final case class TaskRunner(
-    agent: String,
-    model: Option[String],
-    effort: Option[String],
-    version: Option[String]
-):
-  def display: String =
-    val modelPart = model.fold("")(value => s", model: $value")
-    val effortPart = effort.fold("")(value => s", effort: $value")
-    val versionPart = version.fold("")(value => s", version: $value")
-    s"agent: $agent$modelPart$effortPart$versionPart"
-
-  def command(
-      prompt: String,
-      allowedTools: Seq[String] = Nil,
-      jsonSchema: Option[String] = None
-  ): Seq[String] =
-    agent match
-      case "claude" =>
-        Seq(agent) ++ model.toList.flatMap(value => Seq("--model", value)) ++
-          (if allowedTools.isEmpty then Nil
-           else Seq("--allowedTools") ++ allowedTools) ++
-          jsonSchema.toList.flatMap(schema => Seq("--json-schema", schema)) ++
-          Seq("-p", prompt)
-      case "codex" =>
-        Seq(agent, "exec") ++
-          model.toList.flatMap(value => Seq("--model", value)) ++
-          effort.toList.flatMap(value =>
-            Seq("--config", s"model_reasoning_effort=$value")
-          ) ++
-          Seq(prompt)
-      case "aider" =>
-        Seq(agent) ++ model.toList.flatMap(value => Seq("--model", value)) ++
-          Seq("--yes-always", "--no-auto-commits", "--message", prompt)
-      case _ =>
-        Seq(agent) ++ model.toList.flatMap(value => Seq("-m", value)) ++
-          Seq("-p", prompt)
-
-final case class RunnableTask(
-    issue: Issue,
-    runner: TaskRunner,
-    // An open Pull Request for this task's branch already exists (from a
-    // prior run that was interrupted before merging): resume by verifying
-    // and merging it instead of re-running the implementer.
-    resumePullRequest: Boolean = false
-)
-
-final case class TaskSelection(
-    context: RunContext,
-    candidates: List[RunnableTask]
-)
-
-final case class NoTask(context: RunContext)
-
-final case class TaskRun(
-    context: RunContext,
-    task: Issue,
-    runner: TaskRunner,
-    worktreePath: os.Path,
-    branchName: String,
-    // Base to branch off of / merge into. A subtask of a split task
-    // (see GitHub.parentIds) integrates into its parent's shared branch
-    // instead of the default branch, so sibling subtasks land together in
-    // one final merge (GitHub.checkParentsForCompletion) rather than each
-    // hitting the default branch independently.
-    baseBranch: Option[String]
-)
-
-final case class TaskWithPrompt(
-    run: TaskRun,
-    parentConclusion: Option[String],
-    replayContext: Option[String]
-)
-
-final case class TaskWithOutput(run: TaskRun, output: String)
-
-final case class NeedsUserInput(run: TaskRun, questions: String)
-
-final case class SplitTask(run: TaskRun)
-
-final case class TaskEvaluation(
-    body: String,
-    questions: Option[String],
-    execution: String
-)
-
-final case class ExistingBranch(run: TaskWithPrompt)
-
-final case class NewBranch(run: TaskWithPrompt)
-
-final case class ChangedTask(run: TaskWithOutput)
-
-final case class UnchangedTask(run: TaskWithOutput)
-
-final case class AgentFinalization(
-    commitTitle: Option[String],
-    pullRequestBody: Option[String]
-)
-
-final case class PublishRequest(
-    root: os.Path,
-    worktreePath: os.Path,
-    branchName: String,
-    baseBranch: Option[String],
-    task: Issue,
-    finalization: AgentFinalization
-)
-
-final case class ChangedPublication(request: PublishRequest)
-
-final case class ExistingPublication(request: PublishRequest)
-
-final case class RunSummary(
-    status: String,
-    message: String,
-    task: Option[Issue]
-):
-  def toJson: ujson.Value =
-    ujson.Obj.from(
-      Seq(
-        "status" -> ujson.Str(status),
-        "message" -> ujson.Str(message),
-        "task" -> task.fold[ujson.Value](ujson.Null) { issue =>
-          ujson.Obj.from(
-            Seq(
-              "number" -> ujson.Num(issue.number),
-              "title" -> ujson.Str(issue.title),
-              "state" -> ujson.Str(issue.state)
-            )
-          )
-        }
-      )
-    )
 
 object Main extends IOApp:
 
@@ -177,14 +33,33 @@ object Main extends IOApp:
   private def program[F[_]: Sync](
       input: AppInput
   ): F[ProgramSays[ujson.Value]] =
-    (taskFlow[F] >>> lift[F, RunSummary, ProgramSays[ujson.Value]](summary =>
-      ProgramSays.Done(summary.toJson)
-    )).run(input)
+    businessLogic[F].program.run(input)
 
-  private def taskFlow[F[_]: Sync]: -->[F, AppInput, RunSummary] =
-    traced("resolveContext", resolveContext[F]) >>>
-      traced("selectTask", selectTask[F]) >>>
-      traced("executeTask", executeTask[F])
+  private def businessLogic[F[_]: Sync]: BusinessLogic[Flow[F]] =
+    BusinessLogic[Flow[F]](
+      resolveContext = traced("resolveContext", resolveContext[F]),
+      selectTask = traced("selectTask", selectTask[F]),
+      executeTask = traced("executeTask", executeTask[F]),
+      resumeExistingPullRequest =
+        traced("resumeExistingPullRequest", resumeExistingPullRequest[F]),
+      announceTask = traced("announceTask", announceTask[F]),
+      fetchTaskContext = traced("fetchTaskContext", fetchTaskContext[F]),
+      evaluateTask = traced("evaluateTask", evaluateTask[F]),
+      needsUserInputSummary =
+        traced("needsUserInputSummary", needsUserInputSummary[F]),
+      splitTaskSummary = traced("splitTaskSummary", splitTaskSummary[F]),
+      runPreparedTask = runPreparedTask[F],
+      completedTaskSummary = completedTaskSummary[F],
+      changedPlan = traced("changedPlan", changedPlan[F]),
+      commitChangedTask = traced("commitChangedTask", commitChangedTask[F]),
+      reportUnchangedTask =
+        traced("reportUnchangedTask", reportUnchangedTask[F]),
+      publicationPlan = publicationPlan[F],
+      commitChangedPublication = commitChangedPublication[F],
+      publishExistingPublication = publishExistingPublication[F],
+      toProgramSays =
+        Kleisli(summary => Sync[F].pure(ProgramSays.Done(summary.toJson)))
+    )
 
   private def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =
     Kleisli { input =>
@@ -325,7 +200,7 @@ object Main extends IOApp:
           }
 
   private def noTaskSummary[F[_]: Sync]: -->[F, NoTask, RunSummary] =
-    lift { noTask =>
+    Kleisli { noTask =>
       val context = noTask.context
       val message = context.taskNumber.fold(
         "No tasks found without unresolved dependencies, open child tasks, or another process already claiming them."
@@ -337,38 +212,29 @@ object Main extends IOApp:
         message = message,
         task = None
       )
+        .pure[F]
     }
 
   private def resumeChoice[F[_]: Sync]
       : -->[F, Either[TaskRun, TaskRun], RunSummary] =
-    choose[F, TaskRun, TaskRun, RunSummary](
-      traced("resumeExistingPullRequest", resumeExistingPullRequest[F]),
-      taskExecution[F]
-    )
+    businessLogic[F].resumeChoice
 
   private def taskExecution[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
-    traced("announceTask", announceTask[F]) >>>
-      traced("fetchTaskContext", fetchTaskContext[F]) >>>
-      traced("evaluateTask", evaluateTask[F]) >>>
-      choose[F, NeedsUserInput, Either[SplitTask, TaskWithPrompt], RunSummary](
-        traced("needsUserInputSummary", needsUserInputSummary[F]),
-        choose[F, SplitTask, TaskWithPrompt, RunSummary](
-          traced("splitTaskSummary", splitTaskSummary[F]),
-          traced("executePreparedTask", executePreparedTask[F])
-        )
-      )
+    businessLogic[F].taskExecution
 
   private def executePreparedTask[
       F[_]: Sync
   ]: -->[F, TaskWithPrompt, RunSummary] =
-    runPreparedTask[F] >>>
-      lift { run =>
-        RunSummary(
-          status = "completed",
-          message = s"Task #${run.task.number} completed successfully.",
-          task = Some(run.task)
-        )
-      }
+    businessLogic[F].executePreparedTask
+
+  private def completedTaskSummary[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
+    Kleisli { run =>
+      RunSummary(
+        status = "completed",
+        message = s"Task #${run.task.number} completed successfully.",
+        task = Some(run.task)
+      ).pure[F]
+    }
 
   private def runPreparedTask[
       F[_]: Sync
@@ -699,11 +565,7 @@ object Main extends IOApp:
 
   private def commitIfChanged[F[_]: Sync]
       : -->[F, TaskWithOutput, TaskWithOutput] =
-    traced("changedPlan", changedPlan[F]) >>>
-      choose[F, ChangedTask, UnchangedTask, TaskWithOutput](
-        traced("commitChangedTask", commitChangedTask[F]),
-        traced("reportUnchangedTask", reportUnchangedTask[F])
-      )
+    businessLogic[F].commitIfChanged
 
   private def changedPlan[F[_]: Sync]
       : -->[F, TaskWithOutput, Either[ChangedTask, UnchangedTask]] =
@@ -852,22 +714,6 @@ object Main extends IOApp:
         task = Some(completedRun.task)
       )
     }
-
-  private def choose[F[_]: Sync, A, B, C](
-      left: -->[F, A, C],
-      right: -->[F, B, C]
-  ): -->[F, Either[A, B], C] =
-    Kleisli { input =>
-      val branch = input.fold(_ => "left", _ => "right")
-      val value = input.fold(identity, identity)
-      TaskLogger.trace[F](
-        s"decision choose branch=$branch input=${summarize(value)}"
-      ) *>
-        ArrowChoice[Flow[F]].choice(left, right).run(input)
-    }
-
-  private def lift[F[_]: Sync, A, B](f: A => B): -->[F, A, B] =
-    Arrow[Flow[F]].lift(f)
 
   private def traced[F[_]: Sync, A, B](
       name: String,
@@ -1386,11 +1232,7 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       task: Issue,
       finalization: AgentFinalization
   )(using Sync[F]): F[Unit] =
-    (publicationPlan[F] >>>
-      choose[F, ChangedPublication, ExistingPublication, Unit](
-        commitChangedPublication[F],
-        publishExistingPublication[F]
-      )).run(
+    businessLogic[F].publishChanges.run(
       PublishRequest(
         root,
         worktreePath,
