@@ -167,10 +167,7 @@ final case class TaskArrows[-->[_, _]](
     announceTask: TaskRun --> TaskRun,
     fetchTaskContext: TaskRun --> TaskWithPrompt,
     evaluateTask: TaskWithPrompt -->
-      Either[
-        NeedsUserInput,
-        Either[SplitTask, TaskWithPrompt]
-      ],
+      Either[NeedsUserInput, Either[SplitTask, TaskWithPrompt]],
     needsUserInputSummary: NeedsUserInput --> RunSummary,
     splitTaskSummary: SplitTask --> RunSummary,
     runPreparedTask: TaskWithPrompt --> TaskRun,
@@ -178,22 +175,13 @@ final case class TaskArrows[-->[_, _]](
 ):
   def resumeChoice(using ArrowChoice[-->]): RunnableTask --> RunSummary =
     resumePlan >>>
-      ArrowChoice[-->].choice(
-        resumeExistingPullRequest,
-        taskExecution
-      )
+      (resumeExistingPullRequest ||| taskExecution)
 
   def taskExecution(using ArrowChoice[-->]): TaskRun --> RunSummary =
     announceTask >>>
       fetchTaskContext >>>
       evaluateTask >>>
-      ArrowChoice[-->].choice(
-        needsUserInputSummary,
-        ArrowChoice[-->].choice(
-          splitTaskSummary,
-          executePreparedTask
-        )
-      )
+      (needsUserInputSummary ||| (splitTaskSummary ||| executePreparedTask))
 
   def executePreparedTask(using
       ArrowChoice[-->]
@@ -208,10 +196,7 @@ final case class ChangeArrows[-->[_, _]](
   def commitIfChanged(using ArrowChoice[-->]): TaskWithOutput -->
     TaskWithOutput =
     changedPlan >>>
-      ArrowChoice[-->].choice(
-        commitChangedTask,
-        reportUnchangedTask
-      )
+      (commitChangedTask ||| reportUnchangedTask)
 
 final case class PublicationArrows[-->[_, _]](
     publicationPlan: PublishRequest -->
@@ -231,18 +216,12 @@ final case class PublicationArrows[-->[_, _]](
 ):
   def publishChanges(using ArrowChoice[-->]): PublishRequest --> Unit =
     publicationPlan >>>
-      ArrowChoice[-->].choice(
-        prepareChangedPublication,
-        prepareExistingPublication
-      ) >>>
+      (prepareChangedPublication ||| prepareExistingPublication) >>>
       publishTransport
 
   def publishTransport(using ArrowChoice[-->]): PublishRequest --> Unit =
     publishTransportPlan >>>
-      ArrowChoice[-->].choice(
-        publishRemote,
-        publishLocal
-      )
+      (publishRemote ||| publishLocal)
 
 final case class PreparedTaskArrows[-->[_, _]](
     runExecutor: TaskWithPrompt --> TaskWithOutput,

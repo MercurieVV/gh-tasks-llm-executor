@@ -270,6 +270,7 @@ object Main extends IOApp:
               Git[F].preserveUnpushedCommits(
                 acquiredTask.run.worktreePath,
                 acquiredTask.run.branchName,
+                acquiredTask.run.baseBranch,
                 progress
               )
             }
@@ -588,7 +589,8 @@ object Main extends IOApp:
         filesChanged <- Git[F].filesChanged(task.run.worktreePath)
         hasPublishableCommits <- Git[F].hasPublishableCommits(
           task.run.worktreePath,
-          task.run.branchName
+          task.run.branchName,
+          task.run.baseBranch
         )
         hasOpenPullRequest <- GitHub.hasOpenPullRequestForBranch(
           task.run.worktreePath,

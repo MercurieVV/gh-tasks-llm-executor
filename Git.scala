@@ -128,9 +128,10 @@ final class Git[F[_]](using F: Sync[F]):
   def preserveUnpushedCommits(
       worktreePath: os.Path,
       branchName: String,
+      baseBranch: Option[String],
       progress: String => F[Unit]
   ): F[Unit] =
-    hasPublishableCommits(worktreePath, branchName).flatMap {
+    hasPublishableCommits(worktreePath, branchName, baseBranch).flatMap {
       case false => F.unit
       case true =>
         val recoveryRef = s"refs/gh-tasks-llm-executor/failed/$branchName"
@@ -167,7 +168,8 @@ final class Git[F[_]](using F: Sync[F]):
 
   def hasPublishableCommits(
       worktreePath: os.Path,
-      branchName: String
+      branchName: String,
+      baseBranch: Option[String]
   ): F[Boolean] =
     F.blocking {
       val remoteBranch = s"origin/$branchName"
@@ -180,7 +182,21 @@ final class Git[F[_]](using F: Sync[F]):
             check = false
           )
           .exitCode === 0
-      val baseRef = if hasRemoteBranch then remoteBranch else "origin/HEAD"
+      val baseRef =
+        if hasRemoteBranch then remoteBranch
+        else
+          baseBranch.getOrElse {
+            val hasMaster = os
+              .proc("git", "rev-parse", "--verify", "master")
+              .call(
+                cwd = worktreePath,
+                stdout = os.Pipe,
+                stderr = os.Pipe,
+                check = false
+              )
+              .exitCode === 0
+            if hasMaster then "master" else "main"
+          }
       val result =
         os.proc("git", "rev-list", "--count", s"$baseRef..HEAD")
           .call(
