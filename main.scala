@@ -59,7 +59,14 @@ final case class TaskRunner(
         Seq(agent) ++ model.toList.flatMap(value => Seq("-m", value)) ++
           Seq("-p", prompt)
 
-final case class RunnableTask(issue: Issue, runner: TaskRunner)
+final case class RunnableTask(
+    issue: Issue,
+    runner: TaskRunner,
+    // An open Pull Request for this task's branch already exists (from a
+    // prior run that was interrupted before merging): resume by verifying
+    // and merging it instead of re-running the implementer.
+    resumePullRequest: Boolean = false
+)
 
 final case class TaskSelection(
     context: RunContext,
@@ -177,10 +184,21 @@ object Main extends IOApp:
         rawIssues <- GitHub.fetchIssues(context.root)
         issues <- rawIssues.traverse(effectiveIssue[F](context.root, _))
         openIssueNumbers = issues.map(_.number).toSet
-        filteredByDeps = issues
-          .filter(task => context.taskNumber.forall(_ === task.number))
-          .filterNot(GitHub.hasUnresolvedDependencies(_, openIssueNumbers))
-          .filterNot(GitHub.hasOpenChildren(_, issues))
+        candidatesByNumber = issues.filter(task =>
+          context.taskNumber.forall(_ === task.number)
+        )
+        filteredByDeps <- candidatesByNumber.filterA { task =>
+          val unresolvedDeps = GitHub.hasUnresolvedDependencies(task, openIssueNumbers)
+          val openChildren = if unresolvedDeps then false else GitHub.hasOpenChildren(task, issues)
+          val excluded = unresolvedDeps || openChildren
+          val reason =
+            if unresolvedDeps then Some("has unresolved dependencies")
+            else if openChildren then Some("has open child tasks")
+            else None
+          reason.traverse_(why =>
+            TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
+          ).as(!excluded)
+        }
         eligible <- filteredByDeps.filterA { task =>
           val needsInputMetadata =
             evaluationStatus(task.body).contains("needs-input") ||
@@ -197,30 +215,41 @@ object Main extends IOApp:
                   GitHub
                     .userAnswer(context.root, task, progress)
                     .map(_.nonEmpty)
+                    .flatTap { hasAnswer =>
+                      if hasAnswer then ().pure[F]
+                      else
+                        TaskLogger.trace(
+                          s"selectTask excluding #${task.number}: needs-input question posted, no user answer yet"
+                        )
+                    }
               }
-          needsInputCheck.flatMap {
-            case false => false.pure[F]
-            case true =>
-              // A branch/PR from an earlier run may still be open (e.g. its
-              // CI is still failing or awaiting review): re-running the
-              // implementer would create a second local branch of the same
-              // name and diverge, so skip the task until that PR closes.
-              GitHub
-                .hasOpenPullRequestForBranch(
-                  context.root,
-                  s"task-${task.number}"
-                )
-                .map(!_)
-          }
+          needsInputCheck
         }
-        candidates = eligible.map(task =>
+        // A branch/PR from an earlier run may still be open (e.g. it was
+        // interrupted before merging): re-running the implementer would
+        // create a second local branch of the same name and diverge, so
+        // resume that PR (verify checks, merge) instead of re-implementing.
+        eligibleWithResumeFlag <- eligible.traverse { task =>
+          GitHub
+            .hasOpenPullRequestForBranch(context.root, s"task-${task.number}")
+            .flatTap { hasOpenPr =>
+              if !hasOpenPr then ().pure[F]
+              else
+                TaskLogger.trace(
+                  s"selectTask resuming #${task.number}: an open Pull Request for task-${task.number} already exists; will verify/merge instead of re-implementing"
+                )
+            }
+            .map(hasOpenPr => (task, hasOpenPr))
+        }
+        candidates = eligibleWithResumeFlag.map { case (task, hasOpenPr) =>
           RunnableTask(
             task,
             context.agentInventory
               .selectRunner(GitHub.taskRunners(task))
-              .getOrElse(evaluatorRunner)
+              .getOrElse(evaluatorRunner),
+            resumePullRequest = hasOpenPr
           )
-        )
+        }
         _ <- progress(
           context.taskNumber.fold(
             s"Found ${candidates.size} runnable open tasks with preferred runner metadata."
@@ -259,9 +288,11 @@ object Main extends IOApp:
         IssueClaim
           .acquire[F](context.root, head.issue.number, progress)
           .use { _ =>
-            taskExecution[F].run(
-              taskRun(context, head.issue, head.runner)
-            )
+            val run = taskRun(context, head.issue, head.runner)
+            if head.resumePullRequest then
+              traced("resumeExistingPullRequest", resumeExistingPullRequest[F])
+                .run(run)
+            else taskExecution[F].run(run)
           }
           .recoverWith { case _: IssueAlreadyClaimedException =>
             progress(
@@ -668,7 +699,15 @@ object Main extends IOApp:
         run.baseBranch,
         run.task,
         extractAgentFinalization(changed.run.output)
-      ).as(changed.run)
+      ).handleErrorWith { error =>
+        GitHub
+          .commentTaskFailure(
+            run.context.root,
+            run.task,
+            error.getMessage,
+            progress
+          ) *> Sync[F].raiseError(error)
+      }.as(changed.run)
     }
 
   private def reportUnchangedTask[
@@ -741,6 +780,41 @@ object Main extends IOApp:
       yield run
     }
 
+  // Completes a task whose implementer already ran in a prior, interrupted
+  // invocation and left an open Pull Request behind: verify/merge that PR,
+  // then close the task the same way a fresh run's closeTask would, and
+  // sweep up any leftover local worktree/branch (usually already gone).
+  private def resumeExistingPullRequest[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
+    Kleisli { run =>
+      for
+        _ <- progress(
+          s"Task #${run.task.number} already has an open Pull Request for ${run.branchName}; resuming to verify and merge instead of re-implementing..."
+        )
+        _ <- GitHub
+          .resumeOpenPullRequest(run.context.root, run.branchName, progress)
+          .handleErrorWith { error =>
+            GitHub.commentTaskFailure(
+              run.context.root,
+              run.task,
+              error.getMessage,
+              progress
+            ) *> Sync[F].raiseError(error)
+          }
+        completedRun <- closeTask[F].run(TaskWithOutput(run, output = ""))
+        _ <- Git[F].cleanupWorktree(
+          run.context.root,
+          run.worktreePath,
+          run.branchName,
+          progress
+        )
+      yield RunSummary(
+        status = "completed",
+        message =
+          s"Task #${completedRun.task.number} completed successfully (resumed existing Pull Request).",
+        task = Some(completedRun.task)
+      )
+    }
+
   private def choose[F[_]: Sync, A, B, C](
       left: -->[F, A, C],
       right: -->[F, B, C]
@@ -784,8 +858,8 @@ object Main extends IOApp:
       case TaskRunner(agent, model, effort, version) =>
         s"TaskRunner(agent=$agent,model=${model.getOrElse("")},effort=${effort
             .getOrElse("")},version=${version.getOrElse("")})"
-      case RunnableTask(issue, runner) =>
-        s"RunnableTask(issue=#${issue.number},runner=${runner.display})"
+      case RunnableTask(issue, runner, resumePullRequest) =>
+        s"RunnableTask(issue=#${issue.number},runner=${runner.display},resumePullRequest=$resumePullRequest)"
       case TaskSelection(_, candidates) =>
         s"TaskSelection(candidates=${candidates.map(t => s"#${t.issue.number}").mkString(",")})"
       case NoTask(_) =>

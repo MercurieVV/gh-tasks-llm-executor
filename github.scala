@@ -918,6 +918,19 @@ This parent task will not be implemented directly. Run child tasks first; when a
         pullRequestBody,
         progress
       )
+      _ <- mergeAndVerify(root, pullRequest, progress)
+    yield ()
+
+  // Verifies checks, merges, then verifies the base branch's own CI on the
+  // merge commit. Shared by pushCreateAndMergePr (fresh PR) and
+  // resumeOpenPullRequest (an already-pushed PR from a prior, interrupted
+  // run) so both paths finish a task the same way.
+  private def mergeAndVerify[F[_]](
+      root: os.Path,
+      pullRequest: PullRequest,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    for
       _ <- awaitPullRequestChecks(
         root,
         pullRequest.number.toString,
@@ -944,6 +957,30 @@ This parent task will not be implemented directly. Run child tasks first; when a
         progress
       )
     yield ()
+
+  // A prior run may have pushed a branch and opened a PR but exited before
+  // merging (e.g. checks were still pending, or the process was interrupted
+  // after push). selectTask then refuses to re-run the implementer while
+  // that PR is open (see main.scala hasOpenPullRequestForBranch check), so
+  // this resumes exactly where that run left off: verify checks, merge,
+  // verify the base branch's post-merge CI.
+  def resumeOpenPullRequest[F[_]](
+      root: os.Path,
+      branchName: String,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    pullRequestForBranch(root, branchName).flatMap {
+      case Some(pullRequest) if pullRequest.state === "OPEN" =>
+        progress(
+          s"Found open Pull Request #${pullRequest.number} for $branchName; verifying checks and merging..."
+        ) *> mergeAndVerify(root, pullRequest, progress)
+      case _ =>
+        F.raiseError(
+          new RuntimeException(
+            s"No open Pull Request found for $branchName to resume."
+          )
+        )
+    }
 
   private final case class PullRequest(number: Int, state: String)
 
