@@ -264,3 +264,7 @@ final case class BusinessLogic[-->[_, _]](
       changeArrows.commitIfChanged >>>
       preparedTaskArrows.verifyReplayCi >>>
       preparedTaskArrows.closeTask
+
+object BusinessLogic:
+  given Functor2K[BusinessLogic] = Functor2K.derived
+  given Semigroup2K[BusinessLogic] = Semigroup2K.derived
