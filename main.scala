@@ -1,5 +1,6 @@
 import arrowstep.core.*
 import arrowstep.runtime.AgentMain
+import ArrowLogging.*
 import cats.Monoid
 import cats.data.Kleisli
 import cats.effect.ExitCode
@@ -8,6 +9,7 @@ import cats.effect.IOApp
 import cats.effect.Resource
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
+import io.github.mercurievv.minuscles.fieldsnames.derivation.semiauto.FieldNamesDerivation.fieldsNames
 
 import scala.annotation.tailrec
 import scala.util.Try
@@ -23,51 +25,54 @@ object Main extends IOApp:
     val arrowstepArgs = removeScriptArgs(args)
     AgentMain
       .run[IO](arrowstepArgs, os.pwd)(_ =>
-        program(AppInput(os.pwd, taskNumber))
+        businessLogic[IO].programArrows.program(AppInput(os.pwd, taskNumber))
       )
       .flatMap { outcome =>
         IO.print(outcome.stdout) *>
           IO.pure(ExitCode(outcome.exitCode))
       }
 
-  private def program[F[_]: Sync](
-      input: AppInput
-  ): F[ProgramSays[ujson.Value]] =
-    businessLogic[F].program.run(input)
-
   private def businessLogic[F[_]: Sync]: BusinessLogic[Flow[F]] =
+    val changeArrows = ChangeArrows[Flow[F]](
+      changedPlan = changedPlan[F],
+      commitChangedTask = commitChangedTask[F],
+      reportUnchangedTask = reportUnchangedTask[F]
+    )
     BusinessLogic[Flow[F]](
       programArrows = ProgramArrows[Flow[F]](
-        resolveContext = traced("resolveContext", resolveContext[F]),
-        selectTask = traced("selectTask", selectTask[F]),
-        executeTask = traced("executeTask", executeTask[F]),
+        resolveContext = resolveContext[F],
+        selectTask = selectTask[F],
+        executeTask = executeTask[F],
         toProgramSays =
           Kleisli(summary => Sync[F].pure(ProgramSays.Done(summary.toJson)))
       ),
       taskArrows = TaskArrows[Flow[F]](
-        resumeExistingPullRequest =
-          traced("resumeExistingPullRequest", resumeExistingPullRequest[F]),
-        announceTask = traced("announceTask", announceTask[F]),
-        fetchTaskContext = traced("fetchTaskContext", fetchTaskContext[F]),
-        evaluateTask = traced("evaluateTask", evaluateTask[F]),
-        needsUserInputSummary =
-          traced("needsUserInputSummary", needsUserInputSummary[F]),
-        splitTaskSummary = traced("splitTaskSummary", splitTaskSummary[F]),
+        resumeExistingPullRequest = resumeExistingPullRequest[F],
+        announceTask = announceTask[F],
+        fetchTaskContext = fetchTaskContext[F],
+        evaluateTask = evaluateTask[F],
+        needsUserInputSummary = needsUserInputSummary[F],
+        splitTaskSummary = splitTaskSummary[F],
         runPreparedTask = runPreparedTask[F],
         completedTaskSummary = completedTaskSummary[F]
       ),
-      changeArrows = ChangeArrows[Flow[F]](
-        changedPlan = traced("changedPlan", changedPlan[F]),
-        commitChangedTask = traced("commitChangedTask", commitChangedTask[F]),
-        reportUnchangedTask =
-          traced("reportUnchangedTask", reportUnchangedTask[F])
-      ),
+      changeArrows = changeArrows,
       publicationArrows = PublicationArrows[Flow[F]](
         publicationPlan = publicationPlan[F],
-        commitChangedPublication = commitChangedPublication[F],
-        publishExistingPublication = publishExistingPublication[F]
+        prepareChangedPublication = prepareChangedPublication[F],
+        prepareExistingPublication = prepareExistingPublication[F],
+        publishTransportPlan = publishTransportPlan[F],
+        publishRemote = publishRemote[F],
+        publishLocal = publishLocal[F]
+      ),
+      preparedTaskArrows = PreparedTaskArrows[Flow[F]](
+        runExecutor = runExecutor[F],
+        runProjectValidation = runProjectValidation[F],
+        commentOutput = commentOutput[F],
+        verifyReplayCi = verifyReplayCi[F],
+        closeTask = closeTask[F]
       )
-    )
+    ).withArrowLogging(arrowLogger[F])
 
   private def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =
     Kleisli { input =>
@@ -197,7 +202,7 @@ object Main extends IOApp:
           .acquire[F](context.root, head.issue.number, progress)
           .use { _ =>
             val run = taskRun(context, head.issue, head.runner)
-            resumeChoice[F].run(
+            businessLogic[F].taskArrows.resumeChoice.run(
               Either.cond(head.resumePullRequest, run, run)
             )
           }
@@ -223,18 +228,6 @@ object Main extends IOApp:
         .pure[F]
     }
 
-  private def resumeChoice[F[_]: Sync]
-      : -->[F, Either[TaskRun, TaskRun], RunSummary] =
-    businessLogic[F].resumeChoice
-
-  private def taskExecution[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
-    businessLogic[F].taskExecution
-
-  private def executePreparedTask[
-      F[_]: Sync
-  ]: -->[F, TaskWithPrompt, RunSummary] =
-    businessLogic[F].executePreparedTask
-
   private def completedTaskSummary[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
     Kleisli { run =>
       RunSummary(
@@ -250,19 +243,15 @@ object Main extends IOApp:
     traced("markInProgress", markInProgress[F]) >>>
       Kleisli { task =>
         worktreeResource[F](task).use { acquiredTask =>
-          (traced("runExecutor", runExecutor[F]) >>>
-            traced("runProjectValidation", runProjectValidation[F]) >>>
-            traced("commentOutput", commentOutput[F]) >>>
-            traced("commitIfChanged", commitIfChanged[F]) >>>
-            traced("verifyReplayCi", verifyReplayCi[F]) >>>
-            traced("closeTask", closeTask[F])).run(acquiredTask).onError {
-            case _ =>
+          businessLogic[F].executeAcquiredTask
+            .run(acquiredTask)
+            .onError { case _ =>
               Git[F].preserveUnpushedCommits(
                 acquiredTask.run.worktreePath,
                 acquiredTask.run.branchName,
                 progress
               )
-          }
+            }
         }
       }
 
@@ -571,10 +560,6 @@ object Main extends IOApp:
         .as(task)
     }
 
-  private def commitIfChanged[F[_]: Sync]
-      : -->[F, TaskWithOutput, TaskWithOutput] =
-    businessLogic[F].commitIfChanged
-
   private def changedPlan[F[_]: Sync]
       : -->[F, TaskWithOutput, Either[ChangedTask, UnchangedTask]] =
     Kleisli { task =>
@@ -740,6 +725,11 @@ object Main extends IOApp:
             ) *> Sync[F].raiseError(error)
           }
     }
+
+  private def arrowLogger[F[_]: Sync]: ArrowLogger[Flow[F]] =
+    new ArrowLogger[Flow[F]]:
+      def apply[A, B](name: String, flow: -->[F, A, B]): -->[F, A, B] =
+        traced(name, flow)
 
   private def summarize(value: Any): String =
     value match
@@ -1198,40 +1188,6 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
     normalized.startsWith("proposed commit title:") ||
     normalized.startsWith("proposed pull request body:")
 
-  private def commitAndMerge[F[_]](
-      root: os.Path,
-      worktreePath: os.Path,
-      branchName: String,
-      baseBranch: Option[String],
-      task: Issue,
-      finalization: AgentFinalization
-  )(using Sync[F]): F[Unit] =
-    for
-      _ <- progress("Files changed. Committing and merging changes...")
-      _ <- Git[F].commitAll(worktreePath, task, finalization.commitTitle)
-      hasRemote <- Git[F].hasRemote(root)
-      _ <-
-        if hasRemote then
-          GitHub.pushCreateAndMergePr(
-            root,
-            worktreePath,
-            branchName,
-            baseBranch,
-            task,
-            finalization.commitTitle,
-            finalization.pullRequestBody,
-            progress
-          )
-        else
-          Git[F].mergeLocally(
-            root,
-            worktreePath,
-            branchName,
-            baseBranch,
-            progress
-          )
-    yield ()
-
   private def commitAndMergeOrPublish[F[_]](
       root: os.Path,
       worktreePath: os.Path,
@@ -1240,7 +1196,7 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       task: Issue,
       finalization: AgentFinalization
   )(using Sync[F]): F[Unit] =
-    businessLogic[F].publishChanges.run(
+    businessLogic[F].publicationArrows.publishChanges(
       PublishRequest(
         root,
         worktreePath,
@@ -1264,66 +1220,66 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
         )
     }
 
-  private def commitChangedPublication[F[_]: Sync]
-      : -->[F, ChangedPublication, Unit] =
+  private def prepareChangedPublication[F[_]: Sync]
+      : -->[F, ChangedPublication, PublishRequest] =
     Kleisli { changed =>
       val request = changed.request
-      commitAndMerge(
-        request.root,
-        request.worktreePath,
-        request.branchName,
-        request.baseBranch,
-        request.task,
-        request.finalization
-      )
+      progress("Files changed. Committing and merging changes...") *>
+        Git[F]
+          .commitAll(
+            request.worktreePath,
+            request.task,
+            request.finalization.commitTitle
+          )
+          .as(request)
     }
 
-  private def publishExistingPublication[F[_]: Sync]
-      : -->[F, ExistingPublication, Unit] =
+  private def prepareExistingPublication[F[_]: Sync]
+      : -->[F, ExistingPublication, PublishRequest] =
     Kleisli { existing =>
       val request = existing.request
-      publishExistingCommits(
+      progress("No file changes, publishing existing local commits...").as(
+        request
+      )
+    }
+
+  private def publishTransportPlan[F[_]: Sync]
+      : -->[F, PublishRequest, Either[RemotePublication, LocalPublication]] =
+    Kleisli { request =>
+      Git[F]
+        .hasRemote(request.root)
+        .map(hasRemote =>
+          if hasRemote then Left(RemotePublication(request))
+          else Right(LocalPublication(request))
+        )
+    }
+
+  private def publishRemote[F[_]: Sync]: -->[F, RemotePublication, Unit] =
+    Kleisli { remote =>
+      val request = remote.request
+      GitHub.pushCreateAndMergePr(
         request.root,
         request.worktreePath,
         request.branchName,
         request.baseBranch,
         request.task,
-        request.finalization
+        request.finalization.commitTitle,
+        request.finalization.pullRequestBody,
+        progress
       )
     }
 
-  private def publishExistingCommits[F[_]](
-      root: os.Path,
-      worktreePath: os.Path,
-      branchName: String,
-      baseBranch: Option[String],
-      task: Issue,
-      finalization: AgentFinalization
-  )(using Sync[F]): F[Unit] =
-    for
-      _ <- progress("No file changes, publishing existing local commits...")
-      hasRemote <- Git[F].hasRemote(root)
-      _ <-
-        if hasRemote then
-          GitHub.pushCreateAndMergePr(
-            root,
-            worktreePath,
-            branchName,
-            baseBranch,
-            task,
-            finalization.commitTitle,
-            finalization.pullRequestBody,
-            progress
-          )
-        else
-          Git[F].mergeLocally(
-            root,
-            worktreePath,
-            branchName,
-            baseBranch,
-            progress
-          )
-    yield ()
+  private def publishLocal[F[_]: Sync]: -->[F, LocalPublication, Unit] =
+    Kleisli { local =>
+      val request = local.request
+      Git[F].mergeLocally(
+        request.root,
+        request.worktreePath,
+        request.branchName,
+        request.baseBranch,
+        progress
+      )
+    }
 
   private def progress[F[_]: Sync](message: String): F[Unit] =
     TaskLogger.script(message)
