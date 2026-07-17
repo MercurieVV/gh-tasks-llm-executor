@@ -47,6 +47,7 @@ object Main extends IOApp:
           Kleisli(summary => Sync[F].pure(ProgramSays.Done(summary.toJson)))
       ),
       taskArrows = TaskArrows[Flow[F]](
+        resumePlan = resumePlan[F],
         resumeExistingPullRequest = resumeExistingPullRequest[F],
         announceTask = announceTask[F],
         fetchTaskContext = fetchTaskContext[F],
@@ -152,6 +153,7 @@ object Main extends IOApp:
         }
         candidates = eligibleWithResumeFlag.map { case (task, hasOpenPr) =>
           RunnableTask(
+            context,
             task,
             context.agentInventory
               .selectRunner(GitHub.taskRunners(task))
@@ -201,10 +203,7 @@ object Main extends IOApp:
         IssueClaim
           .acquire[F](context.root, head.issue.number, progress)
           .use { _ =>
-            val run = taskRun(context, head.issue, head.runner)
-            businessLogic[F].taskArrows.resumeChoice.run(
-              Either.cond(head.resumePullRequest, run, run)
-            )
+            businessLogic[F].taskArrows.resumeChoice.run(head)
           }
           .recoverWith { case _: IssueAlreadyClaimedException =>
             progress(
@@ -226,6 +225,28 @@ object Main extends IOApp:
         task = None
       )
         .pure[F]
+    }
+
+  private def resumePlan[F[_]: Sync]
+      : -->[F, RunnableTask, Either[TaskRun, TaskRun]] =
+    Kleisli { task =>
+      val run = taskRun(task.context, task.issue, task.runner)
+      val shouldResume =
+        if task.resumePullRequest then
+          GitHub
+            .hasOpenPullRequestForBranch(task.context.root, run.branchName)
+            .flatTap { stillHasOpenPr =>
+              if stillHasOpenPr then ().pure[F]
+              else
+                progress(
+                  s"No open Pull Request remains for ${run.branchName}; creating a new run instead of resuming."
+                )
+            }
+        else false.pure[F]
+
+      shouldResume.map(resumePullRequest =>
+        Either.cond(resumePullRequest, run, run)
+      )
     }
 
   private def completedTaskSummary[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
@@ -679,33 +700,44 @@ object Main extends IOApp:
   private def resumeExistingPullRequest[F[_]: Sync]
       : -->[F, TaskRun, RunSummary] =
     Kleisli { run =>
-      for
-        _ <- progress(
-          s"Task #${run.task.number} already has an open Pull Request for ${run.branchName}; resuming to verify and merge instead of re-implementing..."
+      val resumeAndClose =
+        for
+          _ <- progress(
+            s"Task #${run.task.number} already has an open Pull Request for ${run.branchName}; resuming to verify and merge instead of re-implementing..."
+          )
+          _ <- GitHub.resumeOpenPullRequest(
+            run.context.root,
+            run.branchName,
+            progress
+          )
+          completedRun <- closeTask[F].run(TaskWithOutput(run, output = ""))
+          _ <- Git[F].cleanupWorktree(
+            run.context.root,
+            run.worktreePath,
+            run.branchName,
+            progress
+          )
+        yield RunSummary(
+          status = "completed",
+          message =
+            s"Task #${completedRun.task.number} completed successfully (resumed existing Pull Request).",
+          task = Some(completedRun.task)
         )
-        _ <- GitHub
-          .resumeOpenPullRequest(run.context.root, run.branchName, progress)
-          .handleErrorWith { error =>
-            GitHub.commentTaskFailure(
-              run.context.root,
-              run.task,
-              error.getMessage,
-              progress
-            ) *> Sync[F].raiseError(error)
-          }
-        completedRun <- closeTask[F].run(TaskWithOutput(run, output = ""))
-        _ <- Git[F].cleanupWorktree(
-          run.context.root,
-          run.worktreePath,
-          run.branchName,
-          progress
-        )
-      yield RunSummary(
-        status = "completed",
-        message =
-          s"Task #${completedRun.task.number} completed successfully (resumed existing Pull Request).",
-        task = Some(completedRun.task)
-      )
+
+      resumeAndClose.handleErrorWith {
+        case _: GitHub.NoOpenPullRequestToResumeException =>
+          progress(
+            s"No open Pull Request remains for ${run.branchName}; creating a new run instead of resuming."
+          ) *>
+            businessLogic[F].taskArrows.taskExecution.run(run)
+        case error =>
+          GitHub.commentTaskFailure(
+            run.context.root,
+            run.task,
+            error.getMessage,
+            progress
+          ) *> Sync[F].raiseError(error)
+      }
     }
 
   private def traced[F[_]: Sync, A, B](
@@ -743,7 +775,7 @@ object Main extends IOApp:
       case TaskRunner(agent, model, effort, version) =>
         s"TaskRunner(agent=$agent,model=${model.getOrElse("")},effort=${effort
             .getOrElse("")},version=${version.getOrElse("")})"
-      case RunnableTask(issue, runner, resumePullRequest) =>
+      case RunnableTask(_, issue, runner, resumePullRequest) =>
         s"RunnableTask(issue=#${issue.number},runner=${runner.display},resumePullRequest=$resumePullRequest)"
       case TaskSelection(_, candidates) =>
         s"TaskSelection(candidates=${candidates.map(t => s"#${t.issue.number}").mkString(",")})"

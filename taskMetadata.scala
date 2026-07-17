@@ -42,14 +42,18 @@ object TaskMetadata:
         dependencyLines =
           if newer.dependencyLines.nonEmpty then newer.dependencyLines
           else older.dependencyLines,
-        enrichedDescription = newer.enrichedDescription.orElse(older.enrichedDescription)
+        enrichedDescription =
+          newer.enrichedDescription.orElse(older.enrichedDescription)
       )
 
   private val DepKeywords =
     List("depends on", "depend on", "dependency", "dependencies")
   private val ParentLineRegex = """(?i)\bparent\b\s*:?\s*#\d+""".r
   private val RunnerHeaderMarkers =
-    List("preferred llms/models/efforts/versions", "preferred llms/models/versions")
+    List(
+      "preferred llms/models/efforts/versions",
+      "preferred llms/models/versions"
+    )
 
   // Splits `text` into the structured metadata lines and the remaining prose,
   // and folds the structured lines into a TaskMetadata.
@@ -76,7 +80,8 @@ object TaskMetadata:
           .drop(runnerHeaderIdx + 1)
           .takeWhile(l => l.trim.startsWith("-") || l.trim.startsWith("*"))
 
-    val parentLines = lines.filter(l => ParentLineRegex.findFirstIn(l).isDefined)
+    val parentLines =
+      lines.filter(l => ParentLineRegex.findFirstIn(l).isDefined)
     val dependencyLines =
       lines.filter(l => DepKeywords.exists(k => l.toLowerCase.contains(k)))
 
@@ -89,7 +94,7 @@ object TaskMetadata:
         val trimmed = l.trim
         val lower = trimmed.toLowerCase
         structuredLines.contains(lower) || lower.startsWith("evaluation:") ||
-          lower.startsWith("execution:") || lower.startsWith("phase:")
+        lower.startsWith("execution:") || lower.startsWith("phase:")
       }
       .mkString("\n")
       .trim
@@ -114,7 +119,9 @@ object TaskMetadata:
       metadata.phase.map(v => s"Phase: $v")
     ).flatten ++ metadata.parentLines ++ metadata.dependencyLines ++ metadata.runnerLines
     val metaBlock = metaLines.mkString("\n")
-    metadata.enrichedDescription.fold(metaBlock)(prose => s"$prose\n\n$metaBlock")
+    metadata.enrichedDescription.fold(metaBlock)(prose =>
+      s"$prose\n\n$metaBlock"
+    )
 
 trait TaskMetadataStore[F[_]]:
   def read(root: os.Path, task: Issue): F[TaskMetadata]

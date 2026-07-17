@@ -4,7 +4,11 @@
 
 import scala.util.Try
 
-final case class Probe(name: String, path: Option[String], version: Option[String]):
+final case class Probe(
+    name: String,
+    path: Option[String],
+    version: Option[String]
+):
   val available: Boolean = path.nonEmpty
 
 def commandOutput(command: Seq[String]): Option[String] =
@@ -73,9 +77,12 @@ def tool(
   val codex = probe("codex")
   val aider = probe("aider")
 
-  val claudeModels = envList("AGENT_RUNNER_CLAUDE_MODELS", List("opus", "sonnet", "haiku"))
-  val codexModels = envList("AGENT_RUNNER_CODEX_MODELS", List("gpt-5", "gpt-5-codex"))
-  val codexEfforts = envList("AGENT_RUNNER_CODEX_EFFORTS", List("high", "medium", "low"))
+  val claudeModels =
+    envList("AGENT_RUNNER_CLAUDE_MODELS", List("opus", "sonnet", "haiku"))
+  val codexModels =
+    envList("AGENT_RUNNER_CODEX_MODELS", List("gpt-5", "gpt-5-codex"))
+  val codexEfforts =
+    envList("AGENT_RUNNER_CODEX_EFFORTS", List("high", "medium", "low"))
   val aiderDeepseekModels = envList(
     "AGENT_RUNNER_AIDER_DEEPSEEK_MODELS",
     List("deepseek/deepseek-chat", "deepseek/deepseek-reasoner")
@@ -95,11 +102,22 @@ def tool(
       val strengths = model.toLowerCase match
         case "opus" =>
           List(
-            "evaluation", "complex-reasoning", "architecture", "failure-analysis",
-            "plan", "source-of-truth"
+            "evaluation",
+            "complex-reasoning",
+            "architecture",
+            "failure-analysis",
+            "plan",
+            "source-of-truth"
           )
         case "sonnet" =>
-          List("scala-code", "debugging", "refactoring", "docs", "source-of-truth", "implement")
+          List(
+            "scala-code",
+            "debugging",
+            "refactoring",
+            "docs",
+            "source-of-truth",
+            "implement"
+          )
         case "haiku" =>
           List("small-edits", "docs", "mechanical-changes", "implement", "test")
         case _ =>
@@ -110,9 +128,19 @@ def tool(
         model = model,
         effort = None,
         version = claude.version,
-        roles = if model == "opus" then List("evaluator", "implementor") else List("implementor"),
-        jobTypes =
-          List("scala", "tests", "docs", "github-issues", "plan", "source-of-truth", "implement", "test"),
+        roles =
+          if model == "opus" then List("evaluator", "implementor")
+          else List("implementor"),
+        jobTypes = List(
+          "scala",
+          "tests",
+          "docs",
+          "github-issues",
+          "plan",
+          "source-of-truth",
+          "implement",
+          "test"
+        ),
         strengths = strengths,
         available = claude.available,
         priority = priority,
@@ -124,33 +152,61 @@ def tool(
     for
       (model, modelIndex) <- codexModels.zipWithIndex
       (effort, effortIndex) <- codexEfforts.zipWithIndex
-    yield
-      tool(
-        id = s"codex-$model-$effort",
-        agent = "codex",
-        model = model,
-        effort = Some(effort),
-        version = codex.version,
-        roles = List("implementor"),
-        jobTypes =
-          List("scala", "tests", "repo-editing", "debugging", "plan", "source-of-truth", "implement", "test"),
-        strengths =
-          if effort == "high" then
-            List("deep-code-reasoning", "multi-file-edits", "tests", "plan", "source-of-truth", "implement")
-          else if effort == "medium" then
-            List("scala-code", "focused-fixes", "tests", "implement", "test")
-          else List("small-edits", "mechanical-changes", "implement", "test"),
-        available = codex.available,
-        priority = 100 + modelIndex * 10 + effortIndex,
-        probe = codex
-      )
+    yield tool(
+      id = s"codex-$model-$effort",
+      agent = "codex",
+      model = model,
+      effort = Some(effort),
+      version = codex.version,
+      roles = List("implementor"),
+      jobTypes = List(
+        "scala",
+        "tests",
+        "repo-editing",
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ),
+      strengths =
+        if effort == "high" then
+          List(
+            "deep-code-reasoning",
+            "multi-file-edits",
+            "tests",
+            "plan",
+            "source-of-truth",
+            "implement"
+          )
+        else if effort == "medium" then
+          List("scala-code", "focused-fixes", "tests", "implement", "test")
+        else List("small-edits", "mechanical-changes", "implement", "test"),
+      available = codex.available,
+      priority = 100 + modelIndex * 10 + effortIndex,
+      probe = codex
+    )
 
   val aiderTools =
     aiderDeepseekModels.zipWithIndex.map { case (model, index) =>
       val strengths =
         if model.contains("reasoner") then
-          List("complex-reasoning", "scala-code", "debugging", "plan", "source-of-truth", "implement")
-        else List("scala-code", "focused-fixes", "mechanical-changes", "implement", "test")
+          List(
+            "complex-reasoning",
+            "scala-code",
+            "debugging",
+            "plan",
+            "source-of-truth",
+            "implement"
+          )
+        else
+          List(
+            "scala-code",
+            "focused-fixes",
+            "mechanical-changes",
+            "implement",
+            "test"
+          )
       tool(
         id = s"aider-${model.replace('/', '-')}",
         agent = "aider",
@@ -158,8 +214,16 @@ def tool(
         effort = None,
         version = aider.version,
         roles = List("implementor"),
-        jobTypes =
-          List("scala", "tests", "repo-editing", "debugging", "plan", "source-of-truth", "implement", "test"),
+        jobTypes = List(
+          "scala",
+          "tests",
+          "repo-editing",
+          "debugging",
+          "plan",
+          "source-of-truth",
+          "implement",
+          "test"
+        ),
         strengths = strengths,
         available = aider.available,
         priority = 200 + index,

@@ -56,7 +56,8 @@ object IssueClaim:
       F.blocking(
         os.proc("git", "push", "origin", "--delete", refName(taskNumber))
           .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
-      ).attempt.void
+      ).attempt
+        .void
 
   private def isRefConflict(stderr: String): Boolean =
     val lower = stderr.toLowerCase

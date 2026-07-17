@@ -49,6 +49,7 @@ final case class TaskRunner(
           Seq("-p", prompt)
 
 final case class RunnableTask(
+    context: RunContext,
     issue: Issue,
     runner: TaskRunner,
     // An open Pull Request for this task's branch already exists (from a
@@ -161,6 +162,7 @@ final case class ProgramArrows[-->[_, _]](
     resolveContext >>> selectTask >>> executeTask
 
 final case class TaskArrows[-->[_, _]](
+    resumePlan: RunnableTask --> Either[TaskRun, TaskRun],
     resumeExistingPullRequest: TaskRun --> RunSummary,
     announceTask: TaskRun --> TaskRun,
     fetchTaskContext: TaskRun --> TaskWithPrompt,
@@ -174,12 +176,12 @@ final case class TaskArrows[-->[_, _]](
     runPreparedTask: TaskWithPrompt --> TaskRun,
     completedTaskSummary: TaskRun --> RunSummary
 ):
-  def resumeChoice(using ArrowChoice[-->]): Either[TaskRun, TaskRun] -->
-    RunSummary =
-    ArrowChoice[-->].choice(
-      resumeExistingPullRequest,
-      taskExecution
-    )
+  def resumeChoice(using ArrowChoice[-->]): RunnableTask --> RunSummary =
+    resumePlan >>>
+      ArrowChoice[-->].choice(
+        resumeExistingPullRequest,
+        taskExecution
+      )
 
   def taskExecution(using ArrowChoice[-->]): TaskRun --> RunSummary =
     announceTask >>>

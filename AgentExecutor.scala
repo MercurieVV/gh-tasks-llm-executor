@@ -15,6 +15,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
 
   private val TotalTimeoutMillis = 45.minutes.toMillis
   private val PollMillis = 5.seconds.toMillis
+  private val MaxTransientAttempts = 3
+  private val TransientRetryDelayMillis = 15.seconds.toMillis
 
   def run(
       runner: TaskRunner,
@@ -22,6 +24,16 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       cwd: os.Path,
       allowedTools: Seq[String] = Nil,
       jsonSchema: Option[String] = None
+  ): F[String] =
+    runAttempt(runner, prompt, cwd, allowedTools, jsonSchema, attempt = 1)
+
+  private def runAttempt(
+      runner: TaskRunner,
+      prompt: String,
+      cwd: os.Path,
+      allowedTools: Seq[String],
+      jsonSchema: Option[String],
+      attempt: Int
   ): F[String] =
     for
       _ <- TaskLogger.llm(
@@ -37,16 +49,45 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       _ <- TaskLogger.llm(
         s"Agent execution finished with exit code ${result.exitCode}."
       )
-      value <- Either
-        .cond(
-          result.exitCode === 0,
-          output,
-          new RuntimeException(
+      value <-
+        if result.exitCode === 0 then output.pure[F]
+        else if attempt < MaxTransientAttempts && isTransientAgentFailure(
+            output
+          )
+        then
+          TaskLogger.llm(
+            s"${runner.agent} failed with a transient service error; retrying attempt ${attempt + 1}/$MaxTransientAttempts in ${TransientRetryDelayMillis / 1000}s."
+          ) *>
+            F.blocking(Thread.sleep(TransientRetryDelayMillis)) *>
+            runAttempt(
+              runner,
+              prompt,
+              cwd,
+              allowedTools,
+              jsonSchema,
+              attempt + 1
+            )
+        else
+          RuntimeException(
             s"${runner.agent} exited with ${result.exitCode}"
           )
-        )
-        .liftTo[F]
+            .raiseError[F, String]
     yield value
+
+  private def isTransientAgentFailure(output: String): Boolean =
+    val lower = output.toLowerCase
+    List(
+      "529 overloaded",
+      "overloaded",
+      "server-side issue",
+      "try again in a moment",
+      "rate limit",
+      "temporarily unavailable",
+      "service unavailable",
+      "internal server error",
+      "bad gateway",
+      "gateway timeout"
+    ).exists(lower.contains)
 
   private final case class AgentResult(exitCode: Int, output: String)
 
