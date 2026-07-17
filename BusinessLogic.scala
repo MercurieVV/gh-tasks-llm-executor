@@ -35,8 +35,13 @@ final case class TaskRunner(
           jsonSchema.toList.flatMap(schema => Seq("--json-schema", schema)) ++
           Seq("-p", prompt)
       case "codex" =>
+        val mappedModel = (model, effort) match
+          case (Some("gpt-5"), Some("medium")) => Some("gpt-5.6-terra")
+          case (Some("gpt-5"), Some("high"))   => Some("gpt-5.6-sol")
+          case (Some("gpt-5"), Some("low"))    => Some("gpt-5.6-luna")
+          case _                               => model
         Seq(agent, "exec") ++
-          model.toList.flatMap(value => Seq("--model", value)) ++
+          mappedModel.toList.flatMap(value => Seq("--model", value)) ++
           effort.toList.flatMap(value =>
             Seq("--config", s"model_reasoning_effort=$value")
           ) ++
