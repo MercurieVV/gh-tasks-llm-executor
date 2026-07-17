@@ -963,14 +963,20 @@ This parent task will not be implemented directly. Run child tasks first; when a
         "--merge"
       )
       merged <- mergedPullRequest(root, pullRequest.number)
-      _ <- awaitBranchChecks(
-        root,
-        merged.baseRefName,
-        merged.mergeCommit,
-        PullRequestCheckTimeoutMillis,
-        PullRequestCheckPollMillis,
-        progress
-      )
+      _ <-
+        if merged.baseRefName === "master" || merged.baseRefName === "main" then
+          awaitBranchChecks(
+            root,
+            merged.baseRefName,
+            merged.mergeCommit,
+            PullRequestCheckTimeoutMillis,
+            PullRequestCheckPollMillis,
+            progress
+          )
+        else
+          progress(
+            s"Skipping branch checks for non-default base branch ${merged.baseRefName}."
+          )
     yield ()
 
   // A prior run may have pushed a branch and opened a PR but exited before
