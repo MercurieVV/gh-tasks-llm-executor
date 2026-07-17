@@ -1,6 +1,7 @@
 import arrowstep.core.*
 import arrowstep.runtime.AgentMain
 import cats.Monoid
+import cats.arrow.Arrow
 import cats.arrow.ArrowChoice
 import cats.data.Kleisli
 import cats.effect.ExitCode
@@ -120,6 +121,19 @@ final case class AgentFinalization(
     pullRequestBody: Option[String]
 )
 
+final case class PublishRequest(
+    root: os.Path,
+    worktreePath: os.Path,
+    branchName: String,
+    baseBranch: Option[String],
+    task: Issue,
+    finalization: AgentFinalization
+)
+
+final case class ChangedPublication(request: PublishRequest)
+
+final case class ExistingPublication(request: PublishRequest)
+
 final case class RunSummary(
     status: String,
     message: String,
@@ -163,7 +177,9 @@ object Main extends IOApp:
   private def program[F[_]: Sync](
       input: AppInput
   ): F[ProgramSays[ujson.Value]] =
-    taskFlow[F].run(input).map(summary => ProgramSays.Done(summary.toJson))
+    (taskFlow[F] >>> lift[F, RunSummary, ProgramSays[ujson.Value]](summary =>
+      ProgramSays.Done(summary.toJson)
+    )).run(input)
 
   private def taskFlow[F[_]: Sync]: -->[F, AppInput, RunSummary] =
     traced("resolveContext", resolveContext[F]) >>>
@@ -188,16 +204,21 @@ object Main extends IOApp:
           context.taskNumber.forall(_ === task.number)
         )
         filteredByDeps <- candidatesByNumber.filterA { task =>
-          val unresolvedDeps = GitHub.hasUnresolvedDependencies(task, openIssueNumbers)
-          val openChildren = if unresolvedDeps then false else GitHub.hasOpenChildren(task, issues)
+          val unresolvedDeps =
+            GitHub.hasUnresolvedDependencies(task, openIssueNumbers)
+          val openChildren =
+            if unresolvedDeps then false
+            else GitHub.hasOpenChildren(task, issues)
           val excluded = unresolvedDeps || openChildren
           val reason =
             if unresolvedDeps then Some("has unresolved dependencies")
             else if openChildren then Some("has open child tasks")
             else None
-          reason.traverse_(why =>
-            TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
-          ).as(!excluded)
+          reason
+            .traverse_(why =>
+              TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
+            )
+            .as(!excluded)
         }
         eligible <- filteredByDeps.filterA { task =>
           val needsInputMetadata =
@@ -264,8 +285,12 @@ object Main extends IOApp:
   // for it into one synthesized view, so the existing body-based parsers
   // (evaluationStatus, taskRunners, ...) keep working unchanged while the
   // real issue body is never rewritten.
-  private def effectiveIssue[F[_]: Sync](root: os.Path, issue: Issue): F[Issue] =
-    TaskMetadataStore.commentBased[F]
+  private def effectiveIssue[F[_]: Sync](
+      root: os.Path,
+      issue: Issue
+  ): F[Issue] =
+    TaskMetadataStore
+      .commentBased[F]
       .read(root, issue)
       .map(merged => issue.copy(body = TaskMetadata.render(merged)))
 
@@ -289,10 +314,9 @@ object Main extends IOApp:
           .acquire[F](context.root, head.issue.number, progress)
           .use { _ =>
             val run = taskRun(context, head.issue, head.runner)
-            if head.resumePullRequest then
-              traced("resumeExistingPullRequest", resumeExistingPullRequest[F])
-                .run(run)
-            else taskExecution[F].run(run)
+            resumeChoice[F].run(
+              Either.cond(head.resumePullRequest, run, run)
+            )
           }
           .recoverWith { case _: IssueAlreadyClaimedException =>
             progress(
@@ -301,7 +325,7 @@ object Main extends IOApp:
           }
 
   private def noTaskSummary[F[_]: Sync]: -->[F, NoTask, RunSummary] =
-    Kleisli { noTask =>
+    lift { noTask =>
       val context = noTask.context
       val message = context.taskNumber.fold(
         "No tasks found without unresolved dependencies, open child tasks, or another process already claiming them."
@@ -312,8 +336,15 @@ object Main extends IOApp:
         status = "no-task",
         message = message,
         task = None
-      ).pure[F]
+      )
     }
+
+  private def resumeChoice[F[_]: Sync]
+      : -->[F, Either[TaskRun, TaskRun], RunSummary] =
+    choose[F, TaskRun, TaskRun, RunSummary](
+      traced("resumeExistingPullRequest", resumeExistingPullRequest[F]),
+      taskExecution[F]
+    )
 
   private def taskExecution[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
     traced("announceTask", announceTask[F]) >>>
@@ -330,13 +361,14 @@ object Main extends IOApp:
   private def executePreparedTask[
       F[_]: Sync
   ]: -->[F, TaskWithPrompt, RunSummary] =
-    runPreparedTask[F].map { run =>
-      RunSummary(
-        status = "completed",
-        message = s"Task #${run.task.number} completed successfully.",
-        task = Some(run.task)
-      )
-    }
+    runPreparedTask[F] >>>
+      lift { run =>
+        RunSummary(
+          status = "completed",
+          message = s"Task #${run.task.number} completed successfully.",
+          task = Some(run.task)
+        )
+      }
 
   private def runPreparedTask[
       F[_]: Sync
@@ -349,12 +381,13 @@ object Main extends IOApp:
             traced("commentOutput", commentOutput[F]) >>>
             traced("commitIfChanged", commitIfChanged[F]) >>>
             traced("verifyReplayCi", verifyReplayCi[F]) >>>
-            traced("closeTask", closeTask[F])).run(acquiredTask).onError { case _ =>
-            Git[F].preserveUnpushedCommits(
-              acquiredTask.run.worktreePath,
-              acquiredTask.run.branchName,
-              progress
-            )
+            traced("closeTask", closeTask[F])).run(acquiredTask).onError {
+            case _ =>
+              Git[F].preserveUnpushedCommits(
+                acquiredTask.run.worktreePath,
+                acquiredTask.run.branchName,
+                progress
+              )
           }
         }
       }
@@ -495,14 +528,16 @@ object Main extends IOApp:
         // (pre-fallback) body, and trusting its stale "Execution: split"
         // would silently re-persist the wrong status.
         priorMetadata = TaskMetadata.parse(run.task.body)
-        newMetadata = TaskMetadata.parse(cleanBody).copy(
-          evaluation = Some(
-            if verifiedEvaluation.questions.exists(_.trim.nonEmpty) then
-              "needs-input"
-            else "ready"
-          ),
-          execution = Some(normalizeExecution(verifiedEvaluation.execution))
-        )
+        newMetadata = TaskMetadata
+          .parse(cleanBody)
+          .copy(
+            evaluation = Some(
+              if verifiedEvaluation.questions.exists(_.trim.nonEmpty) then
+                "needs-input"
+              else "ready"
+            ),
+            execution = Some(normalizeExecution(verifiedEvaluation.execution))
+          )
         finalMetadata = Monoid[TaskMetadata].combine(priorMetadata, newMetadata)
         updatedTask = run.task.copy(body = TaskMetadata.render(finalMetadata))
         updatedRunner = run.context.agentInventory
@@ -514,12 +549,14 @@ object Main extends IOApp:
         // read by TaskMetadataStore (see effectiveIssue).
         _ <-
           if updatedTask.body.trim =!= run.task.body.trim then
-            TaskMetadataStore.commentBased[F].write(
-              run.context.root,
-              run.task.number,
-              newMetadata,
-              progress
-            )
+            TaskMetadataStore
+              .commentBased[F]
+              .write(
+                run.context.root,
+                run.task.number,
+                newMetadata,
+                progress
+              )
           else Sync[F].unit
       yield verifiedEvaluation.questions.filter(_.trim.nonEmpty) match
         case Some(questions) => Left(NeedsUserInput(updatedRun, questions.trim))
@@ -784,7 +821,8 @@ object Main extends IOApp:
   // invocation and left an open Pull Request behind: verify/merge that PR,
   // then close the task the same way a fresh run's closeTask would, and
   // sweep up any leftover local worktree/branch (usually already gone).
-  private def resumeExistingPullRequest[F[_]: Sync]: -->[F, TaskRun, RunSummary] =
+  private def resumeExistingPullRequest[F[_]: Sync]
+      : -->[F, TaskRun, RunSummary] =
     Kleisli { run =>
       for
         _ <- progress(
@@ -827,6 +865,9 @@ object Main extends IOApp:
       ) *>
         ArrowChoice[Flow[F]].choice(left, right).run(input)
     }
+
+  private def lift[F[_]: Sync, A, B](f: A => B): -->[F, A, B] =
+    Arrow[Flow[F]].lift(f)
 
   private def traced[F[_]: Sync, A, B](
       name: String,
@@ -886,6 +927,15 @@ object Main extends IOApp:
         s"ChangedTask(issue=#${run.run.task.number})"
       case UnchangedTask(run) =>
         s"UnchangedTask(issue=#${run.run.task.number})"
+      case AgentFinalization(commitTitle, pullRequestBody) =>
+        s"AgentFinalization(hasCommitTitle=${commitTitle.nonEmpty},hasPullRequestBody=${pullRequestBody.nonEmpty})"
+      case PublishRequest(_, _, branchName, baseBranch, task, finalization) =>
+        s"PublishRequest(issue=#${task.number},branch=$branchName,base=${baseBranch
+            .getOrElse("default")},${summarize(finalization)})"
+      case ChangedPublication(request) =>
+        s"ChangedPublication(${summarize(request)})"
+      case ExistingPublication(request) =>
+        s"ExistingPublication(${summarize(request)})"
       case RunSummary(status, message, task) =>
         s"RunSummary(status=$status,task=${task
             .map(_.number)
@@ -925,7 +975,8 @@ object Main extends IOApp:
       runner = runner,
       worktreePath = context.root / ".worktrees" / s"$taskName-$taskId",
       branchName = s"task-$taskId",
-      baseBranch = GitHub.parentIds(task).headOption.map(parentId => s"task-$parentId")
+      baseBranch =
+        GitHub.parentIds(task).headOption.map(parentId => s"task-$parentId")
     )
 
   private def taskSlug(title: String): Option[String] =
@@ -1317,7 +1368,14 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
             finalization.pullRequestBody,
             progress
           )
-        else Git[F].mergeLocally(root, worktreePath, branchName, baseBranch, progress)
+        else
+          Git[F].mergeLocally(
+            root,
+            worktreePath,
+            branchName,
+            baseBranch,
+            progress
+          )
     yield ()
 
   private def commitAndMergeOrPublish[F[_]](
@@ -1328,21 +1386,61 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       task: Issue,
       finalization: AgentFinalization
   )(using Sync[F]): F[Unit] =
-    for
-      filesChanged <- Git[F].filesChanged(worktreePath)
-      _ <-
-        if filesChanged then
-          commitAndMerge(root, worktreePath, branchName, baseBranch, task, finalization)
-        else
-          publishExistingCommits(
-            root,
-            worktreePath,
-            branchName,
-            baseBranch,
-            task,
-            finalization
-          )
-    yield ()
+    (publicationPlan[F] >>>
+      choose[F, ChangedPublication, ExistingPublication, Unit](
+        commitChangedPublication[F],
+        publishExistingPublication[F]
+      )).run(
+      PublishRequest(
+        root,
+        worktreePath,
+        branchName,
+        baseBranch,
+        task,
+        finalization
+      )
+    )
+
+  private def publicationPlan[F[_]: Sync]: -->[F, PublishRequest, Either[
+    ChangedPublication,
+    ExistingPublication
+  ]] =
+    Kleisli { request =>
+      Git[F]
+        .filesChanged(request.worktreePath)
+        .map(filesChanged =>
+          if filesChanged then Left(ChangedPublication(request))
+          else Right(ExistingPublication(request))
+        )
+    }
+
+  private def commitChangedPublication[F[_]: Sync]
+      : -->[F, ChangedPublication, Unit] =
+    Kleisli { changed =>
+      val request = changed.request
+      commitAndMerge(
+        request.root,
+        request.worktreePath,
+        request.branchName,
+        request.baseBranch,
+        request.task,
+        request.finalization
+      )
+    }
+
+  private def publishExistingPublication[F[_]: Sync]
+      : -->[F, ExistingPublication, Unit] =
+    Kleisli { existing =>
+      val request = existing.request
+      publishExistingCommits(
+        request.root,
+        request.worktreePath,
+        request.branchName,
+        request.baseBranch,
+        request.task,
+        request.finalization
+      )
+    }
 
   private def publishExistingCommits[F[_]](
       root: os.Path,
@@ -1367,7 +1465,14 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
             finalization.pullRequestBody,
             progress
           )
-        else Git[F].mergeLocally(root, worktreePath, branchName, baseBranch, progress)
+        else
+          Git[F].mergeLocally(
+            root,
+            worktreePath,
+            branchName,
+            baseBranch,
+            progress
+          )
     yield ()
 
   private def progress[F[_]: Sync](message: String): F[Unit] =
