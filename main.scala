@@ -1028,8 +1028,9 @@ Rules:
 - Preserve existing preferred runner metadata, or add it if missing.
 - Prefer the new metadata key "preferred llms/models/efforts/versions" when adding or replacing runner metadata.
 - Choose implementor runners only from the available local implementor tools above.
-- Match the chosen runner to the job type, scope, and risk: small mechanical tasks can use cheaper/weaker tools, while broad Scala refactors, failing CI repair, and ambiguous debugging should use stronger tools.
-- Write preferred runners as a ranked list. Each item must be exactly agent/model/effort/version; leave effort or version empty when the tool has no value, for example claude/sonnet//1.0.0.
+  - Match the chosen runner to the job type, scope, and risk: small mechanical tasks can use cheaper/weaker tools, while broad Scala refactors, failing CI repair, and ambiguous debugging should use stronger tools.
+  - Prefer the cheapest listed runner whose strengths satisfy the task's phase capability floor; only use a pricier runner when no cheaper runner is capable, and use priority only to break near-ties in cost.
+  - Write preferred runners as a ranked list. Each item must be exactly agent/model/effort/version; leave effort or version empty when the tool has no value, for example claude/sonnet//1.0.0.
 - Include Context, Goal, Scope, Acceptance Criteria, and Notes/Risks when useful.
 - Evaluate whether the task should be split before implementation. Record the evaluation in the body.
 - If splitting is needed, create GitHub subtasks before returning. Each subtask must have parent, dependencies if needed, acceptance criteria, narrow scope, and preferred llms/models/efforts/versions.
