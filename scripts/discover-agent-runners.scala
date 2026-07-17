@@ -88,15 +88,22 @@ def tool(
         case "sonnet" => 30
         case "haiku"  => 60
         case _        => 80 + index
+      // Phase strengths encode the phase -> capability-tier routing table
+      // (see PROJECT.md). Each runner lists only the phases it is capable of,
+      // and `priority` orders the cheapest-capable first so tier/fit matching
+      // is automatic through AgentInventory.selectRunner.
       val strengths = model.toLowerCase match
         case "opus" =>
-          List("evaluation", "complex-reasoning", "architecture", "failure-analysis")
+          List(
+            "evaluation", "complex-reasoning", "architecture", "failure-analysis",
+            "plan", "source-of-truth"
+          )
         case "sonnet" =>
-          List("scala-code", "debugging", "refactoring", "docs")
+          List("scala-code", "debugging", "refactoring", "docs", "source-of-truth", "implement")
         case "haiku" =>
-          List("small-edits", "docs", "mechanical-changes")
+          List("small-edits", "docs", "mechanical-changes", "implement", "test")
         case _ =>
-          List("scala-code")
+          List("scala-code", "implement")
       tool(
         id = s"claude-$model",
         agent = "claude",
@@ -104,7 +111,8 @@ def tool(
         effort = None,
         version = claude.version,
         roles = if model == "opus" then List("evaluator", "implementor") else List("implementor"),
-        jobTypes = List("scala", "tests", "docs", "github-issues"),
+        jobTypes =
+          List("scala", "tests", "docs", "github-issues", "plan", "source-of-truth", "implement", "test"),
         strengths = strengths,
         available = claude.available,
         priority = priority,
@@ -124,11 +132,14 @@ def tool(
         effort = Some(effort),
         version = codex.version,
         roles = List("implementor"),
-        jobTypes = List("scala", "tests", "repo-editing", "debugging"),
+        jobTypes =
+          List("scala", "tests", "repo-editing", "debugging", "plan", "source-of-truth", "implement", "test"),
         strengths =
-          if effort == "high" then List("deep-code-reasoning", "multi-file-edits", "tests")
-          else if effort == "medium" then List("scala-code", "focused-fixes", "tests")
-          else List("small-edits", "mechanical-changes"),
+          if effort == "high" then
+            List("deep-code-reasoning", "multi-file-edits", "tests", "plan", "source-of-truth", "implement")
+          else if effort == "medium" then
+            List("scala-code", "focused-fixes", "tests", "implement", "test")
+          else List("small-edits", "mechanical-changes", "implement", "test"),
         available = codex.available,
         priority = 100 + modelIndex * 10 + effortIndex,
         probe = codex
@@ -138,8 +149,8 @@ def tool(
     aiderDeepseekModels.zipWithIndex.map { case (model, index) =>
       val strengths =
         if model.contains("reasoner") then
-          List("complex-reasoning", "scala-code", "debugging")
-        else List("scala-code", "focused-fixes", "mechanical-changes")
+          List("complex-reasoning", "scala-code", "debugging", "plan", "source-of-truth", "implement")
+        else List("scala-code", "focused-fixes", "mechanical-changes", "implement", "test")
       tool(
         id = s"aider-${model.replace('/', '-')}",
         agent = "aider",
@@ -147,7 +158,8 @@ def tool(
         effort = None,
         version = aider.version,
         roles = List("implementor"),
-        jobTypes = List("scala", "tests", "repo-editing", "debugging"),
+        jobTypes =
+          List("scala", "tests", "repo-editing", "debugging", "plan", "source-of-truth", "implement", "test"),
         strengths = strengths,
         available = aider.available,
         priority = 200 + index,
