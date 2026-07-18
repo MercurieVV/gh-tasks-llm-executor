@@ -613,65 +613,9 @@ $prText
         fields.get("body").collect { case ujson.Str(body) => body }
       case _ => None
 
-  private val MaxCommentBodyChars = 65536
-  private val CommentWrapperOverhead = "LLM run output:\n```\n\n```".length
 
-  private def truncateForComment(output: String): String =
-    val maxOutputChars = MaxCommentBodyChars - CommentWrapperOverhead
-    if output.length <= maxOutputChars then output
-    else
-      val marker = "\n... [truncated]"
-      output.take(maxOutputChars - marker.length) + marker
 
-  private def extractConclusions(output: String): String =
-    val markers = List(
-      "final answer",
-      "summary of the implementation",
-      "summary of implementation",
-      "proposed commit title",
-      "proposed pull request body",
-      "questions before execution",
-      "questions"
-    )
-    val lines = output.linesIterator.toList
-    val index = lines.indexWhere { line =>
-      val clean = line.trim
-        .replaceAll("^[*#\\-_\\s]+", "")
-        .toLowerCase
-      markers.exists(marker => clean.startsWith(marker))
-    }
-    if index >= 0 then
-      lines.drop(index).mkString("\n")
-    else
-      ""
 
-  def commentRunOutput[F[_]](
-      root: os.Path,
-      taskId: Int,
-      output: String,
-      progress: String => F[Unit]
-  )(using F: Sync[F]): F[Unit] =
-    val conclusions = extractConclusions(output)
-    if conclusions.trim.isEmpty then F.unit
-    else
-      for
-        _ <- progress(s"Commenting run output on task #$taskId...")
-        commentBody =
-          s"""LLM run output conclusions:
-```
-${truncateForComment(conclusions)}
-```"""
-        tempFile <- F.blocking(os.temp(commentBody))
-        _ <- call(
-          root,
-          "gh",
-          "issue",
-          "comment",
-          taskId.toString,
-          "--body-file",
-          tempFile.toString
-        )
-      yield ()
 
   def commentConclusion[F[_]](
       root: os.Path,

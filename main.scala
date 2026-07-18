@@ -758,14 +758,7 @@ object Main extends IOApp:
   private def commentOutput[F[_]: Sync]
       : -->[F, TaskWithOutput, TaskWithOutput] =
     Kleisli { task =>
-      GitHub
-        .commentRunOutput(
-          task.run.context.root,
-          task.run.task.number,
-          task.output,
-          progress
-        )
-        .as(task)
+      Sync[F].pure(task)
     }
 
   private def runProjectValidation[F[_]: Sync]
