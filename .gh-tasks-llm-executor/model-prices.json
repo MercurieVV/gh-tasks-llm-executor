@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "prices": [
+    {
+      "agent": "claude",
+      "model": "opus",
+      "inputUsdPerMTok": 15,
+      "outputUsdPerMTok": 75,
+      "source": "Anthropic API pricing",
+      "asOfDate": "2026-07-17"
+    },
+    {
+      "agent": "claude",
+      "model": "sonnet",
+      "inputUsdPerMTok": 3,
+      "outputUsdPerMTok": 15,
+      "source": "Anthropic API pricing",
+      "asOfDate": "2026-07-17"
+    },
+    {
+      "agent": "claude",
+      "model": "haiku",
+      "inputUsdPerMTok": 1,
+      "outputUsdPerMTok": 5,
+      "source": "Anthropic API pricing",
+      "asOfDate": "2026-07-17"
+    },
+    {
+      "agent": "codex",
+      "model": "gpt-5",
+      "inputUsdPerMTok": 1.25,
+      "outputUsdPerMTok": 10,
+      "source": "OpenAI API pricing",
+      "asOfDate": "2026-07-17"
+    },
+    {
+      "agent": "codex",
+      "model": "gpt-5-codex",
+      "inputUsdPerMTok": 1.25,
+      "outputUsdPerMTok": 10,
+      "source": "OpenAI API pricing",
+      "asOfDate": "2026-07-17"
+    },
+    {
+      "agent": "aider",
+      "model": "deepseek/deepseek-chat",
+      "inputUsdPerMTok": 0.27,
+      "outputUsdPerMTok": 1.1,
+      "source": "DeepSeek API pricing",
+      "asOfDate": "2026-07-17"
+    },
+    {
+      "agent": "aider",
+      "model": "deepseek/deepseek-reasoner",
+      "inputUsdPerMTok": 0.55,
+      "outputUsdPerMTok": 2.19,
+      "source": "DeepSeek API pricing",
+      "asOfDate": "2026-07-17"
+    }
+  ]
+}
