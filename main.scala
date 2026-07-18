@@ -271,7 +271,7 @@ object Main extends IOApp:
       executeRecursive: -->[F, Issue, RunSummary]
   ): -->[F, Issue, Either[RunSummary, Issue]] =
     Kleisli { issue =>
-      val depIds = (GitHub.parentIds(issue) ++ GitHub.getDependencies(issue.body)).distinct
+      val depIds = GitHub.getDependencies(issue.body).distinct
       for
         issuesMap <- openIssues.get
         openDeps = depIds.flatMap(issuesMap.get)
