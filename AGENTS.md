@@ -1,0 +1,5 @@
+# AGENTS.md instructions
+
+<INSTRUCTIONS>
+@PROJECT.md
+</INSTRUCTIONS>

@@ -1,0 +1,10 @@
+name: ScalaSemantic MCP
+version: 1.0.0
+schema: v1
+mcpServers:
+  - name: "scala-semantic"
+    command: "/Users/viktorskalinins/IdeaProjects/my/gh-tasks-llm-executor/scalasemantic-mcp.sh"
+    args:
+      - "serve"
+      - "."
+    connectionTimeout: 60000

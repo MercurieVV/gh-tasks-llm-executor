@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "scala-semantic": {
+      "command": "/Users/viktorskalinins/IdeaProjects/my/gh-tasks-llm-executor/scalasemantic-mcp.sh",
+      "args": ["serve", "."],
+      "disabled": false,
+      "alwaysAllow": [],
+      "timeout": 60
+    }
+  }
+}

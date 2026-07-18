@@ -1,0 +1,29 @@
+[mcp_servers.scala-semantic]
+command = "/Users/viktorskalinins/IdeaProjects/my/gh-tasks-llm-executor/scalasemantic-mcp.sh"
+args = ["serve", "."]
+startup_timeout_sec = 60
+tool_timeout_sec = 60
+
+[mcp_servers.scala-semantic.tools.set_workspace_root]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.annotated_source]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.document_outline]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.structure]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.get_workspace_root]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.search_text]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.symbol_source]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.refresh_workspace]
+approval_mode = "approve"

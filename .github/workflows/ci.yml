@@ -1,0 +1,31 @@
+name: CI
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+    - name: Cache scala-cli / coursier
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/coursier
+          ~/.cache/scala-cli
+        key: ${{ runner.os }}-scala-cli-${{ hashFiles('**/*.scala', 'project.scala') }}
+        restore-keys: |
+          ${{ runner.os }}-scala-cli-
+    - name: Set up scala-cli
+      uses: VirtusLab/scala-cli-setup@main
+      with:
+        jvm: temurin:21
+    - name: Run tests
+      run: scala-cli test .

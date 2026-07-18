@@ -1,0 +1,386 @@
+{
+  "schemaVersion": 1,
+  "generatedBy": "scripts/discover-agent-runners.scala",
+  "generatedAtEpochMillis": "1784237103527",
+  "metadataFormat": "preferred llms/models/efforts/versions",
+  "tools": [
+    {
+      "id": "claude-opus",
+      "agent": "claude",
+      "model": "opus",
+      "effort": null,
+      "version": "2.1.211 (Claude Code)",
+      "roles": [
+        "evaluator",
+        "implementor"
+      ],
+      "jobTypes": [
+        "scala",
+        "tests",
+        "docs",
+        "github-issues",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ],
+      "strengths": [
+        "evaluation",
+        "complex-reasoning",
+        "architecture",
+        "failure-analysis",
+        "plan",
+        "source-of-truth"
+      ],
+      "available": true,
+      "priority": 10,
+      "probe": {
+        "command": "claude",
+        "path": "/Users/viktorskalinins/.local/bin/claude",
+        "version": "2.1.211 (Claude Code)"
+      }
+    },
+    {
+      "id": "claude-sonnet",
+      "agent": "claude",
+      "model": "sonnet",
+      "effort": null,
+      "version": "2.1.211 (Claude Code)",
+      "roles": [
+        "implementor"
+      ],
+      "jobTypes": [
+        "scala",
+        "tests",
+        "docs",
+        "github-issues",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ],
+      "strengths": [
+        "scala-code",
+        "debugging",
+        "refactoring",
+        "docs",
+        "source-of-truth",
+        "implement"
+      ],
+      "available": true,
+      "priority": 30,
+      "probe": {
+        "command": "claude",
+        "path": "/Users/viktorskalinins/.local/bin/claude",
+        "version": "2.1.211 (Claude Code)"
+      }
+    },
+    {
+      "id": "claude-haiku",
+      "agent": "claude",
+      "model": "haiku",
+      "effort": null,
+      "version": "2.1.211 (Claude Code)",
+      "roles": [
+        "implementor"
+      ],
+      "jobTypes": [
+        "scala",
+        "tests",
+        "docs",
+        "github-issues",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ],
+      "strengths": [
+        "small-edits",
+        "docs",
+        "mechanical-changes",
+        "implement",
+        "test"
+      ],
+      "available": true,
+      "priority": 60,
+      "probe": {
+        "command": "claude",
+        "path": "/Users/viktorskalinins/.local/bin/claude",
+        "version": "2.1.211 (Claude Code)"
+      }
+    },
+    {
+      "id": "codex-gpt-5-high",
+      "agent": "codex",
+      "model": "gpt-5",
+      "effort": "high",
+      "version": "codex-cli 0.144.4",
+      "roles": [
+        "implementor"
+      ],
+      "jobTypes": [
+        "scala",
+        "tests",
+        "repo-editing",
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ],
+      "strengths": [
+        "deep-code-reasoning",
+        "multi-file-edits",
+        "tests",
+        "plan",
+        "source-of-truth",
+        "implement"
+      ],
+      "available": true,
+      "priority": 100,
+      "probe": {
+        "command": "codex",
+        "path": "/opt/homebrew/bin/codex",
+        "version": "codex-cli 0.144.4"
+      }
+    },
+    {
+      "id": "codex-gpt-5-medium",
+      "agent": "codex",
+      "model": "gpt-5",
+      "effort": "medium",
+      "version": "codex-cli 0.144.4",
+      "roles": [
+        "implementor"
+      ],
+      "jobTypes": [
+        "scala",
+        "tests",
+        "repo-editing",
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ],
+      "strengths": [
+        "scala-code",
+        "focused-fixes",
+        "tests",
+        "implement",
+        "test"
+      ],
+      "available": true,
+      "priority": 101,
+      "probe": {
+        "command": "codex",
+        "path": "/opt/homebrew/bin/codex",
+        "version": "codex-cli 0.144.4"
+      }
+    },
+    {
+      "id": "codex-gpt-5-low",
+      "agent": "codex",
+      "model": "gpt-5",
+      "effort": "low",
+      "version": "codex-cli 0.144.4",
+      "roles": [
+        "implementor"
+      ],
+      "jobTypes": [
+        "scala",
+        "tests",
+        "repo-editing",
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ],
+      "strengths": [
+        "small-edits",
+        "mechanical-changes",
+        "implement",
+        "test"
+      ],
+      "available": true,
+      "priority": 102,
+      "probe": {
+        "command": "codex",
+        "path": "/opt/homebrew/bin/codex",
+        "version": "codex-cli 0.144.4"
+      }
+    },
+    {
+      "id": "codex-gpt-5-codex-high",
+      "agent": "codex",
+      "model": "gpt-5-codex",
+      "effort": "high",
+      "version": "codex-cli 0.144.4",
+      "roles": [
+        "implementor"
+      ],
+      "jobTypes": [
+        "scala",
+        "tests",
+        "repo-editing",
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ],
+      "strengths": [
+        "deep-code-reasoning",
+        "multi-file-edits",
+        "tests",
+        "plan",
+        "source-of-truth",
+        "implement"
+      ],
+      "available": true,
+      "priority": 110,
+      "probe": {
+        "command": "codex",
+        "path": "/opt/homebrew/bin/codex",
+        "version": "codex-cli 0.144.4"
+      }
+    },
+    {
+      "id": "codex-gpt-5-codex-medium",
+      "agent": "codex",
+      "model": "gpt-5-codex",
+      "effort": "medium",
+      "version": "codex-cli 0.144.4",
+      "roles": [
+        "implementor"
+      ],
+      "jobTypes": [
+        "scala",
+        "tests",
+        "repo-editing",
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ],
+      "strengths": [
+        "scala-code",
+        "focused-fixes",
+        "tests",
+        "implement",
+        "test"
+      ],
+      "available": true,
+      "priority": 111,
+      "probe": {
+        "command": "codex",
+        "path": "/opt/homebrew/bin/codex",
+        "version": "codex-cli 0.144.4"
+      }
+    },
+    {
+      "id": "codex-gpt-5-codex-low",
+      "agent": "codex",
+      "model": "gpt-5-codex",
+      "effort": "low",
+      "version": "codex-cli 0.144.4",
+      "roles": [
+        "implementor"
+      ],
+      "jobTypes": [
+        "scala",
+        "tests",
+        "repo-editing",
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ],
+      "strengths": [
+        "small-edits",
+        "mechanical-changes",
+        "implement",
+        "test"
+      ],
+      "available": true,
+      "priority": 112,
+      "probe": {
+        "command": "codex",
+        "path": "/opt/homebrew/bin/codex",
+        "version": "codex-cli 0.144.4"
+      }
+    },
+    {
+      "id": "aider-deepseek-deepseek-chat",
+      "agent": "aider",
+      "model": "deepseek/deepseek-chat",
+      "effort": null,
+      "version": "aider 0.86.2",
+      "roles": [
+        "implementor"
+      ],
+      "jobTypes": [
+        "scala",
+        "tests",
+        "repo-editing",
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ],
+      "strengths": [
+        "scala-code",
+        "focused-fixes",
+        "mechanical-changes",
+        "implement",
+        "test"
+      ],
+      "available": true,
+      "priority": 200,
+      "probe": {
+        "command": "aider",
+        "path": "/Users/viktorskalinins/.local/bin/aider",
+        "version": "aider 0.86.2"
+      }
+    },
+    {
+      "id": "aider-deepseek-deepseek-reasoner",
+      "agent": "aider",
+      "model": "deepseek/deepseek-reasoner",
+      "effort": null,
+      "version": "aider 0.86.2",
+      "roles": [
+        "implementor"
+      ],
+      "jobTypes": [
+        "scala",
+        "tests",
+        "repo-editing",
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement",
+        "test"
+      ],
+      "strengths": [
+        "complex-reasoning",
+        "scala-code",
+        "debugging",
+        "plan",
+        "source-of-truth",
+        "implement"
+      ],
+      "available": true,
+      "priority": 201,
+      "probe": {
+        "command": "aider",
+        "path": "/Users/viktorskalinins/.local/bin/aider",
+        "version": "aider 0.86.2"
+      }
+    }
+  ]
+}
