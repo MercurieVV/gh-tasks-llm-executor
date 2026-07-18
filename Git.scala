@@ -18,23 +18,46 @@ final class Git[F[_]](using F: Sync[F]):
           releaseWorktree(root, worktreePath, branchName, progress) *>
           acquireWorktree(root, worktreePath, branchName, baseBranch, progress)
       case false =>
-        baseBranch.traverse_(ensureBranch(root, _, progress)) *>
-          progress(
-            s"Creating worktree at $worktreePath on branch $branchName${baseBranch
-                .fold("")(base => s" (base: $base)")}"
-          ) *>
-          call(
-            root,
-            (Seq(
-              "git",
-              "worktree",
-              "add",
-              "-b",
-              branchName,
-              worktreePath.toString
-            ) ++
-              baseBranch.toList)*
-          )
+        call(root, "git", "branch", "-D", branchName).attempt.void *>
+          branchExistsOnOrigin(root, branchName).flatMap {
+            case true =>
+              progress(
+                s"Remote branch origin/$branchName found. Recreating worktree tracking remote..."
+              ) *>
+                call(
+                  root,
+                  "git",
+                  "branch",
+                  branchName,
+                  s"origin/$branchName"
+                ) *>
+                call(
+                  root,
+                  "git",
+                  "worktree",
+                  "add",
+                  worktreePath.toString,
+                  branchName
+                )
+            case false =>
+              baseBranch.traverse_(ensureBranch(root, _, progress)) *>
+                progress(
+                  s"Creating worktree at $worktreePath on branch $branchName${baseBranch
+                      .fold("")(base => s" (base: $base)")}"
+                ) *>
+                call(
+                  root,
+                  (Seq(
+                    "git",
+                    "worktree",
+                    "add",
+                    "-b",
+                    branchName,
+                    worktreePath.toString
+                  ) ++
+                    baseBranch.toList)*
+                )
+          }
     }
 
   // Creates a shared integration branch used as the base for a family of
