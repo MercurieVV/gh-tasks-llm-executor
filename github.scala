@@ -625,23 +625,23 @@ $prText
 
   private def extractConclusions(output: String): String =
     val markers = List(
-      "final answer:",
-      "final answer contract:",
-      "summary of the implementation:",
-      "summary of implementation:",
-      "proposed commit title:",
-      "proposed pull request body:"
+      "final answer",
+      "summary of the implementation",
+      "summary of implementation",
+      "proposed commit title",
+      "proposed pull request body"
     )
     val lines = output.linesIterator.toList
     val index = lines.indexWhere { line =>
-      val lower = line.toLowerCase.trim
-      markers.exists(marker => lower.startsWith(marker))
+      val clean = line.trim
+        .replaceAll("^[*#\\-_\\s]+", "")
+        .toLowerCase
+      markers.exists(marker => clean.startsWith(marker))
     }
     if index >= 0 then
       lines.drop(index).mkString("\n")
     else
-      // If no marker is found, fall back to the last 100 lines or 2000 characters
-      output.takeRight(2000)
+      ""
 
   def commentRunOutput[F[_]](
       root: os.Path,
@@ -649,25 +649,27 @@ $prText
       output: String,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Unit] =
-    for
-      _ <- progress(s"Commenting run output on task #$taskId...")
-      conclusions = extractConclusions(output)
-      commentBody =
-        s"""LLM run output conclusions:
+    val conclusions = extractConclusions(output)
+    if conclusions.trim.isEmpty then F.unit
+    else
+      for
+        _ <- progress(s"Commenting run output on task #$taskId...")
+        commentBody =
+          s"""LLM run output conclusions:
 ```
 ${truncateForComment(conclusions)}
 ```"""
-      tempFile <- F.blocking(os.temp(commentBody))
-      _ <- call(
-        root,
-        "gh",
-        "issue",
-        "comment",
-        taskId.toString,
-        "--body-file",
-        tempFile.toString
-      )
-    yield ()
+        tempFile <- F.blocking(os.temp(commentBody))
+        _ <- call(
+          root,
+          "gh",
+          "issue",
+          "comment",
+          taskId.toString,
+          "--body-file",
+          tempFile.toString
+        )
+      yield ()
 
   def commentConclusion[F[_]](
       root: os.Path,
