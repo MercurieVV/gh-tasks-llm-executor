@@ -9,6 +9,7 @@ import cats.effect.IOApp
 import cats.effect.Resource
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
+import cats.effect.Ref
 import io.github.mercurievv.minuscles.fieldsnames.derivation.semiauto.FieldNamesDerivation.fieldsNames
 
 import scala.annotation.tailrec
@@ -105,21 +106,26 @@ object Main extends IOApp:
           context.taskNumber.forall(_ === task.number)
         )
         filteredByDeps <- candidatesByNumber.filterA { task =>
-          val unresolvedDeps =
-            GitHub.hasUnresolvedDependencies(task, openIssueNumbers)
-          val openChildren =
-            if unresolvedDeps then false
-            else GitHub.hasOpenChildren(task, issues)
-          val excluded = unresolvedDeps || openChildren
-          val reason =
-            if unresolvedDeps then Some("has unresolved dependencies")
-            else if openChildren then Some("has open child tasks")
-            else None
-          reason
-            .traverse_(why =>
-              TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
-            )
-            .as(!excluded)
+          if context.taskNumber.isDefined then
+            // If a specific task is targeted, do not filter out by dependencies/children.
+            // We want to run it and traverse its tree recursively!
+            true.pure[F]
+          else
+            val unresolvedDeps =
+              GitHub.hasUnresolvedDependencies(task, openIssueNumbers)
+            val openChildren =
+              if unresolvedDeps then false
+              else GitHub.hasOpenChildren(task, issues)
+            val excluded = unresolvedDeps || openChildren
+            val reason =
+              if unresolvedDeps then Some("has unresolved dependencies")
+              else if openChildren then Some("has open child tasks")
+              else None
+            reason
+              .traverse_(why =>
+                TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
+              )
+              .as(!excluded)
         }
         eligible <- filteredByDeps.filterA { task =>
           val needsInputMetadata =
@@ -201,9 +207,6 @@ object Main extends IOApp:
       claimAndRunTask[F](selection.context, selection.candidates)
     }
 
-  // Try candidates in order, claiming each via IssueClaim before running it.
-  // A claim conflict means another process already owns that issue, so we
-  // move on to the next candidate instead of failing the whole run.
   private def claimAndRunTask[F[_]: Sync](
       context: RunContext,
       candidates: List[RunnableTask]
@@ -211,17 +214,120 @@ object Main extends IOApp:
     candidates match
       case Nil =>
         noTaskSummary[F].run(NoTask(context))
-      case head :: tail =>
-        IssueClaim
-          .acquire[F](context.root, head.issue.number, progress)
-          .use { _ =>
-            businessLogic[F].taskArrows.resumeChoice.run(head)
+      case _ =>
+        for
+          openIssues <- GitHub.fetchIssues(context.root)
+          openIssuesMap = openIssues.map(i => i.number -> i).toMap
+          openIssuesRef <- Ref[F].of(openIssuesMap)
+          recursiveFlow = executeRecursive[F](context, openIssuesRef)
+          summaries <- candidates.traverse { candidate =>
+            for
+              currentMap <- openIssuesRef.get
+              summary <- currentMap.get(candidate.issue.number) match {
+                case Some(latestIssue) =>
+                  recursiveFlow.run(latestIssue)
+                case None =>
+                  Sync[F].pure(RunSummary(
+                    status = "completed",
+                    message = s"Task #${candidate.issue.number} is already completed.",
+                    task = Some(candidate.issue)
+                  ))
+              }
+            yield summary
           }
-          .recoverWith { case _: IssueAlreadyClaimedException =>
-            progress(
-              s"Task #${head.issue.number} is already claimed by another process. Trying next candidate..."
-            ) *> claimAndRunTask[F](context, tail)
-          }
+        yield summaries.lastOption.getOrElse(
+          RunSummary(status = "completed", message = "All candidates completed.", task = None)
+        )
+
+  private def executeRecursive[F[_]: Sync](
+      context: RunContext,
+      openIssues: Ref[F, Map[Int, Issue]]
+  ): -->[F, Issue, RunSummary] =
+    lazy val self: -->[F, Issue, RunSummary] =
+      checkIfCompleted[F] >>> Kleisli {
+        case Left(summary) => Sync[F].pure(summary)
+        case Right(issue) =>
+          (runDependencies[F](openIssues, self) >>> Kleisli {
+            case Left(summary) => Sync[F].pure(summary)
+            case Right(readyIssue) => claimAndRun[F](context).run(readyIssue)
+          }).run(issue)
+      }
+    self
+
+  private def checkIfCompleted[F[_]: Sync]: -->[F, Issue, Either[RunSummary, Issue]] =
+    Kleisli { issue =>
+      if issue.state.toLowerCase == "closed" then
+        Sync[F].pure(Left(RunSummary(
+          status = "completed",
+          message = s"Task #${issue.number} is already completed.",
+          task = Some(issue)
+        )))
+      else
+        Sync[F].pure(Right(issue))
+    }
+
+  private def runDependencies[F[_]: Sync](
+      openIssues: Ref[F, Map[Int, Issue]],
+      executeRecursive: -->[F, Issue, RunSummary]
+  ): -->[F, Issue, Either[RunSummary, Issue]] =
+    Kleisli { issue =>
+      val depIds = (GitHub.parentIds(issue) ++ GitHub.getDependencies(issue.body)).distinct
+      for
+        issuesMap <- openIssues.get
+        openDeps = depIds.flatMap(issuesMap.get)
+        dependencyResult <- openDeps.foldLeftM[F, Either[RunSummary, Unit]](Right(())) {
+          case (Left(failedSummary), _) => Sync[F].pure(Left(failedSummary))
+          case (Right(_), depIssue) =>
+            executeRecursive.run(depIssue).map { summary =>
+              if summary.status == "completed" then
+                Right(())
+              else
+                Left(summary)
+            }
+        }
+      yield dependencyResult.map(_ => issue)
+    }
+
+  private def claimAndRun[F[_]: Sync](
+      context: RunContext
+  ): -->[F, Issue, RunSummary] =
+    Kleisli { issue =>
+      val runner = context.agentInventory
+        .selectRunner(GitHub.taskRunners(issue))
+        .getOrElse(evaluatorRunner)
+      val runnable = RunnableTask(context, issue, runner)
+      
+      IssueClaim.acquire[F](context.root, issue.number, progress).use { _ =>
+        businessLogic[F].taskArrows.resumeChoice.run(runnable)
+      }.recoverWith {
+        case _: IssueAlreadyClaimedException =>
+          progress(s"Task #${issue.number} is claimed by another process. Waiting for completion...") *>
+            pollGitHubForCompletion[F](context.root, issue.number).map { finalIssue =>
+              RunSummary(
+                status = "completed",
+                message = s"Task #${issue.number} was completed by another process.",
+                task = Some(finalIssue)
+              )
+            }
+      }
+    }
+
+  private def pollGitHubForCompletion[F[_]: Sync](
+      root: os.Path,
+      taskId: Int
+  ): F[Issue] =
+    val pollInterval = 30.seconds
+    def loop: F[Issue] =
+      GitHub.fetchIssues(root).flatMap { issues =>
+        issues.find(_.number == taskId) match
+          case Some(issue) if issue.state.toLowerCase == "closed" =>
+            Sync[F].pure(issue)
+          case None =>
+            Sync[F].pure(Issue(taskId, s"Task #$taskId", "", "closed"))
+          case _ =>
+            Sync[F].blocking(Thread.sleep(pollInterval.toMillis)) *> loop
+      }
+    loop
 
   private def noTaskSummary[F[_]: Sync]: -->[F, NoTask, RunSummary] =
     Kleisli { noTask =>

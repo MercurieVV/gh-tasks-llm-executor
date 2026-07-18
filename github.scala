@@ -180,7 +180,7 @@ object GitHub:
   private val PullRequestMentionRegex =
     """(?i)\bPR\s*#(\d+)|/pull/(\d+)""".r
 
-  private def getDependencies(body: String): List[Int] =
+  def getDependencies(body: String): List[Int] =
     body.linesIterator
       .flatMap { line =>
         val lower = line.toLowerCase
