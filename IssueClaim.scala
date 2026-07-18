@@ -22,15 +22,58 @@ object IssueClaim:
       release[F](root, taskNumber, progress)
     )
 
+  private val StaleThresholdSeconds = 4 * 60 * 60 // 4 hours
+
+  private def checkAndReleaseIfStale[F[_]](
+      root: os.Path,
+      taskNumber: Int,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Boolean] =
+    val ref = refName(taskNumber)
+    for
+      _ <- progress(s"Checking if claim on task #$taskNumber is stale...")
+      fetchResult <- F.blocking(
+        os.proc("git", "fetch", "origin", ref)
+          .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+      )
+      stale <-
+        if fetchResult.exitCode === 0 then
+          for
+            timestampStr <- F.blocking(
+              os.proc("git", "show", "-s", "--format=%ct", "FETCH_HEAD")
+                .call(cwd = root, stderr = os.Pipe).out.text().trim
+            )
+            commitTime = scala.util.Try(timestampStr.toLong).getOrElse(0L)
+            currentTime = System.currentTimeMillis() / 1000L
+            ageSeconds = currentTime - commitTime
+            isStale = ageSeconds > StaleThresholdSeconds
+            _ <-
+              if isStale then
+                progress(
+                  s"Task #$taskNumber claim is stale (${ageSeconds / 3600} hours old). Force-releasing it..."
+                ) *> F.blocking(
+                  os.proc("git", "push", "origin", "--delete", ref)
+                    .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+                ).void
+              else F.unit
+          yield isStale
+        else F.pure(false)
+    yield stale
+
   private def claim[F[_]](
       root: os.Path,
       taskNumber: Int,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Unit] =
+    val uuid = java.util.UUID.randomUUID().toString
     for
       _ <- progress(s"Claiming task #$taskNumber...")
+      commitHash <- F.blocking {
+        os.proc("git", "commit-tree", "HEAD^{tree}", "-m", s"Claim task $taskNumber - $uuid")
+          .call(cwd = root).out.text().trim
+      }
       result <- F.blocking(
-        os.proc("git", "push", "origin", s"HEAD:${refName(taskNumber)}")
+        os.proc("git", "push", "origin", s"$commitHash:${refName(taskNumber)}")
           .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
       )
       _ <-
@@ -38,7 +81,13 @@ object IssueClaim:
         else
           val stderr = result.err.text()
           if isRefConflict(stderr) then
-            F.raiseError(IssueAlreadyClaimedException(taskNumber))
+            checkAndReleaseIfStale[F](root, taskNumber, progress).flatMap {
+              case true =>
+                // Stale lock was released, try again
+                claim[F](root, taskNumber, progress)
+              case false =>
+                F.raiseError(IssueAlreadyClaimedException(taskNumber))
+            }
           else
             F.raiseError(
               new RuntimeException(

@@ -12,29 +12,52 @@ final class Git[F[_]](using F: Sync[F]):
   ): F[Unit] =
     F.blocking(os.exists(worktreePath)).flatMap {
       case true =>
-        F.raiseError(
-          new RuntimeException(
-            s"Cannot acquire worktree: $worktreePath already exists."
-          )
-        )
+        progress(
+          s"Leftover worktree detected at $worktreePath. Cleaning up..."
+        ) *>
+          releaseWorktree(root, worktreePath, branchName, progress) *>
+          acquireWorktree(root, worktreePath, branchName, baseBranch, progress)
       case false =>
-        baseBranch.traverse_(ensureBranch(root, _, progress)) *>
-          progress(
-            s"Creating worktree at $worktreePath on branch $branchName${baseBranch
-                .fold("")(base => s" (base: $base)")}"
-          ) *>
-          call(
-            root,
-            (Seq(
-              "git",
-              "worktree",
-              "add",
-              "-b",
-              branchName,
-              worktreePath.toString
-            ) ++
-              baseBranch.toList)*
-          )
+        call(root, "git", "branch", "-D", branchName).attempt.void *>
+          branchExistsOnOrigin(root, branchName).flatMap {
+            case true =>
+              progress(
+                s"Remote branch origin/$branchName found. Recreating worktree tracking remote..."
+              ) *>
+                call(
+                  root,
+                  "git",
+                  "branch",
+                  branchName,
+                  s"origin/$branchName"
+                ) *>
+                call(
+                  root,
+                  "git",
+                  "worktree",
+                  "add",
+                  worktreePath.toString,
+                  branchName
+                )
+            case false =>
+              baseBranch.traverse_(ensureBranch(root, _, progress)) *>
+                progress(
+                  s"Creating worktree at $worktreePath on branch $branchName${baseBranch
+                      .fold("")(base => s" (base: $base)")}"
+                ) *>
+                call(
+                  root,
+                  (Seq(
+                    "git",
+                    "worktree",
+                    "add",
+                    "-b",
+                    branchName,
+                    worktreePath.toString
+                  ) ++
+                    baseBranch.toList)*
+                )
+          }
     }
 
   // Creates a shared integration branch used as the base for a family of
@@ -115,7 +138,14 @@ final class Git[F[_]](using F: Sync[F]):
               "remove",
               "--force",
               worktreePath.toString
-            )
+            ).attempt.flatMap {
+              case Right(_) => F.unit
+              case Left(_) =>
+                progress(
+                  s"Standard git worktree remove failed. Force deleting directory $worktreePath..."
+                ) *>
+                  F.blocking(os.remove.all(worktreePath))
+            }
       }
       _ <- call(root, "git", "branch", "-D", branchName).attempt.void
     yield ()
@@ -128,9 +158,10 @@ final class Git[F[_]](using F: Sync[F]):
   def preserveUnpushedCommits(
       worktreePath: os.Path,
       branchName: String,
+      baseBranch: Option[String],
       progress: String => F[Unit]
   ): F[Unit] =
-    hasPublishableCommits(worktreePath, branchName).flatMap {
+    hasPublishableCommits(worktreePath, branchName, baseBranch).flatMap {
       case false => F.unit
       case true =>
         val recoveryRef = s"refs/gh-tasks-llm-executor/failed/$branchName"
@@ -167,7 +198,8 @@ final class Git[F[_]](using F: Sync[F]):
 
   def hasPublishableCommits(
       worktreePath: os.Path,
-      branchName: String
+      branchName: String,
+      baseBranch: Option[String]
   ): F[Boolean] =
     F.blocking {
       val remoteBranch = s"origin/$branchName"
@@ -180,7 +212,21 @@ final class Git[F[_]](using F: Sync[F]):
             check = false
           )
           .exitCode === 0
-      val baseRef = if hasRemoteBranch then remoteBranch else "origin/HEAD"
+      val baseRef =
+        if hasRemoteBranch then remoteBranch
+        else
+          baseBranch.getOrElse {
+            val hasMaster = os
+              .proc("git", "rev-parse", "--verify", "master")
+              .call(
+                cwd = worktreePath,
+                stdout = os.Pipe,
+                stderr = os.Pipe,
+                check = false
+              )
+              .exitCode === 0
+            if hasMaster then "master" else "main"
+          }
       val result =
         os.proc("git", "rev-list", "--count", s"$baseRef..HEAD")
           .call(

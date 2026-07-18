@@ -68,6 +68,12 @@ scala-cli run /path/to/gh-tasks-llm-executor -- --task=123
   declare available agent runners/models. If absent, it falls back to a
   single `claude --model opus` runner (see `AgentInventory.scala`).
 
+Raw model prices live in `.gh-tasks-llm-executor/model-prices.json`. Discovery
+only reads this committed file and never calls the network. To refresh it,
+review updated vendor prices into a JSON file with the same schema, then run
+`scala-cli scripts/refresh-model-prices.scala -- /path/to/reviewed-prices.json`
+followed by `scala-cli scripts/discover-agent-runners.scala`.
+
 ## What it does
 
 1. Fetches open issues, filters out ones with unresolved dependencies, open
@@ -79,3 +85,12 @@ scala-cli run /path/to/gh-tasks-llm-executor -- --task=123
 3. Creates an isolated git worktree/branch (`Git.acquireWorktree`), runs the
    configured agent, validates, commits, opens/merges a PR, and releases the
    worktree and claim.
+
+If evaluation needs clarification, the script posts a `Questions before
+execution:` issue comment, plays a best-effort notification sound, then keeps
+the current run alive while polling for a human reply. Defaults are 45 minutes
+total wait and 30 seconds between polls. Configure with:
+
+- `GH_TASKS_USER_INPUT_WAIT_MINUTES`
+- `GH_TASKS_USER_INPUT_POLL_SECONDS`
+- `GH_TASKS_USER_INPUT_SOUND=0` to disable sound

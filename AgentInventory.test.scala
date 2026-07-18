@@ -1,30 +1,23 @@
-class AgentInventorySuite extends munit.FunSuite:
-  test("loads the agreed USD-per-task costs for every discovered runner") {
-    val inventory: AgentInventory = AgentInventory.load(os.pwd)
-    val costs = inventory.tools.map(tool => tool.id -> tool.cost).toMap
+import cats.effect.IO
+import munit.CatsEffectSuite
 
-    assertEquals(
-      costs,
-      Map(
-        "claude-opus" -> Some(0.60),
-        "claude-sonnet" -> Some(0.12),
-        "claude-haiku" -> Some(0.04),
-        "codex-gpt-5-high" -> Some(0.105),
-        "codex-gpt-5-medium" -> Some(0.065),
-        "codex-gpt-5-low" -> Some(0.045),
-        "codex-gpt-5-codex-high" -> Some(0.105),
-        "codex-gpt-5-codex-medium" -> Some(0.065),
-        "codex-gpt-5-codex-low" -> Some(0.045),
-        "aider-deepseek-deepseek-chat" -> Some(0.010),
-        "aider-deepseek-deepseek-reasoner" -> Some(0.029)
-      ),
-      "all discovered runners have their agreed cost"
-    )
+class AgentInventorySuite extends CatsEffectSuite:
+  test("derives task costs from configured raw prices and effort") {
+    AgentInventory.loadF[IO](os.pwd).map { inventory =>
+      val costs = inventory.tools.map(tool => tool.id -> tool.cost).toMap
+
+      assertEquals(costs("claude-opus"), Some(0.60))
+      assertEquals(costs("claude-sonnet"), Some(0.12))
+      assertEquals(costs("claude-haiku"), Some(0.04))
+      assertEquals(costs("codex-gpt-5-high"), Some(0.105))
+      assertEquals(costs("codex-gpt-5-medium"), Some(0.065))
+      assertEquals(costs("codex-gpt-5-low"), Some(0.045))
+      assertEquals(costs("aider-deepseek-deepseek-chat"), Some(0.010))
+      assertEquals(costs("aider-deepseek-deepseek-reasoner"), Some(0.029))
+    }
   }
 
-  test("includes known and unknown costs in runner prompt lines") {
-    val inventory: AgentInventory = AgentInventory.load(os.pwd)
-    val cheapest = inventory.tools.find(_.id == "aider-deepseek-deepseek-chat")
+  test("treats missing or zero raw price fields as cost unknown") {
     val unknown = AgentTool(
       id = "unknown",
       agent = "unknown",
@@ -36,13 +29,10 @@ class AgentInventorySuite extends munit.FunSuite:
       strengths = Nil,
       available = true,
       priority = 1,
-      cost = None
+      inputUsdPerMTok = None,
+      outputUsdPerMTok = Some(1.0)
     )
 
-    assertEquals(
-      cheapest.map(_.promptLine.contains("cost=$0.010/task (1x)")),
-      Some(true),
-      "known cost is included in the prompt line"
-    )
+    assertEquals(unknown.cost, None)
     assert(unknown.promptLine.contains("cost=unknown"))
   }

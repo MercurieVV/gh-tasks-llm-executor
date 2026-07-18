@@ -35,8 +35,16 @@ final case class TaskRunner(
           jsonSchema.toList.flatMap(schema => Seq("--json-schema", schema)) ++
           Seq("-p", prompt)
       case "codex" =>
+        val mappedModel = (model, effort) match
+          case (Some("gpt-5") | Some("gpt-5-codex"), Some("medium")) =>
+            Some("gpt-5.6-terra")
+          case (Some("gpt-5") | Some("gpt-5-codex"), Some("high")) =>
+            Some("gpt-5.6-sol")
+          case (Some("gpt-5") | Some("gpt-5-codex"), Some("low")) =>
+            Some("gpt-5.6-luna")
+          case _ => model
         Seq(agent, "exec") ++
-          model.toList.flatMap(value => Seq("--model", value)) ++
+          mappedModel.toList.flatMap(value => Seq("--model", value)) ++
           effort.toList.flatMap(value =>
             Seq("--config", s"model_reasoning_effort=$value")
           ) ++
@@ -167,10 +175,7 @@ final case class TaskArrows[-->[_, _]](
     announceTask: TaskRun --> TaskRun,
     fetchTaskContext: TaskRun --> TaskWithPrompt,
     evaluateTask: TaskWithPrompt -->
-      Either[
-        NeedsUserInput,
-        Either[SplitTask, TaskWithPrompt]
-      ],
+      Either[NeedsUserInput, Either[SplitTask, TaskWithPrompt]],
     needsUserInputSummary: NeedsUserInput --> RunSummary,
     splitTaskSummary: SplitTask --> RunSummary,
     runPreparedTask: TaskWithPrompt --> TaskRun,
@@ -178,22 +183,13 @@ final case class TaskArrows[-->[_, _]](
 ):
   def resumeChoice(using ArrowChoice[-->]): RunnableTask --> RunSummary =
     resumePlan >>>
-      ArrowChoice[-->].choice(
-        resumeExistingPullRequest,
-        taskExecution
-      )
+      (resumeExistingPullRequest ||| taskExecution)
 
   def taskExecution(using ArrowChoice[-->]): TaskRun --> RunSummary =
     announceTask >>>
       fetchTaskContext >>>
       evaluateTask >>>
-      ArrowChoice[-->].choice(
-        needsUserInputSummary,
-        ArrowChoice[-->].choice(
-          splitTaskSummary,
-          executePreparedTask
-        )
-      )
+      (needsUserInputSummary ||| (splitTaskSummary ||| executePreparedTask))
 
   def executePreparedTask(using
       ArrowChoice[-->]
@@ -208,10 +204,7 @@ final case class ChangeArrows[-->[_, _]](
   def commitIfChanged(using ArrowChoice[-->]): TaskWithOutput -->
     TaskWithOutput =
     changedPlan >>>
-      ArrowChoice[-->].choice(
-        commitChangedTask,
-        reportUnchangedTask
-      )
+      (commitChangedTask ||| reportUnchangedTask)
 
 final case class PublicationArrows[-->[_, _]](
     publicationPlan: PublishRequest -->
@@ -231,18 +224,12 @@ final case class PublicationArrows[-->[_, _]](
 ):
   def publishChanges(using ArrowChoice[-->]): PublishRequest --> Unit =
     publicationPlan >>>
-      ArrowChoice[-->].choice(
-        prepareChangedPublication,
-        prepareExistingPublication
-      ) >>>
+      (prepareChangedPublication ||| prepareExistingPublication) >>>
       publishTransport
 
   def publishTransport(using ArrowChoice[-->]): PublishRequest --> Unit =
     publishTransportPlan >>>
-      ArrowChoice[-->].choice(
-        publishRemote,
-        publishLocal
-      )
+      (publishRemote ||| publishLocal)
 
 final case class PreparedTaskArrows[-->[_, _]](
     runExecutor: TaskWithPrompt --> TaskWithOutput,

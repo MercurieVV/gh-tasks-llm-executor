@@ -11,8 +11,19 @@ final case class AgentTool(
     strengths: List[String],
     available: Boolean,
     priority: Int,
-    cost: Option[Double]
+    inputUsdPerMTok: Option[Double] = None,
+    outputUsdPerMTok: Option[Double] = None,
+    source: Option[String] = None,
+    asOfDate: Option[String] = None
 ):
+  def cost: Option[Double] =
+    for
+      input <- inputUsdPerMTok.filter(_ > 0)
+      output <- outputUsdPerMTok.filter(_ > 0)
+    yield
+      val raw = input * 0.020 + output * 0.004 * effortMultiplier
+      math.round(raw * 1000.0) / 1000.0
+
   def runner: TaskRunner =
     TaskRunner(agent = agent, model = model, effort = effort, version = version)
 
@@ -23,16 +34,16 @@ final case class AgentTool(
       optionMatches(version, runner.version)
 
   def promptLine: String =
-      val modelValue = model.getOrElse("")
-      val effortValue = effort.getOrElse("")
-      val versionValue = version.getOrElse("")
-      val roleValue = roles.mkString(",")
-      val jobTypeValue = jobTypes.mkString(",")
-      val strengthValue = strengths.mkString(",")
-      val costValue = cost
-        .map(value => f"$$$value%.3f/task (${value / 0.010}%.0fx)")
-        .getOrElse("unknown")
-      s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue cost=$costValue priority=$priority"
+    val modelValue = model.getOrElse("")
+    val effortValue = effort.getOrElse("")
+    val versionValue = version.getOrElse("")
+    val roleValue = roles.mkString(",")
+    val jobTypeValue = jobTypes.mkString(",")
+    val strengthValue = strengths.mkString(",")
+    val costValue = cost
+      .map(value => f"$$$value%.3f/task (${value / 0.010}%.0fx)")
+      .getOrElse("unknown")
+    s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue cost=$costValue priority=$priority"
 
   private def optionMatches(
       configured: Option[String],
@@ -42,6 +53,14 @@ final case class AgentTool(
       case (_, None)                 => true
       case (Some(left), Some(right)) => left.equalsIgnoreCase(right)
       case (None, Some(_))           => false
+
+  private def effortMultiplier: Double =
+    if model.exists(_.toLowerCase.contains("reasoner")) then 2.0
+    else
+      effort.map(_.toLowerCase) match
+        case Some("low")  => 0.5
+        case Some("high") => 2.0
+        case _             => 1.0
 
 final case class AgentInventory(tools: List[AgentTool]):
   lazy val availableTools: List[AgentTool] =
@@ -86,20 +105,6 @@ object AgentInventory:
   private val RelativeConfigPath =
     os.rel / ".gh-tasks-llm-executor" / "agent-runners.json"
 
-  private val TaskCosts: Map[(String, String, Option[String]), Double] = Map(
-    ("claude", "opus", None) -> 0.60,
-    ("claude", "sonnet", None) -> 0.12,
-    ("claude", "haiku", None) -> 0.04,
-    ("codex", "gpt-5", Some("high")) -> 0.105,
-    ("codex", "gpt-5", Some("medium")) -> 0.065,
-    ("codex", "gpt-5", Some("low")) -> 0.045,
-    ("codex", "gpt-5-codex", Some("high")) -> 0.105,
-    ("codex", "gpt-5-codex", Some("medium")) -> 0.065,
-    ("codex", "gpt-5-codex", Some("low")) -> 0.045,
-    ("aider", "deepseek/deepseek-chat", None) -> 0.010,
-    ("aider", "deepseek/deepseek-reasoner", None) -> 0.029
-  )
-
   private val Fallback = AgentInventory(
     List(
       AgentTool(
@@ -113,13 +118,12 @@ object AgentInventory:
         strengths =
           List("complex-reasoning", "broad-refactors", "failure-analysis"),
         available = true,
-        priority = 100,
-        cost = costFor("claude", Some("opus"), None)
+        priority = 100
       )
     )
   )
 
-  def load[F[_]: Sync](root: os.Path): F[AgentInventory] =
+  def loadF[F[_]: Sync](root: os.Path): F[AgentInventory] =
     Sync[F].blocking(load(root))
 
   def load(root: os.Path): AgentInventory =
@@ -149,11 +153,10 @@ object AgentInventory:
           strengths = stringListField(fields, "strengths"),
           available = boolField(fields, "available").getOrElse(false),
           priority = intField(fields, "priority").getOrElse(1000),
-          cost = costFor(
-            stringField(fields, "agent").getOrElse(id),
-            stringField(fields, "model"),
-            stringField(fields, "effort")
-          )
+          inputUsdPerMTok = positiveNumberField(fields, "inputUsdPerMTok"),
+          outputUsdPerMTok = positiveNumberField(fields, "outputUsdPerMTok"),
+          source = stringField(fields, "source"),
+          asOfDate = stringField(fields, "asOfDate")
         )
       case _ => None
 
@@ -166,21 +169,6 @@ object AgentInventory:
       .collect { case ujson.Str(value) => value }
       .filter(_.nonEmpty)
 
-  private def costFor(
-      agent: String,
-      model: Option[String],
-      effort: Option[String]
-  ): Option[Double] =
-    model.flatMap(modelName =>
-      TaskCosts.get(
-        (
-          agent.toLowerCase,
-          modelName.toLowerCase,
-          effort.map(_.toLowerCase)
-        )
-      )
-    )
-
   private def boolField(
       fields: collection.Map[String, ujson.Value],
       key: String
@@ -192,6 +180,12 @@ object AgentInventory:
       key: String
   ): Option[Int] =
     fields.get(key).collect { case ujson.Num(value) => value.toInt }
+
+  private def positiveNumberField(
+      fields: collection.Map[String, ujson.Value],
+      key: String
+  ): Option[Double] =
+    fields.get(key).collect { case ujson.Num(value) if value > 0 => value }
 
   private def stringListField(
       fields: collection.Map[String, ujson.Value],
