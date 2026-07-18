@@ -623,6 +623,26 @@ $prText
       val marker = "\n... [truncated]"
       output.take(maxOutputChars - marker.length) + marker
 
+  private def extractConclusions(output: String): String =
+    val markers = List(
+      "final answer:",
+      "final answer contract:",
+      "summary of the implementation:",
+      "summary of implementation:",
+      "proposed commit title:",
+      "proposed pull request body:"
+    )
+    val lines = output.linesIterator.toList
+    val index = lines.indexWhere { line =>
+      val lower = line.toLowerCase.trim
+      markers.exists(marker => lower.startsWith(marker))
+    }
+    if index >= 0 then
+      lines.drop(index).mkString("\n")
+    else
+      // If no marker is found, fall back to the last 100 lines or 2000 characters
+      output.takeRight(2000)
+
   def commentRunOutput[F[_]](
       root: os.Path,
       taskId: Int,
@@ -631,10 +651,11 @@ $prText
   )(using F: Sync[F]): F[Unit] =
     for
       _ <- progress(s"Commenting run output on task #$taskId...")
+      conclusions = extractConclusions(output)
       commentBody =
-        s"""LLM run output:
+        s"""LLM run output conclusions:
 ```
-${truncateForComment(output)}
+${truncateForComment(conclusions)}
 ```"""
       tempFile <- F.blocking(os.temp(commentBody))
       _ <- call(
