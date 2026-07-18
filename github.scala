@@ -629,7 +629,9 @@ $prText
       "summary of the implementation",
       "summary of implementation",
       "proposed commit title",
-      "proposed pull request body"
+      "proposed pull request body",
+      "questions before execution",
+      "questions"
     )
     val lines = output.linesIterator.toList
     val index = lines.indexWhere { line =>
