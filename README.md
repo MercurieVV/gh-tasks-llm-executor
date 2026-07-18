@@ -79,3 +79,12 @@ scala-cli run /path/to/gh-tasks-llm-executor -- --task=123
 3. Creates an isolated git worktree/branch (`Git.acquireWorktree`), runs the
    configured agent, validates, commits, opens/merges a PR, and releases the
    worktree and claim.
+
+If evaluation needs clarification, the script posts a `Questions before
+execution:` issue comment, plays a best-effort notification sound, then keeps
+the current run alive while polling for a human reply. Defaults are 45 minutes
+total wait and 30 seconds between polls. Configure with:
+
+- `GH_TASKS_USER_INPUT_WAIT_MINUTES`
+- `GH_TASKS_USER_INPUT_POLL_SECONDS`
+- `GH_TASKS_USER_INPUT_SOUND=0` to disable sound

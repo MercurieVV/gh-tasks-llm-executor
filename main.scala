@@ -12,6 +12,7 @@ import cats.syntax.all.*
 import io.github.mercurievv.minuscles.fieldsnames.derivation.semiauto.FieldNamesDerivation.fieldsNames
 
 import scala.annotation.tailrec
+import scala.concurrent.duration.*
 import scala.util.Try
 
 object Main extends IOApp:
@@ -20,6 +21,17 @@ object Main extends IOApp:
   type Flow[F[_]] = [A, B] =>> Kleisli[F, A, B]
   private val evaluatorRunner: TaskRunner =
     TaskRunner("claude", Some("opus"), None, None)
+  private val UserInputWaitMillis =
+    envLong("GH_TASKS_USER_INPUT_WAIT_MINUTES", 45).minutes.toMillis
+  private val UserInputPollMillis =
+    envLong("GH_TASKS_USER_INPUT_POLL_SECONDS", 30).seconds.toMillis
+  private val UserInputSoundEnabled =
+    sys.env
+      .get("GH_TASKS_USER_INPUT_SOUND")
+      .forall(value =>
+        !Set("0", "false", "no", "off").contains(value.toLowerCase)
+      )
+
   def run(args: List[String]): IO[ExitCode] =
     val taskNumber = parseTaskNumber(args)
     val arrowstepArgs = removeScriptArgs(args)
@@ -281,21 +293,16 @@ object Main extends IOApp:
       F[_]: Sync
   ]: -->[F, NeedsUserInput, RunSummary] =
     Kleisli { input =>
-      GitHub
-        .commentNeedsUserInput(
-          input.run.context.root,
-          input.run.task,
-          input.questions,
-          progress
+      progress(
+        s"Task #${input.run.task.number} still needs user input; stopping this iteration."
+      ).as(
+        RunSummary(
+          status = "needs-input",
+          message =
+            s"Task #${input.run.task.number} needs user input before execution.",
+          task = Some(input.run.task)
         )
-        .as(
-          RunSummary(
-            status = "needs-input",
-            message =
-              s"Task #${input.run.task.number} needs user input before execution.",
-            task = Some(input.run.task)
-          )
-        )
+      )
     }
 
   private def splitTaskSummary[F[_]: Sync]: -->[F, SplitTask, RunSummary] =
@@ -443,12 +450,93 @@ object Main extends IOApp:
                 progress
               )
           else Sync[F].unit
-      yield verifiedEvaluation.questions.filter(_.trim.nonEmpty) match
-        case Some(questions) => Left(NeedsUserInput(updatedRun, questions.trim))
-        case None if verifiedEvaluation.execution === "split" =>
-          Right(Left(SplitTask(updatedRun)))
-        case None =>
-          Right(Right(task.copy(run = updatedRun)))
+        result <- {
+          verifiedEvaluation.questions.filter(_.trim.nonEmpty) match
+            case Some(questions) =>
+              waitForUserInput[F](task.copy(run = updatedRun), questions.trim)
+            case None if verifiedEvaluation.execution === "split" =>
+              Right(Left(SplitTask(updatedRun))).pure[F]
+            case None =>
+              Right(Right(task.copy(run = updatedRun))).pure[F]
+        }
+      yield result
+    }
+
+  private def waitForUserInput[
+      F[_]: Sync
+  ](
+      task: TaskWithPrompt,
+      questions: String
+  ): F[Either[NeedsUserInput, Either[SplitTask, TaskWithPrompt]]] =
+    val run = task.run
+    for
+      _ <- GitHub.commentNeedsUserInput(
+        run.context.root,
+        run.task,
+        questions,
+        progress
+      )
+      _ <- notifyUserInputRequired[F](run.task)
+      answer <- awaitUserAnswer[F](run.context.root, run.task)
+      result <-
+        answer match
+          case Some(_) =>
+            progress(
+              s"Continuing task #${run.task.number} after receiving user input..."
+            ) *> evaluateTask[F].run(task)
+          case None =>
+            Left(NeedsUserInput(run, questions)).pure[F]
+    yield result
+
+  private def awaitUserAnswer[F[_]: Sync](
+      root: os.Path,
+      task: Issue
+  ): F[Option[String]] =
+    def loop(deadlineMillis: Long): F[Option[String]] =
+      for
+        answer <- GitHub.userAnswer(root, task, progress)
+        result <-
+          answer match
+            case some @ Some(_) => some.pure[F]
+            case None =>
+              Sync[F].blocking(System.currentTimeMillis()).flatMap { now =>
+                if now >= deadlineMillis then
+                  progress(
+                    s"No user answer received for task #${task.number} within ${UserInputWaitMillis / 60000} minutes."
+                  ).as(None)
+                else
+                  progress(
+                    s"Waiting for a user answer on task #${task.number}..."
+                  ) *>
+                    Sync[F].blocking(Thread.sleep(UserInputPollMillis)) *>
+                    loop(deadlineMillis)
+              }
+      yield result
+
+    for
+      _ <- progress(
+        s"Awaiting user answer on task #${task.number} for up to ${UserInputWaitMillis / 60000} minutes..."
+      )
+      started <- Sync[F].blocking(System.currentTimeMillis())
+      answer <- loop(started + UserInputWaitMillis)
+    yield answer
+
+  private def notifyUserInputRequired[F[_]: Sync](task: Issue): F[Unit] =
+    progress(
+      s"User input required for task #${task.number}; notification sound requested."
+    ) *> Sync[F].blocking {
+      if UserInputSoundEnabled then
+        print("\u0007")
+        System.out.flush()
+        Try {
+          val sound = os.Path("/System/Library/Sounds/Glass.aiff")
+          if os.exists(sound) then
+            os.proc("afplay", sound.toString)
+              .call(stdout = os.Pipe, stderr = os.Pipe, check = false)
+          else
+            os.proc("osascript", "-e", "beep 2")
+              .call(stdout = os.Pipe, stderr = os.Pipe, check = false)
+        }.toOption
     }
 
   private def worktreeResource[F[_]: Sync](
@@ -1356,3 +1444,10 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
           loop(tail, head :: clean)
 
     loop(args, Nil)
+
+  private def envLong(name: String, fallback: Long): Long =
+    sys.env
+      .get(name)
+      .flatMap(value => Try(value.trim.toLong).toOption)
+      .filter(_ > 0)
+      .getOrElse(fallback)
