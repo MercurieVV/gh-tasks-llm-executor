@@ -867,25 +867,54 @@ This parent task will not be implemented directly. Run child tasks first; when a
             progress
           )
           _ <- progress("Merging integration Pull Request...")
-          _ <- call(
+          mergeResult <- call(
             root,
             "gh",
             "pr",
             "merge",
             pullRequest.number.toString,
             "--merge"
-          )
-          merged <- mergedPullRequest(root, pullRequest.number)
-          _ <- awaitBranchChecks(
-            root,
-            merged.baseRefName,
-            merged.mergeCommit,
-            PullRequestCheckTimeoutMillis,
-            PullRequestCheckPollMillis,
-            progress
-          )
-          _ <- setIssueStatus(root, parentId, "completed", progress)
-          _ <- closeIssue(root, parentId)
+          ).map(_ => true).handleErrorWith { error =>
+            val msg = error.getMessage.toLowerCase
+            val isConflict = msg.contains("conflict") || msg.contains("mergeable") || msg.contains("fail")
+            if isConflict then
+              for
+                _ <- progress(
+                  s"WARNING: Merge conflict or failure detected on integration Pull Request #${pullRequest.number}. " +
+                  s"Parent task #$parentId cannot be merged automatically. Please resolve the conflicts and merge PR #${pullRequest.number} manually on GitHub."
+                )
+                _ <- call(
+                  root,
+                  "gh",
+                  "issue",
+                  "comment",
+                  parentId.toString,
+                  "--body",
+                  s"Merge conflict or merge failure detected on integration Pull Request #${pullRequest.number}. Please resolve the conflicts on GitHub to close this task."
+                ).void.handleErrorWith { commentError =>
+                  progress(s"Failed to leave conflict comment on parent #$parentId: ${commentError.getMessage}")
+                }
+              yield false
+            else
+              F.raiseError(error)
+          }
+          _ <-
+            if mergeResult then
+              for
+                merged <- mergedPullRequest(root, pullRequest.number)
+                _ <- awaitBranchChecks(
+                  root,
+                  merged.baseRefName,
+                  merged.mergeCommit,
+                  PullRequestCheckTimeoutMillis,
+                  PullRequestCheckPollMillis,
+                  progress
+                )
+                _ <- setIssueStatus(root, parentId, "completed", progress)
+                _ <- closeIssue(root, parentId)
+              yield ()
+            else
+              F.unit
         yield ()
     }
 
