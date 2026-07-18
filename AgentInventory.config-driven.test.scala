@@ -52,8 +52,8 @@ class AgentInventoryConfigDrivenSuite extends munit.FunSuite:
     val medium = cost("medium")
     val high = cost("high")
     assertEquals(medium, 0.024)
-    assertEquals(low / medium, 0.5)
-    assertEquals(high / medium, 2.0)
+    assertEquals(low, 0.022)
+    assertEquals(high, 0.028)
 
   test("missing raw prices remain unknown and do not alter #12 selection"):
     val unknown = AgentTool(

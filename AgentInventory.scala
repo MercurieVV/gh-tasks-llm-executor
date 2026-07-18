@@ -20,7 +20,9 @@ final case class AgentTool(
     for
       input <- inputUsdPerMTok.filter(_ > 0)
       output <- outputUsdPerMTok.filter(_ > 0)
-    yield (input * 0.020 + output * 0.004) * effortMultiplier
+    yield
+      val raw = input * 0.020 + output * 0.004 * effortMultiplier
+      math.round(raw * 1000.0) / 1000.0
 
   def runner: TaskRunner =
     TaskRunner(agent = agent, model = model, effort = effort, version = version)
@@ -53,10 +55,12 @@ final case class AgentTool(
       case (None, Some(_))           => false
 
   private def effortMultiplier: Double =
-    effort.map(_.toLowerCase) match
-      case Some("low")  => 0.5
-      case Some("high") => 2.0
-      case _             => 1.0
+    if model.exists(_.toLowerCase.contains("reasoner")) then 2.0
+    else
+      effort.map(_.toLowerCase) match
+        case Some("low")  => 0.5
+        case Some("high") => 2.0
+        case _             => 1.0
 
 final case class AgentInventory(tools: List[AgentTool]):
   lazy val availableTools: List[AgentTool] =
@@ -119,7 +123,7 @@ object AgentInventory:
     )
   )
 
-  def load[F[_]: Sync](root: os.Path): F[AgentInventory] =
+  def loadF[F[_]: Sync](root: os.Path): F[AgentInventory] =
     Sync[F].blocking(load(root))
 
   def load(root: os.Path): AgentInventory =

@@ -91,7 +91,7 @@ object Main extends IOApp:
   private def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =
     Kleisli { input =>
       AgentInventory
-        .load[F](input.root)
+        .loadF[F](input.root)
         .map(RunContext(input.root, _, input.taskNumber))
     }
 
