@@ -68,6 +68,12 @@ scala-cli run /path/to/gh-tasks-llm-executor -- --task=123
   declare available agent runners/models. If absent, it falls back to a
   single `claude --model opus` runner (see `AgentInventory.scala`).
 
+Raw model prices live in `.gh-tasks-llm-executor/model-prices.json`. Discovery
+only reads this committed file and never calls the network. To refresh it,
+review updated vendor prices into a JSON file with the same schema, then run
+`scala-cli scripts/refresh-model-prices.scala -- /path/to/reviewed-prices.json`
+followed by `scala-cli scripts/discover-agent-runners.scala`.
+
 ## What it does
 
 1. Fetches open issues, filters out ones with unresolved dependencies, open

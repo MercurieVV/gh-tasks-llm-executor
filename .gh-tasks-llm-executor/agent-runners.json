@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedBy": "scripts/discover-agent-runners.scala",
-  "generatedAtEpochMillis": "1784237103527",
+  "generatedAtEpochMillis": "1784389695071",
   "metadataFormat": "preferred llms/models/efforts/versions",
   "tools": [
     {
@@ -9,7 +9,7 @@
       "agent": "claude",
       "model": "opus",
       "effort": null,
-      "version": "2.1.211 (Claude Code)",
+      "version": "2.1.212 (Claude Code)",
       "roles": [
         "evaluator",
         "implementor"
@@ -34,10 +34,14 @@
       ],
       "available": true,
       "priority": 10,
+      "inputUsdPerMTok": 15,
+      "outputUsdPerMTok": 75,
+      "source": "Anthropic API pricing",
+      "asOfDate": "2026-07-17",
       "probe": {
         "command": "claude",
         "path": "/Users/viktorskalinins/.local/bin/claude",
-        "version": "2.1.211 (Claude Code)"
+        "version": "2.1.212 (Claude Code)"
       }
     },
     {
@@ -45,7 +49,7 @@
       "agent": "claude",
       "model": "sonnet",
       "effort": null,
-      "version": "2.1.211 (Claude Code)",
+      "version": "2.1.212 (Claude Code)",
       "roles": [
         "implementor"
       ],
@@ -69,10 +73,14 @@
       ],
       "available": true,
       "priority": 30,
+      "inputUsdPerMTok": 3,
+      "outputUsdPerMTok": 15,
+      "source": "Anthropic API pricing",
+      "asOfDate": "2026-07-17",
       "probe": {
         "command": "claude",
         "path": "/Users/viktorskalinins/.local/bin/claude",
-        "version": "2.1.211 (Claude Code)"
+        "version": "2.1.212 (Claude Code)"
       }
     },
     {
@@ -80,7 +88,7 @@
       "agent": "claude",
       "model": "haiku",
       "effort": null,
-      "version": "2.1.211 (Claude Code)",
+      "version": "2.1.212 (Claude Code)",
       "roles": [
         "implementor"
       ],
@@ -103,10 +111,14 @@
       ],
       "available": true,
       "priority": 60,
+      "inputUsdPerMTok": 1,
+      "outputUsdPerMTok": 5,
+      "source": "Anthropic API pricing",
+      "asOfDate": "2026-07-17",
       "probe": {
         "command": "claude",
         "path": "/Users/viktorskalinins/.local/bin/claude",
-        "version": "2.1.211 (Claude Code)"
+        "version": "2.1.212 (Claude Code)"
       }
     },
     {
@@ -114,7 +126,7 @@
       "agent": "codex",
       "model": "gpt-5",
       "effort": "high",
-      "version": "codex-cli 0.144.4",
+      "version": "codex-cli 0.144.5",
       "roles": [
         "implementor"
       ],
@@ -138,10 +150,14 @@
       ],
       "available": true,
       "priority": 100,
+      "inputUsdPerMTok": 1.25,
+      "outputUsdPerMTok": 10,
+      "source": "OpenAI API pricing",
+      "asOfDate": "2026-07-17",
       "probe": {
         "command": "codex",
         "path": "/opt/homebrew/bin/codex",
-        "version": "codex-cli 0.144.4"
+        "version": "codex-cli 0.144.5"
       }
     },
     {
@@ -149,7 +165,7 @@
       "agent": "codex",
       "model": "gpt-5",
       "effort": "medium",
-      "version": "codex-cli 0.144.4",
+      "version": "codex-cli 0.144.5",
       "roles": [
         "implementor"
       ],
@@ -172,10 +188,14 @@
       ],
       "available": true,
       "priority": 101,
+      "inputUsdPerMTok": 1.25,
+      "outputUsdPerMTok": 10,
+      "source": "OpenAI API pricing",
+      "asOfDate": "2026-07-17",
       "probe": {
         "command": "codex",
         "path": "/opt/homebrew/bin/codex",
-        "version": "codex-cli 0.144.4"
+        "version": "codex-cli 0.144.5"
       }
     },
     {
@@ -183,7 +203,7 @@
       "agent": "codex",
       "model": "gpt-5",
       "effort": "low",
-      "version": "codex-cli 0.144.4",
+      "version": "codex-cli 0.144.5",
       "roles": [
         "implementor"
       ],
@@ -205,10 +225,14 @@
       ],
       "available": true,
       "priority": 102,
+      "inputUsdPerMTok": 1.25,
+      "outputUsdPerMTok": 10,
+      "source": "OpenAI API pricing",
+      "asOfDate": "2026-07-17",
       "probe": {
         "command": "codex",
         "path": "/opt/homebrew/bin/codex",
-        "version": "codex-cli 0.144.4"
+        "version": "codex-cli 0.144.5"
       }
     },
     {
@@ -216,7 +240,7 @@
       "agent": "codex",
       "model": "gpt-5-codex",
       "effort": "high",
-      "version": "codex-cli 0.144.4",
+      "version": "codex-cli 0.144.5",
       "roles": [
         "implementor"
       ],
@@ -240,10 +264,14 @@
       ],
       "available": true,
       "priority": 110,
+      "inputUsdPerMTok": 1.25,
+      "outputUsdPerMTok": 10,
+      "source": "OpenAI API pricing",
+      "asOfDate": "2026-07-17",
       "probe": {
         "command": "codex",
         "path": "/opt/homebrew/bin/codex",
-        "version": "codex-cli 0.144.4"
+        "version": "codex-cli 0.144.5"
       }
     },
     {
@@ -251,7 +279,7 @@
       "agent": "codex",
       "model": "gpt-5-codex",
       "effort": "medium",
-      "version": "codex-cli 0.144.4",
+      "version": "codex-cli 0.144.5",
       "roles": [
         "implementor"
       ],
@@ -274,10 +302,14 @@
       ],
       "available": true,
       "priority": 111,
+      "inputUsdPerMTok": 1.25,
+      "outputUsdPerMTok": 10,
+      "source": "OpenAI API pricing",
+      "asOfDate": "2026-07-17",
       "probe": {
         "command": "codex",
         "path": "/opt/homebrew/bin/codex",
-        "version": "codex-cli 0.144.4"
+        "version": "codex-cli 0.144.5"
       }
     },
     {
@@ -285,7 +317,7 @@
       "agent": "codex",
       "model": "gpt-5-codex",
       "effort": "low",
-      "version": "codex-cli 0.144.4",
+      "version": "codex-cli 0.144.5",
       "roles": [
         "implementor"
       ],
@@ -307,10 +339,14 @@
       ],
       "available": true,
       "priority": 112,
+      "inputUsdPerMTok": 1.25,
+      "outputUsdPerMTok": 10,
+      "source": "OpenAI API pricing",
+      "asOfDate": "2026-07-17",
       "probe": {
         "command": "codex",
         "path": "/opt/homebrew/bin/codex",
-        "version": "codex-cli 0.144.4"
+        "version": "codex-cli 0.144.5"
       }
     },
     {
@@ -341,6 +377,10 @@
       ],
       "available": true,
       "priority": 200,
+      "inputUsdPerMTok": 0.27,
+      "outputUsdPerMTok": 1.1,
+      "source": "DeepSeek API pricing",
+      "asOfDate": "2026-07-17",
       "probe": {
         "command": "aider",
         "path": "/Users/viktorskalinins/.local/bin/aider",
@@ -376,6 +416,10 @@
       ],
       "available": true,
       "priority": 201,
+      "inputUsdPerMTok": 0.55,
+      "outputUsdPerMTok": 2.19,
+      "source": "DeepSeek API pricing",
+      "asOfDate": "2026-07-17",
       "probe": {
         "command": "aider",
         "path": "/Users/viktorskalinins/.local/bin/aider",

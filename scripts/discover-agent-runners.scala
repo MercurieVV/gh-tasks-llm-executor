@@ -4,6 +4,13 @@
 
 import scala.util.Try
 
+final case class ModelPrice(
+    inputUsdPerMTok: Double,
+    outputUsdPerMTok: Double,
+    source: String,
+    asOfDate: String
+)
+
 final case class Probe(
     name: String,
     path: Option[String],
@@ -38,6 +45,34 @@ def envList(name: String, fallback: List[String]): List[String] =
     .filter(_.nonEmpty)
     .getOrElse(fallback)
 
+def priceKey(agent: String, model: String): (String, String) =
+  (agent.toLowerCase, model.toLowerCase)
+
+def readModelPrices(path: os.Path): Map[(String, String), ModelPrice] =
+  Try {
+    ujson
+      .read(os.read(path))
+      .obj
+      .get("prices")
+      .toList
+      .flatMap(_.arr.toList)
+      .flatMap { value =>
+        for
+          agent <- value.obj.get("agent").collect { case ujson.Str(name) => name }
+          model <- value.obj.get("model").collect { case ujson.Str(name) => name }
+          input <- value.obj
+            .get("inputUsdPerMTok")
+            .collect { case ujson.Num(amount) if amount > 0 => amount }
+          output <- value.obj
+            .get("outputUsdPerMTok")
+            .collect { case ujson.Num(amount) if amount > 0 => amount }
+          source <- value.obj.get("source").collect { case ujson.Str(name) => name }
+          asOfDate <- value.obj.get("asOfDate").collect { case ujson.Str(date) => date }
+        yield priceKey(agent, model) ->
+          ModelPrice(input, output, source, asOfDate)
+      }
+  }.getOrElse(Nil).toMap
+
 def tool(
     id: String,
     agent: String,
@@ -49,8 +84,19 @@ def tool(
     strengths: List[String],
     available: Boolean,
     priority: Int,
-    probe: Probe
+    probe: Probe,
+    price: Option[ModelPrice]
 ): ujson.Obj =
+  val inputUsdPerMTok = price.fold[ujson.Value](ujson.Null)(value =>
+    ujson.Num(value.inputUsdPerMTok)
+  )
+  val outputUsdPerMTok = price.fold[ujson.Value](ujson.Null)(value =>
+    ujson.Num(value.outputUsdPerMTok)
+  )
+  val source = price.fold[ujson.Value](ujson.Null)(value => ujson.Str(value.source))
+  val asOfDate = price.fold[ujson.Value](ujson.Null)(value =>
+    ujson.Str(value.asOfDate)
+  )
   ujson.Obj(
     "id" -> id,
     "agent" -> agent,
@@ -62,6 +108,10 @@ def tool(
     "strengths" -> strengths.map(ujson.Str(_)),
     "available" -> available,
     "priority" -> priority,
+    "inputUsdPerMTok" -> inputUsdPerMTok,
+    "outputUsdPerMTok" -> outputUsdPerMTok,
+    "source" -> source,
+    "asOfDate" -> asOfDate,
     "probe" -> ujson.Obj(
       "command" -> probe.name,
       "path" -> probe.path.fold[ujson.Value](ujson.Null)(ujson.Str(_)),
@@ -73,6 +123,8 @@ def tool(
   val root = os.pwd
   val configDir = root / ".gh-tasks-llm-executor"
   val outputPath = configDir / "agent-runners.json"
+  val pricesPath = configDir / "model-prices.json"
+  val modelPrices = readModelPrices(pricesPath)
   val claude = probe("claude")
   val codex = probe("codex")
   val aider = probe("aider")
@@ -144,7 +196,8 @@ def tool(
         strengths = strengths,
         available = claude.available,
         priority = priority,
-        probe = claude
+        probe = claude,
+        price = modelPrices.get(priceKey("claude", model))
       )
     }
 
@@ -184,7 +237,8 @@ def tool(
         else List("small-edits", "mechanical-changes", "implement", "test"),
       available = codex.available,
       priority = 100 + modelIndex * 10 + effortIndex,
-      probe = codex
+      probe = codex,
+      price = modelPrices.get(priceKey("codex", model))
     )
 
   val aiderTools =
@@ -227,7 +281,8 @@ def tool(
         strengths = strengths,
         available = aider.available,
         priority = 200 + index,
-        probe = aider
+        probe = aider,
+        price = modelPrices.get(priceKey("aider", model))
       )
     }
 

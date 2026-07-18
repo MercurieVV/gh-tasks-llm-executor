@@ -10,8 +10,18 @@ final case class AgentTool(
     jobTypes: List[String],
     strengths: List[String],
     available: Boolean,
-    priority: Int
+    priority: Int,
+    inputUsdPerMTok: Option[Double] = None,
+    outputUsdPerMTok: Option[Double] = None,
+    source: Option[String] = None,
+    asOfDate: Option[String] = None
 ):
+  def cost: Option[Double] =
+    for
+      input <- inputUsdPerMTok.filter(_ > 0)
+      output <- outputUsdPerMTok.filter(_ > 0)
+    yield (input * 0.020 + output * 0.004) * effortMultiplier
+
   def runner: TaskRunner =
     TaskRunner(agent = agent, model = model, effort = effort, version = version)
 
@@ -28,7 +38,10 @@ final case class AgentTool(
     val roleValue = roles.mkString(",")
     val jobTypeValue = jobTypes.mkString(",")
     val strengthValue = strengths.mkString(",")
-    s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue priority=$priority"
+    val costValue = cost
+      .map(value => f"$$$value%.3f/task (${value / 0.010}%.0fx)")
+      .getOrElse("unknown")
+    s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue cost=$costValue priority=$priority"
 
   private def optionMatches(
       configured: Option[String],
@@ -38,6 +51,12 @@ final case class AgentTool(
       case (_, None)                 => true
       case (Some(left), Some(right)) => left.equalsIgnoreCase(right)
       case (None, Some(_))           => false
+
+  private def effortMultiplier: Double =
+    effort.map(_.toLowerCase) match
+      case Some("low")  => 0.5
+      case Some("high") => 2.0
+      case _             => 1.0
 
 final case class AgentInventory(tools: List[AgentTool]):
   lazy val availableTools: List[AgentTool] =
@@ -129,7 +148,11 @@ object AgentInventory:
           jobTypes = stringListField(fields, "jobTypes"),
           strengths = stringListField(fields, "strengths"),
           available = boolField(fields, "available").getOrElse(false),
-          priority = intField(fields, "priority").getOrElse(1000)
+          priority = intField(fields, "priority").getOrElse(1000),
+          inputUsdPerMTok = positiveNumberField(fields, "inputUsdPerMTok"),
+          outputUsdPerMTok = positiveNumberField(fields, "outputUsdPerMTok"),
+          source = stringField(fields, "source"),
+          asOfDate = stringField(fields, "asOfDate")
         )
       case _ => None
 
@@ -153,6 +176,12 @@ object AgentInventory:
       key: String
   ): Option[Int] =
     fields.get(key).collect { case ujson.Num(value) => value.toInt }
+
+  private def positiveNumberField(
+      fields: collection.Map[String, ujson.Value],
+      key: String
+  ): Option[Double] =
+    fields.get(key).collect { case ujson.Num(value) if value > 0 => value }
 
   private def stringListField(
       fields: collection.Map[String, ujson.Value],
