@@ -10,7 +10,8 @@ final case class AgentTool(
     jobTypes: List[String],
     strengths: List[String],
     available: Boolean,
-    priority: Int
+    priority: Int,
+    cost: Option[Double]
 ):
   def runner: TaskRunner =
     TaskRunner(agent = agent, model = model, effort = effort, version = version)
@@ -22,13 +23,16 @@ final case class AgentTool(
       optionMatches(version, runner.version)
 
   def promptLine: String =
-    val modelValue = model.getOrElse("")
-    val effortValue = effort.getOrElse("")
-    val versionValue = version.getOrElse("")
-    val roleValue = roles.mkString(",")
-    val jobTypeValue = jobTypes.mkString(",")
-    val strengthValue = strengths.mkString(",")
-    s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue priority=$priority"
+      val modelValue = model.getOrElse("")
+      val effortValue = effort.getOrElse("")
+      val versionValue = version.getOrElse("")
+      val roleValue = roles.mkString(",")
+      val jobTypeValue = jobTypes.mkString(",")
+      val strengthValue = strengths.mkString(",")
+      val costValue = cost
+        .map(value => f"$$$value%.3f/task (${value / 0.010}%.0fx)")
+        .getOrElse("unknown")
+      s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue cost=$costValue priority=$priority"
 
   private def optionMatches(
       configured: Option[String],
@@ -82,6 +86,20 @@ object AgentInventory:
   private val RelativeConfigPath =
     os.rel / ".gh-tasks-llm-executor" / "agent-runners.json"
 
+  private val TaskCosts: Map[(String, String, Option[String]), Double] = Map(
+    ("claude", "opus", None) -> 0.60,
+    ("claude", "sonnet", None) -> 0.12,
+    ("claude", "haiku", None) -> 0.04,
+    ("codex", "gpt-5", Some("high")) -> 0.105,
+    ("codex", "gpt-5", Some("medium")) -> 0.065,
+    ("codex", "gpt-5", Some("low")) -> 0.045,
+    ("codex", "gpt-5-codex", Some("high")) -> 0.105,
+    ("codex", "gpt-5-codex", Some("medium")) -> 0.065,
+    ("codex", "gpt-5-codex", Some("low")) -> 0.045,
+    ("aider", "deepseek/deepseek-chat", None) -> 0.010,
+    ("aider", "deepseek/deepseek-reasoner", None) -> 0.029
+  )
+
   private val Fallback = AgentInventory(
     List(
       AgentTool(
@@ -95,7 +113,8 @@ object AgentInventory:
         strengths =
           List("complex-reasoning", "broad-refactors", "failure-analysis"),
         available = true,
-        priority = 100
+        priority = 100,
+        cost = costFor("claude", Some("opus"), None)
       )
     )
   )
@@ -129,7 +148,12 @@ object AgentInventory:
           jobTypes = stringListField(fields, "jobTypes"),
           strengths = stringListField(fields, "strengths"),
           available = boolField(fields, "available").getOrElse(false),
-          priority = intField(fields, "priority").getOrElse(1000)
+          priority = intField(fields, "priority").getOrElse(1000),
+          cost = costFor(
+            stringField(fields, "agent").getOrElse(id),
+            stringField(fields, "model"),
+            stringField(fields, "effort")
+          )
         )
       case _ => None
 
@@ -141,6 +165,21 @@ object AgentInventory:
       .get(key)
       .collect { case ujson.Str(value) => value }
       .filter(_.nonEmpty)
+
+  private def costFor(
+      agent: String,
+      model: Option[String],
+      effort: Option[String]
+  ): Option[Double] =
+    model.flatMap(modelName =>
+      TaskCosts.get(
+        (
+          agent.toLowerCase,
+          modelName.toLowerCase,
+          effort.map(_.toLowerCase)
+        )
+      )
+    )
 
   private def boolField(
       fields: collection.Map[String, ujson.Value],
