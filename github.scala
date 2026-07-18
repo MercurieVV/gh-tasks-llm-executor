@@ -13,6 +13,11 @@ final case class Issue(
 
 object GitHub:
 
+  final case class NoOpenPullRequestToResumeException(branchName: String)
+      extends RuntimeException(
+        s"No open Pull Request found for $branchName to resume."
+      )
+
   private val PullRequestCheckTimeoutMillis = 30.minutes.toMillis
   private val PullRequestCheckPollMillis = 30.seconds.toMillis
   private val PullRequestNoChecksGraceMillis = 3.minutes.toMillis
@@ -680,7 +685,9 @@ ${runner.display}
       .map(
         _.comments
           .map(_.body)
-          .filter(_.trim.toLowerCase.startsWith(TaskMetadata.MetadataCommentPrefix))
+          .filter(
+            _.trim.toLowerCase.startsWith(TaskMetadata.MetadataCommentPrefix)
+          )
       )
 
   def commentTaskMetadata[F[_]](
@@ -732,7 +739,8 @@ ${runner.display}
       .flatMap { history =>
         val comments = history.comments
         val lastQuestionIndex = comments.lastIndexWhere(comment =>
-          comment.body.trim.toLowerCase.startsWith("questions before execution:")
+          comment.body.trim.toLowerCase
+            .startsWith("questions before execution:")
         )
         if lastQuestionIndex < 0 then F.pure(None)
         else
@@ -880,7 +888,14 @@ This parent task will not be implemented directly. Run child tasks first; when a
             progress
           )
           _ <- progress("Merging integration Pull Request...")
-          _ <- call(root, "gh", "pr", "merge", pullRequest.number.toString, "--merge")
+          _ <- call(
+            root,
+            "gh",
+            "pr",
+            "merge",
+            pullRequest.number.toString,
+            "--merge"
+          )
           merged <- mergedPullRequest(root, pullRequest.number)
           _ <- awaitBranchChecks(
             root,
@@ -976,9 +991,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
         ) *> mergeAndVerify(root, pullRequest, progress)
       case _ =>
         F.raiseError(
-          new RuntimeException(
-            s"No open Pull Request found for $branchName to resume."
-          )
+          NoOpenPullRequestToResumeException(branchName)
         )
     }
 

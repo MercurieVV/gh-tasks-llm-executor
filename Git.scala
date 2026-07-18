@@ -25,7 +25,14 @@ final class Git[F[_]](using F: Sync[F]):
           ) *>
           call(
             root,
-            (Seq("git", "worktree", "add", "-b", branchName, worktreePath.toString) ++
+            (Seq(
+              "git",
+              "worktree",
+              "add",
+              "-b",
+              branchName,
+              worktreePath.toString
+            ) ++
               baseBranch.toList)*
           )
     }
@@ -50,7 +57,13 @@ final class Git[F[_]](using F: Sync[F]):
               case true =>
                 progress(
                   s"Creating local integration branch $branchName tracking origin/$branchName..."
-                ) *> call(root, "git", "branch", branchName, s"origin/$branchName")
+                ) *> call(
+                  root,
+                  "git",
+                  "branch",
+                  branchName,
+                  s"origin/$branchName"
+                )
               case false =>
                 progress(s"Creating integration branch $branchName...") *>
                   call(root, "git", "branch", branchName) *>
@@ -124,7 +137,14 @@ final class Git[F[_]](using F: Sync[F]):
         progress(
           s"Branch $branchName has commits not on origin; preserving them at $recoveryRef before cleanup..."
         ) *>
-          call(worktreePath, "git", "push", "-f", "origin", s"HEAD:$recoveryRef").attempt
+          call(
+            worktreePath,
+            "git",
+            "push",
+            "-f",
+            "origin",
+            s"HEAD:$recoveryRef"
+          ).attempt
             .flatMap {
               case Right(_) =>
                 progress(s"Preserved unpushed commits at $recoveryRef.")
@@ -268,12 +288,16 @@ final class Git[F[_]](using F: Sync[F]):
         worktreePath.toString
       )
       _ <- baseBranch.traverse_(ensureBranch(root, _, progress))
-      _ <- if switchesBranch then call(root, "git", "checkout", targetBranch) else F.unit
+      _ <-
+        if switchesBranch then call(root, "git", "checkout", targetBranch)
+        else F.unit
       _ <- progress(s"Merging branch $branchName into $targetBranch...")
       _ <- call(root, "git", "merge", branchName)
       _ <- progress(s"Deleting local branch $branchName...")
       _ <- call(root, "git", "branch", "-d", branchName)
-      _ <- if switchesBranch then call(root, "git", "checkout", currentBranch) else F.unit
+      _ <-
+        if switchesBranch then call(root, "git", "checkout", currentBranch)
+        else F.unit
     yield ()
 
   def cleanupWorktree(

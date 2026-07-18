@@ -24,3 +24,6 @@ approval_mode = "approve"
 
 [mcp_servers.scala-semantic.tools.symbol_source]
 approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.refresh_workspace]
+approval_mode = "approve"
