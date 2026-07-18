@@ -831,8 +831,17 @@ object Main extends IOApp:
         ) *> Sync[F].raiseError(error)
     }
 
+    val publicationArrows = PublicationArrows[Flow[F]](
+      publicationPlan = publicationPlan[F],
+      prepareChangedPublication = prepareChangedPublication[F],
+      prepareExistingPublication = prepareExistingPublication[F],
+      publishTransportPlan = publishTransportPlan[F],
+      publishRemote = publishRemote[F],
+      publishLocal = publishLocal[F]
+    )
+
     val publishChanges =
-      toPublishRequest >>> businessLogic[F].publicationArrows.publishChanges
+      toPublishRequest >>> publicationArrows.publishChanges
 
     attemptPreservingInput(publishChanges) >>> (handleError ||| Kleisli.ask.map(
       _._1.run
@@ -932,10 +941,19 @@ object Main extends IOApp:
         case (run, error) => Right((run, error))
       }
 
+    val localExecutePreparedTask: -->[F, TaskWithPrompt, RunSummary] =
+      markInProgress[F] >>> runPreparedTask[F] >>> completedTaskSummary[F]
+
+    val localTaskExecution: -->[F, TaskRun, RunSummary] =
+      announceTask[F] >>>
+        fetchTaskContext[F] >>>
+        evaluateTask[F] >>>
+        (needsUserInputSummary[F] ||| (splitTaskSummary[F] ||| localExecutePreparedTask))
+
     val handleNoPr =
       TaskLogger.progress[F, TaskRun](run =>
         s"No open Pull Request remains for ${run.branchName}; creating a new run instead of resuming."
-      ) >>> businessLogic[F].taskArrows.taskExecution
+      ) >>> localTaskExecution
 
     val handleOtherError = Kleisli[F, (TaskRun, Throwable), RunSummary] {
       case (run, error) =>
