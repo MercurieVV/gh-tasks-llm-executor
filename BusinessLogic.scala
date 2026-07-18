@@ -36,10 +36,13 @@ final case class TaskRunner(
           Seq("-p", prompt)
       case "codex" =>
         val mappedModel = (model, effort) match
-          case (Some("gpt-5"), Some("medium")) => Some("gpt-5.6-terra")
-          case (Some("gpt-5"), Some("high"))   => Some("gpt-5.6-sol")
-          case (Some("gpt-5"), Some("low"))    => Some("gpt-5.6-luna")
-          case _                               => model
+          case (Some("gpt-5") | Some("gpt-5-codex"), Some("medium")) =>
+            Some("gpt-5.6-terra")
+          case (Some("gpt-5") | Some("gpt-5-codex"), Some("high")) =>
+            Some("gpt-5.6-sol")
+          case (Some("gpt-5") | Some("gpt-5-codex"), Some("low")) =>
+            Some("gpt-5.6-luna")
+          case _ => model
         Seq(agent, "exec") ++
           mappedModel.toList.flatMap(value => Seq("--model", value)) ++
           effort.toList.flatMap(value =>
