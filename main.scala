@@ -207,11 +207,9 @@ object Main extends IOApp:
 
   private def partitionCandidates[F[_]: Sync]
       : -->[F, TaskSelection, Either[NoTask, TaskSelection]] =
-    Kleisli { selection =>
-      Sync[F].pure(
-        if selection.candidates.isEmpty then Left(NoTask(selection.context))
-        else Right(selection)
-      )
+    Kleisli.fromFunction { selection =>
+      if selection.candidates.isEmpty then Left(NoTask(selection.context))
+      else Right(selection)
     }
 
   private def executeNonEmptySelection[F[_]: Sync]
@@ -929,11 +927,9 @@ object Main extends IOApp:
 
     val partition
         : -->[F, (TaskRun, Throwable), Either[TaskRun, (TaskRun, Throwable)]] =
-      Kleisli {
-        case (run, _: GitHub.NoOpenPullRequestToResumeException) =>
-          Sync[F].pure(Left(run))
-        case (run, error) =>
-          Sync[F].pure(Right((run, error)))
+      Kleisli.fromFunction {
+        case (run, _: GitHub.NoOpenPullRequestToResumeException) => Left(run)
+        case (run, error) => Right((run, error))
       }
 
     val handleNoPr =
