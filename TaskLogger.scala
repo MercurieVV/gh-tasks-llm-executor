@@ -1,7 +1,15 @@
+import cats.data.Kleisli
 import cats.effect.kernel.Sync
+import cats.syntax.all.*
 import java.time.Instant
 
 object TaskLogger:
+
+  def progress[F[_]: Sync, A](message: A => String): Kleisli[F, A, A] =
+    Kleisli(a => script[F](message(a)).as(a))
+
+  def trace[F[_]: Sync, A](message: A => String): Kleisli[F, A, A] =
+    Kleisli(a => trace[F](message(a)).as(a))
 
   def script[F[_]: Sync](message: String): F[Unit] =
     log("script", message)

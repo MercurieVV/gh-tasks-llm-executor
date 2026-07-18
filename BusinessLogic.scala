@@ -178,6 +178,7 @@ final case class TaskArrows[-->[_, _]](
       Either[NeedsUserInput, Either[SplitTask, TaskWithPrompt]],
     needsUserInputSummary: NeedsUserInput --> RunSummary,
     splitTaskSummary: SplitTask --> RunSummary,
+    markInProgress: TaskWithPrompt --> TaskWithPrompt,
     runPreparedTask: TaskWithPrompt --> TaskRun,
     completedTaskSummary: TaskRun --> RunSummary
 ):
@@ -194,7 +195,7 @@ final case class TaskArrows[-->[_, _]](
   def executePreparedTask(using
       ArrowChoice[-->]
   ): TaskWithPrompt --> RunSummary =
-    runPreparedTask >>> completedTaskSummary
+    markInProgress >>> runPreparedTask >>> completedTaskSummary
 
 final case class ChangeArrows[-->[_, _]](
     changedPlan: TaskWithOutput --> Either[ChangedTask, UnchangedTask],
@@ -238,6 +239,21 @@ final case class PreparedTaskArrows[-->[_, _]](
     verifyReplayCi: TaskWithOutput --> TaskWithOutput,
     closeTask: TaskWithOutput --> TaskRun
 )
+
+final case class RecursiveArrows[-->[_, _]](
+    checkIfCompleted: Issue --> Either[RunSummary, Issue],
+    runDependencies: (Issue --> RunSummary) => (Issue -->
+      Either[RunSummary, Issue]),
+    claimAndRun: Issue --> RunSummary,
+    defer: (=> Issue --> RunSummary) => (Issue --> RunSummary)
+):
+  def executeRecursive(using ArrowChoice[-->]): Issue --> RunSummary =
+    lazy val self: Issue --> RunSummary =
+      checkIfCompleted >>> (summon[ArrowChoice[-->]]
+        .id[RunSummary] ||| (runDependencies(
+        defer(self)
+      ) >>> (summon[ArrowChoice[-->]].id[RunSummary] ||| claimAndRun)))
+    self
 
 final case class BusinessLogic[-->[_, _]](
     programArrows: ProgramArrows[-->],

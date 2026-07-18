@@ -67,6 +67,7 @@ object Main extends IOApp:
         evaluateTask = evaluateTask[F],
         needsUserInputSummary = needsUserInputSummary[F],
         splitTaskSummary = splitTaskSummary[F],
+        markInProgress = markInProgress[F],
         runPreparedTask = runPreparedTask[F],
         completedTaskSummary = completedTaskSummary[F]
       ),
@@ -213,7 +214,7 @@ object Main extends IOApp:
   ): F[RunSummary] =
     candidates match
       case Nil =>
-        noTaskSummary[F].run(NoTask(context))
+        noTaskSummary[F](NoTask(context))
       case _ =>
         for
           openIssues <- GitHub.fetchIssues(context.root)
@@ -227,43 +228,50 @@ object Main extends IOApp:
                 case Some(latestIssue) =>
                   recursiveFlow.run(latestIssue)
                 case None =>
-                  Sync[F].pure(RunSummary(
-                    status = "completed",
-                    message = s"Task #${candidate.issue.number} is already completed.",
-                    task = Some(candidate.issue)
-                  ))
+                  Sync[F].pure(
+                    RunSummary(
+                      status = "completed",
+                      message =
+                        s"Task #${candidate.issue.number} is already completed.",
+                      task = Some(candidate.issue)
+                    )
+                  )
               }
             yield summary
           }
         yield summaries.lastOption.getOrElse(
-          RunSummary(status = "completed", message = "All candidates completed.", task = None)
+          RunSummary(
+            status = "completed",
+            message = "All candidates completed.",
+            task = None
+          )
         )
 
   private def executeRecursive[F[_]: Sync](
       context: RunContext,
       openIssues: Ref[F, Map[Int, Issue]]
   ): -->[F, Issue, RunSummary] =
-    lazy val self: -->[F, Issue, RunSummary] =
-      checkIfCompleted[F] >>> Kleisli {
-        case Left(summary) => Sync[F].pure(summary)
-        case Right(issue) =>
-          (runDependencies[F](openIssues, self) >>> Kleisli {
-            case Left(summary) => Sync[F].pure(summary)
-            case Right(readyIssue) => claimAndRun[F](context).run(readyIssue)
-          }).run(issue)
-      }
-    self
+    RecursiveArrows[Flow[F]](
+      checkIfCompleted = checkIfCompleted[F],
+      runDependencies = self => runDependencies[F](openIssues, self),
+      claimAndRun = claimAndRun[F](context),
+      defer = self => Kleisli(issue => self.run(issue))
+    ).executeRecursive
 
-  private def checkIfCompleted[F[_]: Sync]: -->[F, Issue, Either[RunSummary, Issue]] =
+  private def checkIfCompleted[F[_]: Sync]
+      : -->[F, Issue, Either[RunSummary, Issue]] =
     Kleisli { issue =>
       if issue.state.toLowerCase == "closed" then
-        Sync[F].pure(Left(RunSummary(
-          status = "completed",
-          message = s"Task #${issue.number} is already completed.",
-          task = Some(issue)
-        )))
-      else
-        Sync[F].pure(Right(issue))
+        Sync[F].pure(
+          Left(
+            RunSummary(
+              status = "completed",
+              message = s"Task #${issue.number} is already completed.",
+              task = Some(issue)
+            )
+          )
+        )
+      else Sync[F].pure(Right(issue))
     }
 
   private def runDependencies[F[_]: Sync](
@@ -275,14 +283,14 @@ object Main extends IOApp:
       for
         issuesMap <- openIssues.get
         openDeps = depIds.flatMap(issuesMap.get)
-        dependencyResult <- openDeps.foldLeftM[F, Either[RunSummary, Unit]](Right(())) {
+        dependencyResult <- openDeps.foldLeftM[F, Either[RunSummary, Unit]](
+          Right(())
+        ) {
           case (Left(failedSummary), _) => Sync[F].pure(Left(failedSummary))
           case (Right(_), depIssue) =>
             executeRecursive.run(depIssue).map { summary =>
-              if summary.status == "completed" then
-                Right(())
-              else
-                Left(summary)
+              if summary.status == "completed" then Right(())
+              else Left(summary)
             }
         }
       yield dependencyResult.map(_ => issue)
@@ -296,20 +304,26 @@ object Main extends IOApp:
         .selectRunner(GitHub.taskRunners(issue))
         .getOrElse(evaluatorRunner)
       val runnable = RunnableTask(context, issue, runner)
-      
-      IssueClaim.acquire[F](context.root, issue.number, progress).use { _ =>
-        businessLogic[F].taskArrows.resumeChoice.run(runnable)
-      }.recoverWith {
-        case _: IssueAlreadyClaimedException =>
-          progress(s"Task #${issue.number} is claimed by another process. Waiting for completion...") *>
-            pollGitHubForCompletion[F](context.root, issue.number).map { finalIssue =>
-              RunSummary(
-                status = "completed",
-                message = s"Task #${issue.number} was completed by another process.",
-                task = Some(finalIssue)
-              )
+
+      IssueClaim
+        .acquire[F](context.root, issue.number, progress)
+        .use { _ =>
+          businessLogic[F].taskArrows.resumeChoice.run(runnable)
+        }
+        .recoverWith { case _: IssueAlreadyClaimedException =>
+          progress(
+            s"Task #${issue.number} is claimed by another process. Waiting for completion..."
+          ) *>
+            pollGitHubForCompletion[F](context.root, issue.number).map {
+              finalIssue =>
+                RunSummary(
+                  status = "completed",
+                  message =
+                    s"Task #${issue.number} was completed by another process.",
+                  task = Some(finalIssue)
+                )
             }
-      }
+        }
     }
 
   private def pollGitHubForCompletion[F[_]: Sync](
@@ -329,21 +343,20 @@ object Main extends IOApp:
       }
     loop
 
-  private def noTaskSummary[F[_]: Sync]: -->[F, NoTask, RunSummary] =
-    Kleisli { noTask =>
-      val context = noTask.context
-      val message = context.taskNumber.fold(
-        "No tasks found without unresolved dependencies, open child tasks, or another process already claiming them."
-      )(number =>
-        s"No runnable open task found for #$number. It may be closed, blocked by dependencies or open child tasks, marked needs-input, or already claimed by another process."
-      )
+  private def noTaskSummary[F[_]: Sync](noTask: NoTask): F[RunSummary] =
+    val context = noTask.context
+    val message = context.taskNumber.fold(
+      "No tasks found without unresolved dependencies, open child tasks, or another process already claiming them."
+    )(number =>
+      s"No runnable open task found for #$number. It may be closed, blocked by dependencies or open child tasks, marked needs-input, or already claimed by another process."
+    )
+    Sync[F].pure(
       RunSummary(
         status = "no-task",
         message = message,
         task = None
       )
-        .pure[F]
-    }
+    )
 
   private def resumePlan[F[_]: Sync]
       : -->[F, RunnableTask, Either[TaskRun, TaskRun]] =
@@ -379,29 +392,29 @@ object Main extends IOApp:
   private def runPreparedTask[
       F[_]: Sync
   ]: -->[F, TaskWithPrompt, TaskRun] =
-    traced("markInProgress", markInProgress[F]) >>>
-      Kleisli { task =>
-        worktreeResource[F](task).use { acquiredTask =>
-          businessLogic[F].executeAcquiredTask
-            .run(acquiredTask)
-            .onError { case _ =>
-              Git[F].preserveUnpushedCommits(
-                acquiredTask.run.worktreePath,
-                acquiredTask.run.branchName,
-                acquiredTask.run.baseBranch,
-                progress
-              )
-            }
-        }
+    Kleisli { task =>
+      worktreeResource[F](task).use { acquiredTask =>
+        businessLogic[F].executeAcquiredTask
+          .run(acquiredTask)
+          .onError { case _ =>
+            Git[F].preserveUnpushedCommits(
+              acquiredTask.run.worktreePath,
+              acquiredTask.run.branchName,
+              acquiredTask.run.baseBranch,
+              progress
+            )
+          }
       }
+    }
 
   private def needsUserInputSummary[
       F[_]: Sync
   ]: -->[F, NeedsUserInput, RunSummary] =
-    Kleisli { input =>
-      progress(
+    TaskLogger
+      .progress[F, NeedsUserInput](input =>
         s"Task #${input.run.task.number} still needs user input; stopping this iteration."
-      ).as(
+      )
+      .map(input =>
         RunSummary(
           status = "needs-input",
           message =
@@ -409,7 +422,6 @@ object Main extends IOApp:
           task = Some(input.run.task)
         )
       )
-    }
 
   private def splitTaskSummary[F[_]: Sync]: -->[F, SplitTask, RunSummary] =
     Kleisli { split =>
@@ -430,11 +442,9 @@ object Main extends IOApp:
     }
 
   private def announceTask[F[_]: Sync]: -->[F, TaskRun, TaskRun] =
-    Kleisli { run =>
-      progress(
-        s"Selected next task: #${run.task.number} - ${run.task.title}"
-      ).as(run)
-    }
+    TaskLogger.progress(run =>
+      s"Selected next task: #${run.task.number} - ${run.task.title}"
+    )
 
   private def markInProgress[
       F[_]: Sync
@@ -792,32 +802,42 @@ object Main extends IOApp:
   private def commitChangedTask[
       F[_]: Sync
   ]: -->[F, ChangedTask, TaskWithOutput] =
-    Kleisli { changed =>
+    val toPublishRequest = Kleisli[F, ChangedTask, PublishRequest] { changed =>
       val run = changed.run.run
-      commitAndMergeOrPublish(
-        run.context.root,
-        run.worktreePath,
-        run.branchName,
-        run.baseBranch,
-        run.task,
-        extractAgentFinalization(changed.run.output)
-      ).handleErrorWith { error =>
-        GitHub
-          .commentTaskFailure(
-            run.context.root,
-            run.task,
-            error.getMessage,
-            progress
-          ) *> Sync[F].raiseError(error)
-      }.as(changed.run)
+      Sync[F].pure(
+        PublishRequest(
+          run.context.root,
+          run.worktreePath,
+          run.branchName,
+          run.baseBranch,
+          run.task,
+          extractAgentFinalization(changed.run.output)
+        )
+      )
     }
+
+    val handleError = Kleisli[F, (ChangedTask, Throwable), TaskWithOutput] {
+      case (changed, error) =>
+        val run = changed.run.run
+        GitHub.commentTaskFailure(
+          run.context.root,
+          run.task,
+          error.getMessage,
+          progress
+        ) *> Sync[F].raiseError(error)
+    }
+
+    val publishChanges =
+      toPublishRequest >>> businessLogic[F].publicationArrows.publishChanges
+
+    attemptPreservingInput(publishChanges) >>> (handleError ||| Kleisli.ask.map(
+      _._1.run
+    ))
 
   private def reportUnchangedTask[
       F[_]: Sync
   ]: -->[F, UnchangedTask, TaskWithOutput] =
-    Kleisli { unchanged =>
-      progress("No files changed.").as(unchanged.run)
-    }
+    TaskLogger.progress[F, UnchangedTask](_ => "No files changed.").map(_.run)
 
   private def verifyReplayCi[F[_]: Sync]
       : -->[F, TaskWithOutput, TaskWithOutput] =
@@ -838,20 +858,6 @@ object Main extends IOApp:
               progress
             ) *> Sync[F].raiseError(error)
         }
-        .as(task)
-    }
-
-  private def cleanupTaskWorktree[
-      F[_]: Sync
-  ]: -->[F, TaskWithOutput, TaskWithOutput] =
-    Kleisli { task =>
-      Git[F]
-        .cleanupWorktree(
-          task.run.context.root,
-          task.run.worktreePath,
-          task.run.branchName,
-          progress
-        )
         .as(task)
     }
 
@@ -888,8 +894,8 @@ object Main extends IOApp:
   // sweep up any leftover local worktree/branch (usually already gone).
   private def resumeExistingPullRequest[F[_]: Sync]
       : -->[F, TaskRun, RunSummary] =
-    Kleisli { run =>
-      val resumeAndClose =
+    val resumeAndClose: -->[F, TaskRun, RunSummary] =
+      Kleisli[F, TaskRun, TaskWithOutput] { run =>
         for
           _ <- progress(
             s"Task #${run.task.number} already has an open Pull Request for ${run.branchName}; resuming to verify and merge instead of re-implementing..."
@@ -899,11 +905,12 @@ object Main extends IOApp:
             run.branchName,
             progress
           )
-          completedRun <- closeTask[F].run(TaskWithOutput(run, output = ""))
-          _ <- Git[F].cleanupWorktree(
-            run.context.root,
-            run.worktreePath,
-            run.branchName,
+        yield TaskWithOutput(run, output = "")
+      } >>> closeTask[F] >>> Kleisli[F, TaskRun, RunSummary] { completedRun =>
+        for _ <- Git[F].cleanupWorktree(
+            completedRun.context.root,
+            completedRun.worktreePath,
+            completedRun.branchName,
             progress
           )
         yield RunSummary(
@@ -912,40 +919,53 @@ object Main extends IOApp:
             s"Task #${completedRun.task.number} completed successfully (resumed existing Pull Request).",
           task = Some(completedRun.task)
         )
-
-      resumeAndClose.handleErrorWith {
-        case _: GitHub.NoOpenPullRequestToResumeException =>
-          progress(
-            s"No open Pull Request remains for ${run.branchName}; creating a new run instead of resuming."
-          ) *>
-            businessLogic[F].taskArrows.taskExecution.run(run)
-        case error =>
-          GitHub.commentTaskFailure(
-            run.context.root,
-            run.task,
-            error.getMessage,
-            progress
-          ) *> Sync[F].raiseError(error)
       }
+
+    val partition
+        : -->[F, (TaskRun, Throwable), Either[TaskRun, (TaskRun, Throwable)]] =
+      Kleisli {
+        case (run, _: GitHub.NoOpenPullRequestToResumeException) =>
+          Sync[F].pure(Left(run))
+        case (run, error) =>
+          Sync[F].pure(Right((run, error)))
+      }
+
+    val handleNoPr =
+      TaskLogger.progress[F, TaskRun](run =>
+        s"No open Pull Request remains for ${run.branchName}; creating a new run instead of resuming."
+      ) >>> businessLogic[F].taskArrows.taskExecution
+
+    val handleOtherError = Kleisli[F, (TaskRun, Throwable), RunSummary] {
+      case (run, error) =>
+        GitHub.commentTaskFailure(
+          run.context.root,
+          run.task,
+          error.getMessage,
+          progress
+        ) *> Sync[F].raiseError(error)
     }
+
+    val handleError = partition >>> (handleNoPr ||| handleOtherError)
+
+    attemptPreservingInput(resumeAndClose) >>> (handleError ||| Kleisli.ask.map(
+      _._2
+    ))
 
   private def traced[F[_]: Sync, A, B](
       name: String,
       flow: -->[F, A, B]
   ): -->[F, A, B] =
-    Kleisli { input =>
-      TaskLogger.trace[F](s"enter $name input=${summarize(input)}") *>
-        flow
-          .run(input)
-          .flatTap(output =>
-            TaskLogger.trace[F](s"exit $name output=${summarize(output)}")
-          )
-          .handleErrorWith { error =>
-            TaskLogger.trace[F](
-              s"fail $name error=${error.getClass.getSimpleName}: ${error.getMessage}"
-            ) *> Sync[F].raiseError(error)
-          }
-    }
+    val logEnter =
+      TaskLogger.trace[F, A](input => s"enter $name input=${summarize(input)}")
+    val logExit =
+      TaskLogger.trace[F, B](output =>
+        s"exit $name output=${summarize(output)}"
+      )
+    val logError = TaskLogger.trace[F, Throwable](error =>
+      s"fail $name error=${error.getClass.getSimpleName}: ${error.getMessage}"
+    ) >>> Kleisli(Sync[F].raiseError[B])
+
+    (logEnter >>> flow).attempt >>> (logError ||| logExit)
 
   private def arrowLogger[F[_]: Sync]: ArrowLogger[Flow[F]] =
     new ArrowLogger[Flow[F]]:
@@ -1410,25 +1430,6 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
     normalized.startsWith("proposed commit title:") ||
     normalized.startsWith("proposed pull request body:")
 
-  private def commitAndMergeOrPublish[F[_]](
-      root: os.Path,
-      worktreePath: os.Path,
-      branchName: String,
-      baseBranch: Option[String],
-      task: Issue,
-      finalization: AgentFinalization
-  )(using Sync[F]): F[Unit] =
-    businessLogic[F].publicationArrows.publishChanges(
-      PublishRequest(
-        root,
-        worktreePath,
-        branchName,
-        baseBranch,
-        task,
-        finalization
-      )
-    )
-
   private def publicationPlan[F[_]: Sync]: -->[F, PublishRequest, Either[
     ChangedPublication,
     ExistingPublication
@@ -1444,26 +1445,26 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
 
   private def prepareChangedPublication[F[_]: Sync]
       : -->[F, ChangedPublication, PublishRequest] =
-    Kleisli { changed =>
+    TaskLogger.progress[F, ChangedPublication](_ =>
+      "Files changed. Committing and merging changes..."
+    ) >>> Kleisli { changed =>
       val request = changed.request
-      progress("Files changed. Committing and merging changes...") *>
-        Git[F]
-          .commitAll(
-            request.worktreePath,
-            request.task,
-            request.finalization.commitTitle
-          )
-          .as(request)
+      Git[F]
+        .commitAll(
+          request.worktreePath,
+          request.task,
+          request.finalization.commitTitle
+        )
+        .as(request)
     }
 
   private def prepareExistingPublication[F[_]: Sync]
       : -->[F, ExistingPublication, PublishRequest] =
-    Kleisli { existing =>
-      val request = existing.request
-      progress("No file changes, publishing existing local commits...").as(
-        request
+    TaskLogger
+      .progress[F, ExistingPublication](_ =>
+        "No file changes, publishing existing local commits..."
       )
-    }
+      .map(_.request)
 
   private def publishTransportPlan[F[_]: Sync]
       : -->[F, PublishRequest, Either[RemotePublication, LocalPublication]] =
@@ -1505,6 +1506,14 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
 
   private def progress[F[_]: Sync](message: String): F[Unit] =
     TaskLogger.script(message)
+
+  private def attemptPreservingInput[F[_]: Sync, A, B](
+      k: -->[F, A, B]
+  ): -->[F, A, Either[(A, Throwable), (A, B)]] =
+    (Kleisli.ask[F, A] &&& k.attempt).map {
+      case (a, Left(err)) => Left((a, err))
+      case (a, Right(b))  => Right((a, b))
+    }
 
   private def parseTaskNumber(args: List[String]): Option[Int] =
     args

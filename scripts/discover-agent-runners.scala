@@ -58,16 +58,24 @@ def readModelPrices(path: os.Path): Map[(String, String), ModelPrice] =
       .flatMap(_.arr.toList)
       .flatMap { value =>
         for
-          agent <- value.obj.get("agent").collect { case ujson.Str(name) => name }
-          model <- value.obj.get("model").collect { case ujson.Str(name) => name }
+          agent <- value.obj.get("agent").collect { case ujson.Str(name) =>
+            name
+          }
+          model <- value.obj.get("model").collect { case ujson.Str(name) =>
+            name
+          }
           input <- value.obj
             .get("inputUsdPerMTok")
             .collect { case ujson.Num(amount) if amount > 0 => amount }
           output <- value.obj
             .get("outputUsdPerMTok")
             .collect { case ujson.Num(amount) if amount > 0 => amount }
-          source <- value.obj.get("source").collect { case ujson.Str(name) => name }
-          asOfDate <- value.obj.get("asOfDate").collect { case ujson.Str(date) => date }
+          source <- value.obj.get("source").collect { case ujson.Str(name) =>
+            name
+          }
+          asOfDate <- value.obj.get("asOfDate").collect {
+            case ujson.Str(date) => date
+          }
         yield priceKey(agent, model) ->
           ModelPrice(input, output, source, asOfDate)
       }
@@ -93,10 +101,10 @@ def tool(
   val outputUsdPerMTok = price.fold[ujson.Value](ujson.Null)(value =>
     ujson.Num(value.outputUsdPerMTok)
   )
-  val source = price.fold[ujson.Value](ujson.Null)(value => ujson.Str(value.source))
-  val asOfDate = price.fold[ujson.Value](ujson.Null)(value =>
-    ujson.Str(value.asOfDate)
-  )
+  val source =
+    price.fold[ujson.Value](ujson.Null)(value => ujson.Str(value.source))
+  val asOfDate =
+    price.fold[ujson.Value](ujson.Null)(value => ujson.Str(value.asOfDate))
   ujson.Obj(
     "id" -> id,
     "agent" -> agent,

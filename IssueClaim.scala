@@ -41,7 +41,10 @@ object IssueClaim:
           for
             timestampStr <- F.blocking(
               os.proc("git", "show", "-s", "--format=%ct", "FETCH_HEAD")
-                .call(cwd = root, stderr = os.Pipe).out.text().trim
+                .call(cwd = root, stderr = os.Pipe)
+                .out
+                .text()
+                .trim
             )
             commitTime = scala.util.Try(timestampStr.toLong).getOrElse(0L)
             currentTime = System.currentTimeMillis() / 1000L
@@ -51,10 +54,17 @@ object IssueClaim:
               if isStale then
                 progress(
                   s"Task #$taskNumber claim is stale (${ageSeconds / 3600} hours old). Force-releasing it..."
-                ) *> F.blocking(
-                  os.proc("git", "push", "origin", "--delete", ref)
-                    .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
-                ).void
+                ) *> F
+                  .blocking(
+                    os.proc("git", "push", "origin", "--delete", ref)
+                      .call(
+                        cwd = root,
+                        stdout = os.Pipe,
+                        stderr = os.Pipe,
+                        check = false
+                      )
+                  )
+                  .void
               else F.unit
           yield isStale
         else F.pure(false)
@@ -69,8 +79,16 @@ object IssueClaim:
     for
       _ <- progress(s"Claiming task #$taskNumber...")
       commitHash <- F.blocking {
-        os.proc("git", "commit-tree", "HEAD^{tree}", "-m", s"Claim task $taskNumber - $uuid")
-          .call(cwd = root).out.text().trim
+        os.proc(
+          "git",
+          "commit-tree",
+          "HEAD^{tree}",
+          "-m",
+          s"Claim task $taskNumber - $uuid"
+        ).call(cwd = root)
+          .out
+          .text()
+          .trim
       }
       result <- F.blocking(
         os.proc("git", "push", "origin", s"$commitHash:${refName(taskNumber)}")

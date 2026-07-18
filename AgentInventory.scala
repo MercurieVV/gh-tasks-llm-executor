@@ -60,7 +60,7 @@ final case class AgentTool(
       effort.map(_.toLowerCase) match
         case Some("low")  => 0.5
         case Some("high") => 2.0
-        case _             => 1.0
+        case _            => 1.0
 
 final case class AgentInventory(tools: List[AgentTool]):
   lazy val availableTools: List[AgentTool] =

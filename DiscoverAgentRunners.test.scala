@@ -1,8 +1,12 @@
 class DiscoverAgentRunnersSuite extends munit.FunSuite:
   test("discovery is offline and emits the pinned raw-price fields"):
     val script = os.read(os.pwd / "scripts" / "discover-agent-runners.scala")
-    List("http://", "https://", "curl", "java.net", "requests").foreach { token =>
-      assert(!script.toLowerCase.contains(token), s"network token found: $token")
+    List("http://", "https://", "curl", "java.net", "requests").foreach {
+      token =>
+        assert(
+          !script.toLowerCase.contains(token),
+          s"network token found: $token"
+        )
     }
 
     val json = ujson.read(
