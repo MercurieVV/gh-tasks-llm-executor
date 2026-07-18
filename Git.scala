@@ -12,11 +12,11 @@ final class Git[F[_]](using F: Sync[F]):
   ): F[Unit] =
     F.blocking(os.exists(worktreePath)).flatMap {
       case true =>
-        F.raiseError(
-          new RuntimeException(
-            s"Cannot acquire worktree: $worktreePath already exists."
-          )
-        )
+        progress(
+          s"Leftover worktree detected at $worktreePath. Cleaning up..."
+        ) *>
+          releaseWorktree(root, worktreePath, branchName, progress) *>
+          acquireWorktree(root, worktreePath, branchName, baseBranch, progress)
       case false =>
         baseBranch.traverse_(ensureBranch(root, _, progress)) *>
           progress(
@@ -115,7 +115,14 @@ final class Git[F[_]](using F: Sync[F]):
               "remove",
               "--force",
               worktreePath.toString
-            )
+            ).attempt.flatMap {
+              case Right(_) => F.unit
+              case Left(_) =>
+                progress(
+                  s"Standard git worktree remove failed. Force deleting directory $worktreePath..."
+                ) *>
+                  F.blocking(os.remove.all(worktreePath))
+            }
       }
       _ <- call(root, "git", "branch", "-D", branchName).attempt.void
     yield ()
