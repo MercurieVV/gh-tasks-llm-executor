@@ -613,6 +613,16 @@ $prText
         fields.get("body").collect { case ujson.Str(body) => body }
       case _ => None
 
+  private val MaxCommentBodyChars = 65536
+  private val CommentWrapperOverhead = "LLM run output:\n```\n\n```".length
+
+  private def truncateForComment(output: String): String =
+    val maxOutputChars = MaxCommentBodyChars - CommentWrapperOverhead
+    if output.length <= maxOutputChars then output
+    else
+      val marker = "\n... [truncated]"
+      output.take(maxOutputChars - marker.length) + marker
+
   def commentRunOutput[F[_]](
       root: os.Path,
       taskId: Int,
@@ -624,7 +634,7 @@ $prText
       commentBody =
         s"""LLM run output:
 ```
-$output
+${truncateForComment(output)}
 ```"""
       tempFile <- F.blocking(os.temp(commentBody))
       _ <- call(
