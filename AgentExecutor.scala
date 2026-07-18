@@ -198,7 +198,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
             output.append(line).append(System.lineSeparator())
           }
           lastActivity.set(System.currentTimeMillis())
-          TaskLogger.unsafeLlm(s"agent $name: $line")
+          TaskLogger.unsafeAgentOutput(name, line)
           TaskLogger.unsafeAppendArtifact(
             artifactPath,
             s"${Instant.now()} $line${System.lineSeparator()}"
