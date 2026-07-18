@@ -55,7 +55,9 @@ object Main extends IOApp:
       programArrows = ProgramArrows[Flow[F]](
         resolveContext = resolveContext[F],
         selectTask = selectTask[F],
-        executeTask = executeTask[F],
+        partitionCandidates = partitionCandidates[F],
+        noTaskSummary = noTaskSummary[F],
+        executeNonEmptySelection = executeNonEmptySelection[F],
         toProgramSays =
           Kleisli(summary => Sync[F].pure(ProgramSays.Done(summary.toJson)))
       ),
@@ -203,49 +205,51 @@ object Main extends IOApp:
       .read(root, issue)
       .map(merged => issue.copy(body = TaskMetadata.render(merged)))
 
-  private def executeTask[F[_]: Sync]: -->[F, TaskSelection, RunSummary] =
+  private def partitionCandidates[F[_]: Sync]
+      : -->[F, TaskSelection, Either[NoTask, TaskSelection]] =
     Kleisli { selection =>
-      claimAndRunTask[F](selection.context, selection.candidates)
+      Sync[F].pure(
+        if selection.candidates.isEmpty then Left(NoTask(selection.context))
+        else Right(selection)
+      )
     }
 
-  private def claimAndRunTask[F[_]: Sync](
-      context: RunContext,
-      candidates: List[RunnableTask]
-  ): F[RunSummary] =
-    candidates match
-      case Nil =>
-        noTaskSummary[F](NoTask(context))
-      case _ =>
-        for
-          openIssues <- GitHub.fetchIssues(context.root)
-          openIssuesMap = openIssues.map(i => i.number -> i).toMap
-          openIssuesRef <- Ref[F].of(openIssuesMap)
-          recursiveFlow = executeRecursive[F](context, openIssuesRef)
-          summaries <- candidates.traverse { candidate =>
-            for
-              currentMap <- openIssuesRef.get
-              summary <- currentMap.get(candidate.issue.number) match {
-                case Some(latestIssue) =>
-                  recursiveFlow.run(latestIssue)
-                case None =>
-                  Sync[F].pure(
-                    RunSummary(
-                      status = "completed",
-                      message =
-                        s"Task #${candidate.issue.number} is already completed.",
-                      task = Some(candidate.issue)
-                    )
+  private def executeNonEmptySelection[F[_]: Sync]
+      : -->[F, TaskSelection, RunSummary] =
+    Kleisli { selection =>
+      val context = selection.context
+      val candidates = selection.candidates
+      for
+        openIssues <- GitHub.fetchIssues(context.root)
+        openIssuesMap = openIssues.map(i => i.number -> i).toMap
+        openIssuesRef <- Ref[F].of(openIssuesMap)
+        recursiveFlow = executeRecursive[F](context, openIssuesRef)
+        summaries <- candidates.traverse { candidate =>
+          for
+            currentMap <- openIssuesRef.get
+            summary <- currentMap.get(candidate.issue.number) match {
+              case Some(latestIssue) =>
+                recursiveFlow.run(latestIssue)
+              case None =>
+                Sync[F].pure(
+                  RunSummary(
+                    status = "completed",
+                    message =
+                      s"Task #${candidate.issue.number} is already completed.",
+                    task = Some(candidate.issue)
                   )
-              }
-            yield summary
-          }
-        yield summaries.lastOption.getOrElse(
-          RunSummary(
-            status = "completed",
-            message = "All candidates completed.",
-            task = None
-          )
+                )
+            }
+          yield summary
+        }
+      yield summaries.lastOption.getOrElse(
+        RunSummary(
+          status = "completed",
+          message = "All candidates completed.",
+          task = None
         )
+      )
+    }
 
   private def executeRecursive[F[_]: Sync](
       context: RunContext,
@@ -343,20 +347,22 @@ object Main extends IOApp:
       }
     loop
 
-  private def noTaskSummary[F[_]: Sync](noTask: NoTask): F[RunSummary] =
-    val context = noTask.context
-    val message = context.taskNumber.fold(
-      "No tasks found without unresolved dependencies, open child tasks, or another process already claiming them."
-    )(number =>
-      s"No runnable open task found for #$number. It may be closed, blocked by dependencies or open child tasks, marked needs-input, or already claimed by another process."
-    )
-    Sync[F].pure(
-      RunSummary(
-        status = "no-task",
-        message = message,
-        task = None
+  private def noTaskSummary[F[_]: Sync]: -->[F, NoTask, RunSummary] =
+    Kleisli { noTask =>
+      val context = noTask.context
+      val message = context.taskNumber.fold(
+        "No tasks found without unresolved dependencies, open child tasks, or another process already claiming them."
+      )(number =>
+        s"No runnable open task found for #$number. It may be closed, blocked by dependencies or open child tasks, marked needs-input, or already claimed by another process."
       )
-    )
+      Sync[F].pure(
+        RunSummary(
+          status = "no-task",
+          message = message,
+          task = None
+        )
+      )
+    }
 
   private def resumePlan[F[_]: Sync]
       : -->[F, RunnableTask, Either[TaskRun, TaskRun]] =

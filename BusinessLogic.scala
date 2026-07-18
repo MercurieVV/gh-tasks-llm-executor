@@ -160,7 +160,9 @@ final case class RunSummary(
 final case class ProgramArrows[-->[_, _]](
     resolveContext: AppInput --> RunContext,
     selectTask: RunContext --> TaskSelection,
-    executeTask: TaskSelection --> RunSummary,
+    partitionCandidates: TaskSelection --> Either[NoTask, TaskSelection],
+    noTaskSummary: NoTask --> RunSummary,
+    executeNonEmptySelection: TaskSelection --> RunSummary,
     toProgramSays: RunSummary --> ProgramSays[ujson.Value]
 ):
   def program(using ArrowChoice[-->]): AppInput --> ProgramSays[ujson.Value] =
@@ -168,6 +170,9 @@ final case class ProgramArrows[-->[_, _]](
 
   def taskFlow(using ArrowChoice[-->]): AppInput --> RunSummary =
     resolveContext >>> selectTask >>> executeTask
+
+  def executeTask(using ArrowChoice[-->]): TaskSelection --> RunSummary =
+    partitionCandidates >>> (noTaskSummary ||| executeNonEmptySelection)
 
 final case class TaskArrows[-->[_, _]](
     resumePlan: RunnableTask --> Either[TaskRun, TaskRun],
