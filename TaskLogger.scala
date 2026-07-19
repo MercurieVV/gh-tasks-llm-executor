@@ -180,7 +180,7 @@ object TaskLogger:
 
   private enum ConsoleClass:
     case Normal, Trace
-    case AgentStream(rawLine: String)
+    case AgentStream(stream: String, rawLine: String)
 
   private val writeLock = new Object
 
@@ -221,7 +221,7 @@ object TaskLogger:
     write("llm", message, ConsoleClass.Normal)
 
   def unsafeAgentOutput(stream: String, line: String): Unit =
-    write("llm", s"agent $stream: $line", ConsoleClass.AgentStream(line))
+    write("llm", s"agent $stream: $line", ConsoleClass.AgentStream(stream, line))
 
   def unsafeWriteArtifact(relativePath: os.RelPath, message: String): Unit =
     val file = logDirectory / relativePath
@@ -271,16 +271,17 @@ object TaskLogger:
               Some(applyConsoleUpdate(consoleRenderer.scrolling(_, prefixed)))
             else Some(prefixed + System.lineSeparator())
           case ConsoleClass.Trace => None
-          case ConsoleClass.AgentStream(rawLine) =>
-            consoleConfig.stickyPattern
+          case ConsoleClass.AgentStream(stream, rawLine) =>
+            val key = consoleConfig.stickyPattern
               .flatMap(pattern => consoleRenderer.stickyKey(pattern, rawLine))
-              .map { key =>
-                if consoleConfig.isTty then
-                  applyConsoleUpdate(
-                    consoleRenderer.sticky(_, key, prefixed)
-                  )
-                else prefixed + System.lineSeparator()
-              }
+              .orElse(Some(stream))
+            key.map { key =>
+              if consoleConfig.isTty then
+                applyConsoleUpdate(
+                  consoleRenderer.sticky(_, key, prefixed)
+                )
+              else prefixed + System.lineSeparator()
+            }
 
   private def applyConsoleUpdate(
       update: ConsoleState => ConsoleUpdate
