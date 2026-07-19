@@ -1,5 +1,6 @@
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
+import cats.data.Kleisli
 
 final class Git[F[_]](using F: Sync[F]):
 
@@ -19,7 +20,7 @@ final class Git[F[_]](using F: Sync[F]):
           acquireWorktree(root, worktreePath, branchName, baseBranch, progress)
       case false =>
         call(root, "git", "branch", "-D", branchName).attempt.void *>
-          branchExistsOnOrigin(root, branchName).flatMap {
+          branchExistsOnOrigin((root, branchName)).flatMap {
             case true =>
               progress(
                 s"Remote branch origin/$branchName found. Recreating worktree tracking remote..."
@@ -71,12 +72,12 @@ final class Git[F[_]](using F: Sync[F]):
       branchName: String,
       progress: String => F[Unit]
   ): F[Unit] =
-    branchExistsLocally(root, branchName).flatMap {
+    branchExistsLocally((root, branchName)).flatMap {
       case true => F.unit
       case false =>
         hasRemote(root).flatMap { remote =>
           if remote then
-            branchExistsOnOrigin(root, branchName).flatMap {
+            branchExistsOnOrigin((root, branchName)).flatMap {
               case true =>
                 progress(
                   s"Creating local integration branch $branchName tracking origin/$branchName..."
@@ -98,24 +99,22 @@ final class Git[F[_]](using F: Sync[F]):
         }
     }
 
-  private def branchExistsLocally(
-      root: os.Path,
-      branchName: String
-  ): F[Boolean] =
-    F.blocking {
-      os.proc("git", "rev-parse", "--verify", branchName)
-        .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
-        .exitCode === 0
+  private def branchExistsLocally: Kleisli[F, (os.Path, String), Boolean] =
+    Kleisli.apply { case (root, branchName) =>
+      F.blocking {
+        os.proc("git", "rev-parse", "--verify", branchName)
+          .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+          .exitCode === 0
+      }
     }
 
-  private def branchExistsOnOrigin(
-      root: os.Path,
-      branchName: String
-  ): F[Boolean] =
-    F.blocking {
-      os.proc("git", "rev-parse", "--verify", s"origin/$branchName")
-        .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
-        .exitCode === 0
+  private def branchExistsOnOrigin: Kleisli[F, (os.Path, String), Boolean] =
+    Kleisli.apply { case (root, branchName) =>
+      F.blocking {
+        os.proc("git", "rev-parse", "--verify", s"origin/$branchName")
+          .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+          .exitCode === 0
+      }
     }
 
   def releaseWorktree(
@@ -161,7 +160,7 @@ final class Git[F[_]](using F: Sync[F]):
       baseBranch: Option[String],
       progress: String => F[Unit]
   ): F[Unit] =
-    hasPublishableCommits(worktreePath, branchName, baseBranch).flatMap {
+    hasPublishableCommits((worktreePath, branchName, baseBranch)).flatMap {
       case false => F.unit
       case true =>
         val recoveryRef = s"refs/gh-tasks-llm-executor/failed/$branchName"
@@ -186,25 +185,25 @@ final class Git[F[_]](using F: Sync[F]):
             }
     }
 
-  def filesChanged(worktreePath: os.Path): F[Boolean] =
-    F.blocking {
-      os.proc("git", "status", "--porcelain")
-        .call(cwd = worktreePath)
-        .out
-        .text()
-        .trim
-        .nonEmpty
+  def filesChanged: Kleisli[F, os.Path, Boolean] =
+    Kleisli.apply { worktreePath =>
+      F.blocking {
+        os.proc("git", "status", "--porcelain")
+          .call(cwd = worktreePath)
+          .out
+          .text()
+          .trim
+          .nonEmpty
+      }
     }
 
-  def hasPublishableCommits(
-      worktreePath: os.Path,
-      branchName: String,
-      baseBranch: Option[String]
-  ): F[Boolean] =
-    F.blocking {
-      val remoteBranch = s"origin/$branchName"
-      val hasRemoteBranch =
-        os.proc("git", "rev-parse", "--verify", remoteBranch)
+  def hasPublishableCommits
+      : Kleisli[F, (os.Path, String, Option[String]), Boolean] =
+    Kleisli.apply { case (worktreePath, branchName, baseBranch) =>
+      F.blocking {
+        val remoteBranch = s"origin/$branchName"
+        val hasRemoteBranch = os
+          .proc("git", "rev-parse", "--verify", remoteBranch)
           .call(
             cwd = worktreePath,
             stdout = os.Pipe,
@@ -212,30 +211,35 @@ final class Git[F[_]](using F: Sync[F]):
             check = false
           )
           .exitCode === 0
-      val baseRef =
-        if hasRemoteBranch then remoteBranch
-        else
-          baseBranch.getOrElse {
-            val hasMaster = os
-              .proc("git", "rev-parse", "--verify", "master")
-              .call(
-                cwd = worktreePath,
-                stdout = os.Pipe,
-                stderr = os.Pipe,
-                check = false
-              )
-              .exitCode === 0
-            if hasMaster then "master" else "main"
-          }
-      val result =
-        os.proc("git", "rev-list", "--count", s"$baseRef..HEAD")
+        val baseRef =
+          if (hasRemoteBranch) remoteBranch
+          else
+            baseBranch.getOrElse {
+              val hasMaster = os
+                .proc("git", "rev-parse", "--verify", "master")
+                .call(
+                  cwd = worktreePath,
+                  stdout = os.Pipe,
+                  stderr = os.Pipe,
+                  check = false
+                )
+                .exitCode === 0
+              if (hasMaster) "master" else "main"
+            }
+        val result = os
+          .proc("git", "rev-list", "--count", s"$baseRef..HEAD")
           .call(
             cwd = worktreePath,
             stdout = os.Pipe,
             stderr = os.Pipe,
             check = false
           )
-      result.exitCode === 0 && result.out.text().trim.toIntOption.exists(_ > 0)
+        result.exitCode === 0 && result.out
+          .text()
+          .trim
+          .toIntOption
+          .exists(_ > 0)
+      }
     }
 
   def runProjectValidation(
@@ -277,13 +281,15 @@ final class Git[F[_]](using F: Sync[F]):
         yield ()
     }
 
-  private def validationHook(worktreePath: os.Path): F[Option[os.Path]] =
-    F.blocking {
-      List(
-        worktreePath / ".gh-tasks-llm-executor" / "validate",
-        worktreePath / ".github" / "gh-tasks-llm-executor" / "validate",
-        worktreePath / "scripts" / "gh-task-validate"
-      ).find(path => os.exists(path) && os.isFile(path))
+  private def validationHook: Kleisli[F, os.Path, Option[os.Path]] =
+    Kleisli.apply { worktreePath =>
+      F.blocking {
+        List(
+          worktreePath / ".gh-tasks-llm-executor" / "validate",
+          worktreePath / ".github" / "gh-tasks-llm-executor" / "validate",
+          worktreePath / "scripts" / "gh-task-validate"
+        ).find(path => os.exists(path) && os.isFile(path))
+      }
     }
 
   def commitAll(
@@ -302,10 +308,12 @@ final class Git[F[_]](using F: Sync[F]):
           .getOrElse(s"Implement task #${task.number}: ${task.title}")
       )
 
-  def hasRemote(root: os.Path): F[Boolean] =
-    F.blocking(
-      os.proc("git", "remote").call(cwd = root).out.text().trim.nonEmpty
-    )
+  def hasRemote: Kleisli[F, os.Path, Boolean] =
+    Kleisli.apply { root =>
+      F.blocking(
+        os.proc("git", "remote").call(cwd = root).out.text().trim.nonEmpty
+      )
+    }
 
   def mergeLocally(
       root: os.Path,
@@ -346,25 +354,22 @@ final class Git[F[_]](using F: Sync[F]):
         else F.unit
     yield ()
 
-  def cleanupWorktree(
-      root: os.Path,
-      worktreePath: os.Path,
-      branchName: String,
-      progress: String => F[Unit]
-  ): F[Unit] =
-    F.blocking(os.exists(worktreePath)).flatMap {
-      case false => F.unit
-      case true =>
-        progress(s"Removing worktree at $worktreePath") *>
-          call(
+  def cleanupWorktree
+      : Kleisli[F, (os.Path, os.Path, String, String => F[Unit]), Unit] =
+    Kleisli.apply { case (root, worktreePath, branchName, progress) =>
+      F.blocking(os.exists(worktreePath)).flatMap {
+        case false =>
+          F.unit
+        case true =>
+          progress(s"Removing worktree at $worktreePath") *> call(
             root,
             "git",
             "worktree",
             "remove",
             "--force",
             worktreePath.toString
-          ) *>
-          call(root, "git", "branch", "-D", branchName).attempt.void
+          ) *> call(root, "git", "branch", "-D", branchName).attempt.void
+      }
     }
 
   private def call(cwd: os.Path, command: String*): F[Unit] =
