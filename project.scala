@@ -10,7 +10,7 @@
 //> using dependency org.typelevel::cats-core:2.13.0
 //> using dependency org.typelevel::cats-effect:3.7.0
 
-//> using scalafixDependency io.github.mercurievv:scala-purrism-scalafix_3:0.2.0
+//> using scalafixDependency io.github.mercurievv:scala-purrism-scalafix_3:0.4.0
 
 //> using exclude .bsp
 //> using exclude .scala-build
@@ -29,3 +29,4 @@
 //> using test.dependency org.typelevel::shapeless3-deriving:3.6.0
 
 //> using test.resourceDirs app/test/resources
+
