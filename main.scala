@@ -1,20 +1,21 @@
 import arrowstep.core.*
 import arrowstep.runtime.AgentMain
-import ArrowLogging.*
 import cats.Monoid
 import cats.data.Kleisli
 import cats.effect.ExitCode
 import cats.effect.IO
 import cats.effect.IOApp
+import cats.effect.Ref
 import cats.effect.Resource
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
-import cats.effect.Ref
 import io.github.mercurievv.minuscles.fieldsnames.derivation.semiauto.FieldNamesDerivation.fieldsNames
 
 import scala.annotation.tailrec
 import scala.concurrent.duration.*
 import scala.util.Try
+
+import ArrowLogging.*
 
 object Main extends IOApp:
 
@@ -739,9 +740,10 @@ object Main extends IOApp:
               s"Runner ${task.run.runner.display} failed after retries and no stronger fallback runner is available."
             Left((msg, error))
       } >>> ((progressK[F, Throwable] >>> raiseK[F, TaskWithOutput])
-        ||| (progressK[F, TaskWithPrompt] >>> runTaskWithRunner[F]))
+      ||| (progressK[F, TaskWithPrompt] >>> runTaskWithRunner[F]))
 
-  private def runTaskWithRunner[F[_]: Sync]: -->[F, TaskWithPrompt, TaskWithOutput] =
+  private def runTaskWithRunner[F[_]: Sync]
+      : -->[F, TaskWithPrompt, TaskWithOutput] =
     Kleisli { task =>
       val run = task.run
       val prompt =
@@ -969,7 +971,9 @@ object Main extends IOApp:
       announceTask[F] >>>
         fetchTaskContext[F] >>>
         evaluateTask[F] >>>
-        (needsUserInputSummary[F] ||| (splitTaskSummary[F] ||| localExecutePreparedTask))
+        (needsUserInputSummary[F] ||| (splitTaskSummary[
+          F
+        ] ||| localExecutePreparedTask))
 
     val handleNoPr =
       TaskLogger.progress[F, TaskRun](run =>

@@ -49,3 +49,4 @@ build/
 *.semanticdb
 .idea/
 *.log
+prompt.txt

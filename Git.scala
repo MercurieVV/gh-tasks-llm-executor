@@ -15,9 +15,18 @@ final class Git[F[_]](using F: Sync[F]):
           case true =>
             progress(
               s"Leftover worktree detected at $worktreePath. Cleaning up..."
-            ) *> releaseWorktree(
-              (root, worktreePath, branchName, progress)
-            ) *> acquireWorktree(input)
+            ) *> (releaseWorktree.local[
+              (os.Path, os.Path, String, Option[String], String => F[Unit])
+            ] {
+              case (
+                    root: os.Path,
+                    worktreePath: os.Path,
+                    branchName: String,
+                    _: Option[String],
+                    progress: (String => F[Unit])
+                  ) =>
+                (root, worktreePath, branchName, progress)
+            } *> acquireWorktree).run(input)
           case false =>
             call(
               root,

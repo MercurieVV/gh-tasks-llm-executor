@@ -1,9 +1,10 @@
-import ArrowLogging.*
 import cats.data.Kleisli
 import cats.effect.IO
 import cats.effect.Ref
 import io.github.mercurievv.minuscles.fieldsnames.derivation.semiauto.FieldNamesDerivation.fieldsNames
 import munit.CatsEffectSuite
+
+import ArrowLogging._
 
 final case class LoggingInner[-->[_, _]](
     increment: Int --> Int

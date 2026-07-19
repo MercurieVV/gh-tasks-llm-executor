@@ -1,5 +1,4 @@
 import io.github.mercurievv.minuscles.fieldsnames.FieldsNames
-
 import shapeless3.deriving.*
 import shapeless3.deriving.internals.Kinds
 
