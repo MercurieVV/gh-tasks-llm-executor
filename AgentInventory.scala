@@ -31,7 +31,7 @@ final case class AgentTool(
     agent.equalsIgnoreCase(runner.agent) &&
       optionMatches(model, runner.model) &&
       optionMatches(effort, runner.effort) &&
-      optionMatches(version, runner.version)
+      versionMatches(version, runner.version)
 
   def promptLine: String =
     val modelValue = model.getOrElse("")
@@ -53,6 +53,21 @@ final case class AgentTool(
       case (_, None)                 => true
       case (Some(left), Some(right)) => left.equalsIgnoreCase(right)
       case (None, Some(_))           => false
+
+  // Configured versions carry full probe strings (e.g. "codex-cli 0.144.4",
+  // "2.1.210 (Claude Code)") while task metadata records a bare version
+  // (e.g. "0.144.4", "2.1.210"), so an exact match would never fire.
+  private def versionMatches(
+      configured: Option[String],
+      requested: Option[String]
+  ): Boolean =
+    (configured, requested) match
+      case (_, None) => true
+      case (Some(left), Some(right)) =>
+        val l = left.toLowerCase
+        val r = right.toLowerCase
+        l.contains(r) || r.contains(l)
+      case (None, Some(_)) => false
 
   private def effortMultiplier: Double =
     if model.exists(_.toLowerCase.contains("reasoner")) then 2.0

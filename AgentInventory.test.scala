@@ -36,3 +36,61 @@ class AgentInventorySuite extends CatsEffectSuite:
     assertEquals(unknown.cost, None)
     assert(unknown.promptLine.contains("cost=unknown"))
   }
+
+  test("matches bare task-metadata version against full probe version string") {
+    val codexTool = AgentTool(
+      id = "codex-gpt-5-codex-medium",
+      agent = "codex",
+      model = Some("gpt-5-codex"),
+      effort = Some("medium"),
+      version = Some("codex-cli 0.144.4"),
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = Nil,
+      available = true,
+      priority = 111
+    )
+    val claudeTool = AgentTool(
+      id = "claude-sonnet",
+      agent = "claude",
+      model = Some("sonnet"),
+      effort = None,
+      version = Some("2.1.210 (Claude Code)"),
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = Nil,
+      available = true,
+      priority = 30
+    )
+
+    assert(
+      codexTool.matches(
+        TaskRunner(
+          agent = "codex",
+          model = Some("gpt-5-codex"),
+          effort = Some("medium"),
+          version = Some("0.144.4")
+        )
+      )
+    )
+    assert(
+      claudeTool.matches(
+        TaskRunner(
+          agent = "claude",
+          model = Some("sonnet"),
+          effort = None,
+          version = Some("2.1.210")
+        )
+      )
+    )
+    assert(
+      !codexTool.matches(
+        TaskRunner(
+          agent = "codex",
+          model = Some("gpt-5-codex"),
+          effort = Some("medium"),
+          version = Some("0.144.3")
+        )
+      )
+    )
+  }
