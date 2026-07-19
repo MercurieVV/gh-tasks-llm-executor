@@ -1,38 +1,44 @@
+import cats.data.Kleisli
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
-import cats.data.Kleisli
 
 final class Git[F[_]](using F: Sync[F]):
 
-  def acquireWorktree(
-      root: os.Path,
-      worktreePath: os.Path,
-      branchName: String,
-      baseBranch: Option[String],
-      progress: String => F[Unit]
-  ): F[Unit] =
-    F.blocking(os.exists(worktreePath)).flatMap {
-      case true =>
-        progress(
-          s"Leftover worktree detected at $worktreePath. Cleaning up..."
-        ) *>
-          releaseWorktree(root, worktreePath, branchName, progress) *>
-          acquireWorktree(root, worktreePath, branchName, baseBranch, progress)
-      case false =>
-        call(root, "git", "branch", "-D", branchName).attempt.void *>
-          branchExistsOnOrigin((root, branchName)).flatMap {
-            case true =>
-              progress(
-                s"Remote branch origin/$branchName found. Recreating worktree tracking remote..."
-              ) *>
-                call(
+  def acquireWorktree: Kleisli[
+    F,
+    (os.Path, os.Path, String, Option[String], String => F[Unit]),
+    Unit
+  ] =
+    Kleisli.apply {
+      case input @ (root, worktreePath, branchName, baseBranch, progress) =>
+        F.blocking(os.exists(worktreePath)).flatMap {
+          case true =>
+            progress(
+              s"Leftover worktree detected at $worktreePath. Cleaning up..."
+            ) *> releaseWorktree(
+              root,
+              worktreePath,
+              branchName,
+              progress
+            ) *> acquireWorktree(input)
+          case false =>
+            call(
+              root,
+              "git",
+              "branch",
+              "-D",
+              branchName
+            ).attempt.void *> branchExistsOnOrigin((root, branchName)).flatMap {
+              case true =>
+                progress(
+                  s"Remote branch origin/$branchName found. Recreating worktree tracking remote..."
+                ) *> call(
                   root,
                   "git",
                   "branch",
                   branchName,
                   s"origin/$branchName"
-                ) *>
-                call(
+                ) *> call(
                   root,
                   "git",
                   "worktree",
@@ -40,25 +46,24 @@ final class Git[F[_]](using F: Sync[F]):
                   worktreePath.toString,
                   branchName
                 )
-            case false =>
-              baseBranch.traverse_(ensureBranch(root, _, progress)) *>
-                progress(
+              case false =>
+                baseBranch
+                  .traverse_(ensureBranch(root, _, progress)) *> progress(
                   s"Creating worktree at $worktreePath on branch $branchName${baseBranch
                       .fold("")(base => s" (base: $base)")}"
-                ) *>
-                call(
+                ) *> call(
                   root,
-                  (Seq(
+                  Seq(
                     "git",
                     "worktree",
                     "add",
                     "-b",
                     branchName,
                     worktreePath.toString
-                  ) ++
-                    baseBranch.toList)*
+                  ) ++ baseBranch.toList*
                 )
-          }
+            }
+        }
     }
 
   // Creates a shared integration branch used as the base for a family of
@@ -154,35 +159,32 @@ final class Git[F[_]](using F: Sync[F]):
   // destroyed when releaseWorktree force-removes the worktree/branch.
   // Call this from within the worktree resource's `.use` block on failure,
   // while the worktree still exists, to push them to a recovery ref first.
-  def preserveUnpushedCommits(
-      worktreePath: os.Path,
-      branchName: String,
-      baseBranch: Option[String],
-      progress: String => F[Unit]
-  ): F[Unit] =
-    hasPublishableCommits((worktreePath, branchName, baseBranch)).flatMap {
-      case false => F.unit
-      case true =>
-        val recoveryRef = s"refs/gh-tasks-llm-executor/failed/$branchName"
-        progress(
-          s"Branch $branchName has commits not on origin; preserving them at $recoveryRef before cleanup..."
-        ) *>
-          call(
+  def preserveUnpushedCommits
+      : Kleisli[F, (os.Path, String, Option[String], String => F[Unit]), Unit] =
+    Kleisli.apply { case (worktreePath, branchName, baseBranch, progress) =>
+      hasPublishableCommits((worktreePath, branchName, baseBranch)).flatMap {
+        case false =>
+          F.unit
+        case true =>
+          val recoveryRef = s"refs/gh-tasks-llm-executor/failed/$branchName"
+          progress(
+            s"Branch $branchName has commits not on origin; preserving them at $recoveryRef before cleanup..."
+          ) *> call(
             worktreePath,
             "git",
             "push",
             "-f",
             "origin",
             s"HEAD:$recoveryRef"
-          ).attempt
-            .flatMap {
-              case Right(_) =>
-                progress(s"Preserved unpushed commits at $recoveryRef.")
-              case Left(error) =>
-                progress(
-                  s"Warning: failed to preserve unpushed commits at $recoveryRef: ${error.getMessage}"
-                )
-            }
+          ).attempt.flatMap {
+            case Right(_) =>
+              progress(s"Preserved unpushed commits at $recoveryRef.")
+            case Left(error) =>
+              progress(
+                s"Warning: failed to preserve unpushed commits at $recoveryRef: ${error.getMessage}"
+              )
+          }
+      }
     }
 
   def filesChanged: Kleisli[F, os.Path, Boolean] =
