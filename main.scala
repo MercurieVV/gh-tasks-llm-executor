@@ -492,15 +492,14 @@ object Main extends IOApp:
     Kleisli { task =>
       val run = task.run
       for
-        _ <- progress(
-          s"Evaluating task #${run.task.number} with ${evaluatorRunner.display}..."
-        )
         userAnswer <- GitHub.userAnswer(run.context.root, run.task, progress)
         hasRealQuestion <- GitHub.hasQuestionComment(run.context.root, run.task)
         evaluation <- existingEvaluation(run.task, hasRealQuestion)
           .filter(_ => userAnswer.isEmpty)
           .fold(
-            AgentExecutor[F]
+            progress(
+              s"Evaluating task #${run.task.number} with ${evaluatorRunner.display}..."
+            ) >> AgentExecutor[F]
               .run(
                 evaluatorRunner,
                 evaluateTaskPrompt(
@@ -514,7 +513,11 @@ object Main extends IOApp:
                 Some(EvaluationJsonSchema)
               )
               .map(parseTaskEvaluation(_, run.task.body))
-          )(_.pure[F])
+          )(cached =>
+            progress(
+              s"Reusing existing evaluation for #${run.task.number}."
+            ).as(cached)
+          )
         verifiedEvaluation <-
           if evaluation.execution === "split" then
             GitHub.fetchIssues(run.context.root).map { allIssues =>
