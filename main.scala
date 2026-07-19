@@ -704,55 +704,72 @@ object Main extends IOApp:
         )
     }
 
+  private def attemptWithInput[F[_]: Sync, A, B](
+      arrow: -->[F, A, B]
+  ): -->[F, A, Either[(A, Throwable), B]] =
+    (Kleisli.ask[F, A] &&& arrow.attempt).map {
+      case (_, Right(out)) => Right(out)
+      case (a, Left(err))  => Left((a, err))
+    }
+
   private def runExecutor[F[_]: Sync]: -->[F, TaskWithPrompt, TaskWithOutput] =
-    Kleisli { task =>
-      runTaskWithRunner[F](task).handleErrorWith { error =>
+    attemptWithInput(runTaskWithRunner[F]) >>>
+      (retryWithFallback[F] ||| Kleisli.ask[F, TaskWithOutput])
+
+  private def progressK[F[_]: Sync, A]: -->[F, (String, A), A] =
+    Kleisli { case (msg, a) => progress(msg).as(a) }
+
+  private def raiseK[F[_]: Sync, A]: -->[F, Throwable, A] =
+    Kleisli(Sync[F].raiseError)
+
+  private def retryWithFallback[F[_]: Sync]
+      : -->[F, (TaskWithPrompt, Throwable), TaskWithOutput] =
+    Kleisli
+      .fromFunction[F, (TaskWithPrompt, Throwable)] { case (task, error) =>
         task.run.context.agentInventory
           .nextStrongerImplementor(task.run.runner) match
           case Some(fallbackRunner) =>
             val fallbackTask =
               task.copy(run = task.run.copy(runner = fallbackRunner))
-            progress(
+            val msg =
               s"Runner ${task.run.runner.display} failed after retries: ${error.getMessage}. Retrying task #${task.run.task.number} with stronger fallback ${fallbackRunner.display}..."
-            ) *>
-              runTaskWithRunner[F](fallbackTask)
+            Right((msg, fallbackTask))
           case None =>
-            progress(
+            val msg =
               s"Runner ${task.run.runner.display} failed after retries and no stronger fallback runner is available."
-            ) *>
-              Sync[F].raiseError(error)
-      }
-    }
+            Left((msg, error))
+      } >>> ((progressK[F, Throwable] >>> raiseK[F, TaskWithOutput])
+        ||| (progressK[F, TaskWithPrompt] >>> runTaskWithRunner[F]))
 
-  private def runTaskWithRunner[F[_]: Sync](
-      task: TaskWithPrompt
-  ): F[TaskWithOutput] =
-    val run = task.run
-    val prompt =
-      taskPrompt(
-        run.task,
-        run.runner,
-        task.parentConclusion,
-        task.replayContext
-      )
-    for
-      _ <- progress(
-        s"Running task #${run.task.number} with ${run.runner.display}..."
-      )
-      output <- AgentExecutor[F].run(
-        run.runner,
-        prompt,
-        run.worktreePath,
-        ImplementerAllowedTools
-      )
-      _ <- Sync[F]
-        .raiseError(
-          RuntimeException(
-            s"Agent ${run.runner.display} reported it could not proceed (permission/tool wall). Output: ${output.trim}"
-          )
+  private def runTaskWithRunner[F[_]: Sync]: -->[F, TaskWithPrompt, TaskWithOutput] =
+    Kleisli { task =>
+      val run = task.run
+      val prompt =
+        taskPrompt(
+          run.task,
+          run.runner,
+          task.parentConclusion,
+          task.replayContext
         )
-        .whenA(looksBlocked(output))
-    yield TaskWithOutput(run, output)
+      for
+        _ <- progress(
+          s"Running task #${run.task.number} with ${run.runner.display}..."
+        )
+        output <- AgentExecutor[F].run(
+          run.runner,
+          prompt,
+          run.worktreePath,
+          ImplementerAllowedTools
+        )
+        _ <- Sync[F]
+          .raiseError(
+            RuntimeException(
+              s"Agent ${run.runner.display} reported it could not proceed (permission/tool wall). Output: ${output.trim}"
+            )
+          )
+          .whenA(looksBlocked(output))
+      yield TaskWithOutput(run, output)
+    }
 
   // Exit code 0 only means the process returned; a stuck agent that gave up
   // after every tool call was denied also exits 0 with prose explaining why,
