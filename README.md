@@ -6,49 +6,35 @@ one specific issue with `--task`.
 
 ## Run directly from GitHub (no clone needed)
 
-`scala-cli` can fetch `.scala` sources straight from raw GitHub URLs, so you
-don't need to clone this repo to use it. Run it with your **target** repo as
-the current directory — that's where worktrees, `gh` calls, and issue claims
-happen:
+`scripts/remote-run.sh` fetches every `.scala` source this app needs straight
+from raw GitHub URLs and runs `scala-cli` against them — no clone required.
+Run it with your **target** repo as the current directory — that's where
+worktrees, `gh` calls, and issue claims happen:
 
 ```bash
 cd /path/to/target-repo
 
-BASE=https://raw.githubusercontent.com/MercurieVV/gh-tasks-llm-executor/master
-
-scala-cli run \
-  $BASE/project-remote.scala \
-  $BASE/main.scala $BASE/Git.scala $BASE/github.scala \
-  $BASE/IssueClaim.scala $BASE/AgentExecutor.scala $BASE/AgentInventory.scala \
-  $BASE/TaskLogger.scala \
-  -- --task=123
+curl -fsSL https://raw.githubusercontent.com/MercurieVV/gh-tasks-llm-executor/master/scripts/remote-run.sh | bash -s -- --task=123
 ```
 
-- `project-remote.scala` stands in for `project.scala` here — it carries the
-  same `//> using scala`/`//> using dep` directives, but not the
-  `//> using exclude ...` ones. Those are directory-scoped and make
-  `scala-cli` fail (`os.PathError$InvalidSegment`) when every input is a
-  remote URL instead of a local path, so `project.scala` itself can't be
-  used for this launch path.
-- Drop `-- --task=123` to let it auto-select the next runnable open issue
+- `scala-cli` resolves and caches the JVM dependencies itself on every run —
+  the script only pins which source files to fetch.
+- Drop `--task=123` to let it auto-select the next runnable open issue
   instead of a specific one. `--issue=123` also works.
-- Wrap it in a shell function/alias if you use it often:
+- Pin a release instead of always running latest `master` with
+  `GH_TASKS_REF`:
 
   ```bash
-  gh-task() {
-    BASE=https://raw.githubusercontent.com/MercurieVV/gh-tasks-llm-executor/master
-    scala-cli run \
-      $BASE/project-remote.scala \
-      $BASE/main.scala $BASE/Git.scala $BASE/github.scala \
-      $BASE/IssueClaim.scala $BASE/AgentExecutor.scala $BASE/AgentInventory.scala \
-      $BASE/TaskLogger.scala \
-      -- "$@"
-  }
-  # then: gh-task --task=123
+  curl -fsSL https://raw.githubusercontent.com/MercurieVV/gh-tasks-llm-executor/master/scripts/remote-run.sh | GH_TASKS_REF=<sha-or-tag> bash -s -- --task=123
   ```
 
-To pin a release instead of always running the latest `master`, replace
-`master` in `BASE` with a commit SHA or tag.
+- Prefer no piping-to-bash? Same launcher, run locally instead:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/MercurieVV/gh-tasks-llm-executor/master/scripts/remote-run.sh -o gh-task.sh
+  chmod +x gh-task.sh
+  ./gh-task.sh --task=123
+  ```
 
 ## Run from a local clone
 

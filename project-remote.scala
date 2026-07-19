@@ -6,5 +6,7 @@
 //> using dep org.typelevel::cats-core:2.13.0
 //> using dep org.typelevel::cats-effect:3.7.0
 //> using dep io.github.mercurievv::arrowstep:0.1.1
+//> using dep io.github.mercurievv.minuscles::fields_names:0.1.0
+//> using dep io.github.mercurievv.minuscles::shapeless3-typeclasses:0.1.0
 //> using dep com.lihaoyi::os-lib:0.11.8
 //> using dep com.lihaoyi::ujson:4.4.3
