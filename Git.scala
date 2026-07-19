@@ -16,10 +16,7 @@ final class Git[F[_]](using F: Sync[F]):
             progress(
               s"Leftover worktree detected at $worktreePath. Cleaning up..."
             ) *> releaseWorktree(
-              root,
-              worktreePath,
-              branchName,
-              progress
+              (root, worktreePath, branchName, progress)
             ) *> acquireWorktree(input)
           case false =>
             call(
@@ -122,37 +119,35 @@ final class Git[F[_]](using F: Sync[F]):
       }
     }
 
-  def releaseWorktree(
-      root: os.Path,
-      worktreePath: os.Path,
-      branchName: String,
-      progress: String => F[Unit]
-  ): F[Unit] =
-    for
-      _ <- progress(s"Returning to project root at $root")
-      _ <- call(root, "git", "status", "--short").void
-      _ <- F.blocking(os.exists(worktreePath)).flatMap {
-        case false => F.unit
-        case true =>
-          progress(s"Removing worktree at $worktreePath") *>
-            call(
-              root,
-              "git",
-              "worktree",
-              "remove",
-              "--force",
-              worktreePath.toString
-            ).attempt.flatMap {
-              case Right(_) => F.unit
-              case Left(_) =>
-                progress(
-                  s"Standard git worktree remove failed. Force deleting directory $worktreePath..."
-                ) *>
-                  F.blocking(os.remove.all(worktreePath))
-            }
-      }
-      _ <- call(root, "git", "branch", "-D", branchName).attempt.void
-    yield ()
+  def releaseWorktree
+      : Kleisli[F, (os.Path, os.Path, String, String => F[Unit]), Unit] =
+    Kleisli.apply { case (root, worktreePath, branchName, progress) =>
+      for
+        _ <- progress(s"Returning to project root at $root")
+        _ <- call(root, "git", "status", "--short").void
+        _ <- F.blocking(os.exists(worktreePath)).flatMap {
+          case false => F.unit
+          case true =>
+            progress(s"Removing worktree at $worktreePath") *>
+              call(
+                root,
+                "git",
+                "worktree",
+                "remove",
+                "--force",
+                worktreePath.toString
+              ).attempt.flatMap {
+                case Right(_) => F.unit
+                case Left(_) =>
+                  progress(
+                    s"Standard git worktree remove failed. Force deleting directory $worktreePath..."
+                  ) *>
+                    F.blocking(os.remove.all(worktreePath))
+              }
+        }
+        _ <- call(root, "git", "branch", "-D", branchName).attempt.void
+      yield ()
+    }
 
   // Commits that never made it to a normal push/PR (e.g. the push step
   // itself failed, such as a rejected pre-push hook) would otherwise be
@@ -244,43 +239,42 @@ final class Git[F[_]](using F: Sync[F]):
       }
     }
 
-  def runProjectValidation(
-      worktreePath: os.Path,
-      progress: String => F[Unit]
-  ): F[Unit] =
-    validationHook(worktreePath).flatMap {
-      case None =>
-        progress(
-          "No project validation hook found. Skipping local project checks."
-        )
-      case Some(hook) =>
-        for
-          _ <- progress(s"Running project validation hook: $hook")
-          result <- F.blocking {
-            os.proc(hook)
-              .call(
-                cwd = worktreePath,
-                stdout = os.Pipe,
-                stderr = os.Pipe,
-                check = false
-              )
-          }
-          stdout <- F.blocking(result.out.text())
-          stderr <- F.blocking(result.err.text())
-          output = (stdout + stderr).trim
-          _ <-
-            if output.nonEmpty then progress(output)
-            else progress("Project validation hook produced no output.")
-          _ <-
-            if result.exitCode === 0 then
-              progress("Project validation hook passed.")
-            else
-              F.raiseError(
-                new RuntimeException(
-                  s"Project validation hook failed with exit code ${result.exitCode}."
+  def runProjectValidation: Kleisli[F, (os.Path, String => F[Unit]), Unit] =
+    Kleisli.apply { case (worktreePath, progress) =>
+      validationHook(worktreePath).flatMap {
+        case None =>
+          progress(
+            "No project validation hook found. Skipping local project checks."
+          )
+        case Some(hook) =>
+          for
+            _ <- progress(s"Running project validation hook: $hook")
+            result <- F.blocking {
+              os.proc(hook)
+                .call(
+                  cwd = worktreePath,
+                  stdout = os.Pipe,
+                  stderr = os.Pipe,
+                  check = false
                 )
-              )
-        yield ()
+            }
+            stdout <- F.blocking(result.out.text())
+            stderr <- F.blocking(result.err.text())
+            output = (stdout + stderr).trim
+            _ <-
+              if output.nonEmpty then progress(output)
+              else progress("Project validation hook produced no output.")
+            _ <-
+              if result.exitCode === 0 then
+                progress("Project validation hook passed.")
+              else
+                F.raiseError(
+                  new RuntimeException(
+                    s"Project validation hook failed with exit code ${result.exitCode}."
+                  )
+                )
+          yield ()
+      }
     }
 
   private def validationHook: Kleisli[F, os.Path, Option[os.Path]] =
@@ -317,44 +311,45 @@ final class Git[F[_]](using F: Sync[F]):
       )
     }
 
-  def mergeLocally(
-      root: os.Path,
-      worktreePath: os.Path,
-      branchName: String,
-      baseBranch: Option[String],
-      progress: String => F[Unit]
-  ): F[Unit] =
-    for
-      currentBranch <- F.blocking(
-        os.proc("git", "branch", "--show-current")
-          .call(cwd = root)
-          .out
-          .text()
-          .trim
-      )
-      targetBranch = baseBranch.getOrElse(currentBranch)
-      switchesBranch = targetBranch =!= currentBranch
-      _ <- progress(s"Removing worktree at $worktreePath")
-      _ <- call(
-        root,
-        "git",
-        "worktree",
-        "remove",
-        "--force",
-        worktreePath.toString
-      )
-      _ <- baseBranch.traverse_(ensureBranch(root, _, progress))
-      _ <-
-        if switchesBranch then call(root, "git", "checkout", targetBranch)
-        else F.unit
-      _ <- progress(s"Merging branch $branchName into $targetBranch...")
-      _ <- call(root, "git", "merge", branchName)
-      _ <- progress(s"Deleting local branch $branchName...")
-      _ <- call(root, "git", "branch", "-d", branchName)
-      _ <-
-        if switchesBranch then call(root, "git", "checkout", currentBranch)
-        else F.unit
-    yield ()
+  def mergeLocally: Kleisli[
+    F,
+    (os.Path, os.Path, String, Option[String], String => F[Unit]),
+    Unit
+  ] =
+    Kleisli.apply {
+      case (root, worktreePath, branchName, baseBranch, progress) =>
+        for
+          currentBranch <- F.blocking(
+            os.proc("git", "branch", "--show-current")
+              .call(cwd = root)
+              .out
+              .text()
+              .trim
+          )
+          targetBranch = baseBranch.getOrElse(currentBranch)
+          switchesBranch = targetBranch =!= currentBranch
+          _ <- progress(s"Removing worktree at $worktreePath")
+          _ <- call(
+            root,
+            "git",
+            "worktree",
+            "remove",
+            "--force",
+            worktreePath.toString
+          )
+          _ <- baseBranch.traverse_(ensureBranch(root, _, progress))
+          _ <-
+            if switchesBranch then call(root, "git", "checkout", targetBranch)
+            else F.unit
+          _ <- progress(s"Merging branch $branchName into $targetBranch...")
+          _ <- call(root, "git", "merge", branchName)
+          _ <- progress(s"Deleting local branch $branchName...")
+          _ <- call(root, "git", "branch", "-d", branchName)
+          _ <-
+            if switchesBranch then call(root, "git", "checkout", currentBranch)
+            else F.unit
+        yield ()
+    }
 
   def cleanupWorktree
       : Kleisli[F, (os.Path, os.Path, String, String => F[Unit]), Unit] =
