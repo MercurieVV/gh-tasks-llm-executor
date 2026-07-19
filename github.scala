@@ -1105,15 +1105,24 @@ This parent task will not be implemented directly. Run child tasks first; when a
                   F.blocking(Thread.sleep(pollMillis)) *>
                   loop(deadlineMillis, None)
               case PullRequestChecksUnavailable(message) =>
-                val firstSeen = noChecksSince.getOrElse(now)
-                if now - firstSeen >= PullRequestNoChecksGraceMillis then
-                  progress(
-                    s"$message Proceeding after ${PullRequestNoChecksGraceMillis / 1000}s with no PR checks."
-                  )
-                else
-                  progress(message) *>
-                    F.blocking(Thread.sleep(pollMillis)) *>
-                    loop(deadlineMillis, Some(firstSeen))
+                pullRequestMergeConflict(root, branchName).flatMap {
+                  case true =>
+                    F.raiseError(
+                      new RuntimeException(
+                        s"Pull Request for $branchName has merge conflicts with its base branch; GitHub cannot trigger checks until resolved."
+                      )
+                    )
+                  case false =>
+                    val firstSeen = noChecksSince.getOrElse(now)
+                    if now - firstSeen >= PullRequestNoChecksGraceMillis then
+                      progress(
+                        s"$message Proceeding after ${PullRequestNoChecksGraceMillis / 1000}s with no PR checks."
+                      )
+                    else
+                      progress(message) *>
+                        F.blocking(Thread.sleep(pollMillis)) *>
+                        loop(deadlineMillis, Some(firstSeen))
+                }
               case PullRequestChecksPassed(message) =>
                 progress(message)
               case PullRequestChecksFailed(message) =>
@@ -1128,6 +1137,25 @@ This parent task will not be implemented directly. Run child tasks first; when a
       started <- F.blocking(System.currentTimeMillis())
       _ <- loop(started + timeoutMillis, None)
     yield ()
+
+  private def pullRequestMergeConflict[F[_]](
+      root: os.Path,
+      branchName: String
+  )(using F: Sync[F]): F[Boolean] =
+    callOutputUnchecked(
+      root,
+      "gh",
+      "pr",
+      "view",
+      branchName,
+      "--json",
+      "mergeable"
+    ).map { output =>
+      Try(ujson.read(output).obj).toOption
+        .flatMap(_.get("mergeable"))
+        .collect { case ujson.Str(value) => value.trim.toUpperCase }
+        .contains("CONFLICTING")
+    }
 
   private sealed trait PullRequestCheckStatus
 
