@@ -815,7 +815,8 @@ object Main extends IOApp:
           run.branchName,
           run.baseBranch,
           run.task,
-          extractAgentFinalization(changed.run.output)
+          extractAgentFinalization(changed.run.output),
+          run.runner
         )
       )
     }
@@ -1034,9 +1035,17 @@ object Main extends IOApp:
         s"UnchangedTask(issue=#${run.run.task.number})"
       case AgentFinalization(commitTitle, pullRequestBody) =>
         s"AgentFinalization(hasCommitTitle=${commitTitle.nonEmpty},hasPullRequestBody=${pullRequestBody.nonEmpty})"
-      case PublishRequest(_, _, branchName, baseBranch, task, finalization) =>
+      case PublishRequest(
+            _,
+            _,
+            branchName,
+            baseBranch,
+            task,
+            finalization,
+            runner
+          ) =>
         s"PublishRequest(issue=#${task.number},branch=$branchName,base=${baseBranch
-            .getOrElse("default")},${summarize(finalization)})"
+            .getOrElse("default")},runner=${runner.display},${summarize(finalization)})"
       case ChangedPublication(request) =>
         s"ChangedPublication(${summarize(request)})"
       case ExistingPublication(request) =>
@@ -1508,6 +1517,7 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
         request.task,
         request.finalization.commitTitle,
         request.finalization.pullRequestBody,
+        request.runner,
         progress
       )
     }

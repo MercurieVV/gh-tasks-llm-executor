@@ -923,11 +923,11 @@ This parent task will not be implemented directly. Run child tasks first; when a
       task: Issue,
       pullRequestTitle: Option[String],
       pullRequestBody: Option[String],
+      runner: TaskRunner,
       progress: String => F[Unit]
   )(using Sync[F]): F[Unit] =
     for
-      _ <- progress("Pushing branch to origin...")
-      _ <- call(worktreePath, "git", "push", "-u", "origin", branchName)
+      _ <- pushWithRepair(worktreePath, branchName, task, runner, progress)
       pullRequest <- ensurePullRequest(
         worktreePath,
         branchName,
@@ -940,6 +940,85 @@ This parent task will not be implemented directly. Run child tasks first; when a
       )
       _ <- mergeAndVerify(root, pullRequest, progress)
     yield ()
+
+  // `git push` runs the repo's prePush hook (tests/lint/format). A failure
+  // there is usually fixable in-worktree (e.g. a broken test), so before
+  // giving up and releasing the task claim, offer to spawn a repair agent
+  // and retry — looping as long as the user keeps accepting the retry.
+  private def pushWithRepair[F[_]](
+      worktreePath: os.Path,
+      branchName: String,
+      task: Issue,
+      runner: TaskRunner,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    call(worktreePath, "git", "push", "-u", "origin", branchName)
+      .handleErrorWith { error =>
+        for
+          _ <- progress(
+            s"Push failed for task #${task.number}: ${error.getMessage}"
+          )
+          shouldRepair <- askRetryWithRepair[F](task.number)
+          _ <-
+            if shouldRepair then
+              repairAndCommit(worktreePath, task, runner, error, progress) *>
+                pushWithRepair(worktreePath, branchName, task, runner, progress)
+            else F.raiseError(error)
+        yield ()
+      }
+
+  private def askRetryWithRepair[F[_]](
+      taskNumber: Int
+  )(using F: Sync[F]): F[Boolean] =
+    F.blocking {
+      print(
+        s"Repair push failure for task #$taskNumber with an agent and retry? [y/N]: "
+      )
+      System.out.flush()
+      val answer = Option(scala.io.StdIn.readLine()).getOrElse("")
+      answer.trim.equalsIgnoreCase("y") ||
+      answer.trim.equalsIgnoreCase("yes")
+    }
+
+  private def repairAndCommit[F[_]](
+      worktreePath: os.Path,
+      task: Issue,
+      runner: TaskRunner,
+      pushError: Throwable,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    for
+      _ <- progress(
+        s"Running repair agent (${runner.display}) for task #${task.number}..."
+      )
+      _ <- AgentExecutor[F].run(
+        runner,
+        repairPrompt(task, pushError),
+        worktreePath
+      )
+      changed <- Git[F].filesChanged(worktreePath)
+      _ <-
+        if changed then
+          Git[F].commitAll(
+            worktreePath,
+            task,
+            Some(s"Repair prePush failure for task #${task.number}")
+          )
+        else
+          progress(
+            s"Repair agent made no file changes for task #${task.number}."
+          )
+    yield ()
+
+  private def repairPrompt(task: Issue, pushError: Throwable): String =
+    s"""`git push` failed for task #${task.number} (${task.title}), most likely because the
+       |repo's prePush hook (tests/lint/format) rejected the current commit. Fix the underlying
+       |issue in this worktree so the prePush hook passes, without changing the task's intended
+       |behavior. Do not run git push yourself.
+       |
+       |Failure output:
+       |${pushError.getMessage}
+       |""".stripMargin
 
   // Verifies checks, merges, then verifies the base branch's own CI on the
   // merge commit. Shared by pushCreateAndMergePr (fresh PR) and

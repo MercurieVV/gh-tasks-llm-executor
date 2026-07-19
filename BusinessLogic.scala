@@ -124,7 +124,8 @@ final case class PublishRequest(
     branchName: String,
     baseBranch: Option[String],
     task: Issue,
-    finalization: AgentFinalization
+    finalization: AgentFinalization,
+    runner: TaskRunner
 )
 
 final case class ChangedPublication(request: PublishRequest)
