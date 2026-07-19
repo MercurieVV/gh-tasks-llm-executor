@@ -155,7 +155,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
 
       val idleFor = now - lastActivity.get()
       val totalFor = now - started
-      TaskLogger.unsafeTrace(
+      TaskLogger.unsafeMonitor(
         s"agent monitor cwd=$cwd ${processState(process)} running=${!finished} idleMs=$idleFor totalMs=$totalFor"
       )
       if now - lastDescendantLog >= 30.seconds.toMillis then
