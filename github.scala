@@ -1475,7 +1475,9 @@ This parent task will not be implemented directly. Run child tasks first; when a
               else
                 Sync[F].raiseError(
                   new RuntimeException(
-                    s"Command failed with exit code ${result.exitCode}: ${formatCommand(command)}"
+                    s"Command failed with exit code ${result.exitCode}: ${formatCommand(command)}" +
+                      (if stderr.nonEmpty then s"\nstderr: $stderr" else "") +
+                      (if stdout.nonEmpty then s"\nstdout: $stdout" else "")
                   )
                 )
           yield ()
@@ -1507,7 +1509,8 @@ This parent task will not be implemented directly. Run child tasks first; when a
               else
                 Sync[F].raiseError(
                   new RuntimeException(
-                    s"Command failed with exit code ${result.exitCode}: ${formatCommand(command)}"
+                    s"Command failed with exit code ${result.exitCode}: ${formatCommand(command)}" +
+                      (if stderr.nonEmpty then s"\nstderr: $stderr" else "")
                   )
                 )
           yield output
