@@ -1,7 +1,14 @@
 import cats.effect.kernel.Sync
 
+opaque type AgentToolId = String
+object AgentToolId:
+  def apply(value: String): AgentToolId = value.asInstanceOf[AgentToolId]
+  extension (opaqueValue: AgentToolId) def value: String = opaqueValue.asInstanceOf[String]
+  given cats.Eq[AgentToolId] = cats.Eq.by(_.value)
+
+
 final case class AgentTool(
-    id: String,
+    id: AgentToolId,
     agent: String,
     model: Option[String],
     effort: Option[String],
@@ -123,7 +130,7 @@ object AgentInventory:
   private val Fallback = AgentInventory(
     List(
       AgentTool(
-        id = "claude-opus",
+        id = AgentToolId("claude-opus"),
         agent = "claude",
         model = Some("opus"),
         effort = None,
@@ -158,7 +165,7 @@ object AgentInventory:
       case ujson.Obj(fields) =>
         for id <- stringField(fields, "id")
         yield AgentTool(
-          id = id,
+          id = AgentToolId(id),
           agent = stringField(fields, "agent").getOrElse(id),
           model = stringField(fields, "model"),
           effort = stringField(fields, "effort"),

@@ -2,12 +2,25 @@ import arrowstep.core.ProgramSays
 import cats.arrow.ArrowChoice
 import cats.syntax.all.*
 
-final case class AppInput(root: os.Path, taskNumber: Option[Int])
+opaque type BranchName = String
+object BranchName:
+  def apply(value: String): BranchName = value.asInstanceOf[BranchName]
+  extension (opaqueValue: BranchName) def value: String = opaqueValue.asInstanceOf[String]
+  given cats.Eq[BranchName] = cats.Eq.by(_.value)
+
+opaque type TaskNumber = Int
+object TaskNumber:
+  def apply(value: Int): TaskNumber = value.asInstanceOf[TaskNumber]
+  extension (opaqueValue: TaskNumber) def value: Int = opaqueValue.asInstanceOf[Int]
+  given cats.Eq[TaskNumber] = cats.Eq.by(_.value)
+
+
+final case class AppInput(root: os.Path, taskNumber: Option[TaskNumber])
 
 final case class RunContext(
     root: os.Path,
     agentInventory: AgentInventory,
-    taskNumber: Option[Int]
+    taskNumber: Option[TaskNumber]
 )
 
 final case class TaskRunner(
@@ -78,13 +91,13 @@ final case class TaskRun(
     task: Issue,
     runner: TaskRunner,
     worktreePath: os.Path,
-    branchName: String,
+    branchName: BranchName,
     // Base to branch off of / merge into. A subtask of a split task
     // (see GitHub.parentIds) integrates into its parent's shared branch
     // instead of the default branch, so sibling subtasks land together in
     // one final merge (GitHub.checkParentsForCompletion) rather than each
     // hitting the default branch independently.
-    baseBranch: Option[String]
+    baseBranch: Option[BranchName]
 )
 
 final case class TaskWithPrompt(
@@ -121,8 +134,8 @@ final case class AgentFinalization(
 final case class PublishRequest(
     root: os.Path,
     worktreePath: os.Path,
-    branchName: String,
-    baseBranch: Option[String],
+    branchName: BranchName,
+    baseBranch: Option[BranchName],
     task: Issue,
     finalization: AgentFinalization,
     runner: TaskRunner
@@ -149,7 +162,7 @@ final case class RunSummary(
         "task" -> task.fold[ujson.Value](ujson.Null) { issue =>
           ujson.Obj.from(
             Seq(
-              "number" -> ujson.Num(issue.number),
+              "number" -> ujson.Num(issue.number.value),
               "title" -> ujson.Str(issue.title),
               "state" -> ujson.Str(issue.state)
             )

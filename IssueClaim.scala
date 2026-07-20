@@ -2,7 +2,7 @@ import cats.effect.Resource
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
-final class IssueAlreadyClaimedException(taskNumber: Int)
+final class IssueAlreadyClaimedException(taskNumber: TaskNumber)
     extends RuntimeException(
       s"Task #$taskNumber is already claimed by another process."
     )
@@ -15,7 +15,7 @@ object IssueClaim:
 
   def acquire[F[_]: Sync](
       root: os.Path,
-      taskNumber: Int,
+      taskNumber: TaskNumber,
       progress: String => F[Unit]
   ): Resource[F, Unit] =
     Resource.make(claim[F](root, taskNumber, progress))(_ =>
@@ -26,7 +26,7 @@ object IssueClaim:
 
   private def checkAndReleaseIfStale[F[_]](
       root: os.Path,
-      taskNumber: Int,
+      taskNumber: TaskNumber,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Boolean] =
     val ref = refName(taskNumber)
@@ -72,7 +72,7 @@ object IssueClaim:
 
   private def claim[F[_]](
       root: os.Path,
-      taskNumber: Int,
+      taskNumber: TaskNumber,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Unit] =
     val uuid = java.util.UUID.randomUUID().toString
@@ -116,7 +116,7 @@ object IssueClaim:
 
   private def release[F[_]](
       root: os.Path,
-      taskNumber: Int,
+      taskNumber: TaskNumber,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Unit] =
     progress(s"Releasing claim on task #$taskNumber...") *>
@@ -131,5 +131,5 @@ object IssueClaim:
     lower.contains("already exists") || lower.contains("stale info") ||
     lower.contains("fetch first") || lower.contains("non-fast-forward")
 
-  private def refName(taskNumber: Int): String =
+  private def refName(taskNumber: TaskNumber): String =
     s"refs/gh-tasks-llm-executor/claims/task-$taskNumber"

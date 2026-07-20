@@ -1,11 +1,28 @@
 import cats.effect.kernel.Sync
+import cats.syntax.all
 import cats.syntax.all.*
 
 import scala.concurrent.duration.*
 import scala.util.Try
 
+opaque type CommitSha = String
+object CommitSha:
+  def apply(value: String): CommitSha = value.asInstanceOf[CommitSha]
+  extension (opaqueValue: CommitSha)
+    def value: String = opaqueValue.asInstanceOf[String]
+  given cats.Eq[CommitSha] = cats.Eq.by(_.value)
+
+opaque type DeadlineMillis = Long
+object DeadlineMillis:
+  def apply(value: Long): DeadlineMillis = value.asInstanceOf[DeadlineMillis]
+  extension (opaqueValue: DeadlineMillis)
+    def value: Long = opaqueValue.asInstanceOf[Long]
+    def +(another: DeadlineMillis): DeadlineMillis =
+      DeadlineMillis(opaqueValue.value + another.value)
+  given cats.Eq[DeadlineMillis] = cats.Eq.by(_.value)
+
 final case class Issue(
-    number: Int,
+    number: TaskNumber,
     title: String,
     body: String,
     state: String
@@ -13,14 +30,18 @@ final case class Issue(
 
 object GitHub:
 
-  final case class NoOpenPullRequestToResumeException(branchName: String)
+  final case class NoOpenPullRequestToResumeException(branchName: BranchName)
       extends RuntimeException(
         s"No open Pull Request found for $branchName to resume."
       )
 
-  private val PullRequestCheckTimeoutMillis = 30.minutes.toMillis
-  private val PullRequestCheckPollMillis = 30.seconds.toMillis
-  private val PullRequestNoChecksGraceMillis = 3.minutes.toMillis
+  private val PullRequestCheckTimeoutMillis = DeadlineMillis(
+    30.minutes.toMillis
+  )
+  private val PullRequestCheckPollMillis = DeadlineMillis(30.seconds.toMillis)
+  private val PullRequestNoChecksGraceMillis = DeadlineMillis(
+    3.minutes.toMillis
+  )
 
   def fetchIssues[F[_]: Sync](root: os.Path): F[List[Issue]] =
     Sync[F].blocking {
@@ -48,7 +69,7 @@ object GitHub:
       case ujson.Obj(fields) =>
         for
           number <- fields.get("number").collect { case ujson.Num(value) =>
-            value.toInt
+            TaskNumber(value.toInt)
           }
           title <- fields.get("title").collect { case ujson.Str(value) =>
             value
@@ -180,26 +201,27 @@ object GitHub:
   private val PullRequestMentionRegex =
     """(?i)\bPR\s*#(\d+)|/pull/(\d+)""".r
 
-  def getDependencies(body: String): List[Int] =
+  def getDependencies(body: String): List[TaskNumber] =
     body.linesIterator
       .flatMap { line =>
         val lower = line.toLowerCase
         if DepLineKeywords.exists(keyword => lower.contains(keyword)) then
-          IssueNumRegex.findAllMatchIn(line).map(_.group(1).toInt)
+          IssueNumRegex.findAllMatchIn(line).map(_.group(1).toInt).map(TaskNumber.apply)
         else Nil
       }
       .toList
       .distinct
 
-  def parentIds(issue: Issue): List[Int] =
+  def parentIds(issue: Issue): List[TaskNumber] =
     issue.body.linesIterator
       .flatMap(line => ParentRegex.findAllMatchIn(line).map(_.group(1).toInt))
       .toList
       .distinct
+      .map(TaskNumber(_))
 
   def hasUnresolvedDependencies(
       issue: Issue,
-      openIssueNumbers: Set[Int]
+      openIssueNumbers: Set[TaskNumber]
   ): Boolean =
     getDependencies(issue.body).exists(openIssueNumbers.contains)
 
@@ -251,7 +273,7 @@ object GitHub:
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Option[String]] =
     for
-      history <- issueHistory(root, task.number).handleErrorWith { error =>
+      history <- issueHistory(root, TaskNumber(task.number)).handleErrorWith { error =>
         progress(
           s"Failed to read replay history for task #${task.number}: ${error.getMessage}"
         ).as(IssueHistory(Nil, Nil))
@@ -271,7 +293,7 @@ object GitHub:
   def verifyTaskReplayCi[F[_]](
       root: os.Path,
       task: Issue,
-      branchName: String,
+      branchName: BranchName,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Unit] =
     def pullRequests: F[List[PullRequestReplay]] =
@@ -280,7 +302,7 @@ object GitHub:
         historicalPullRequests <-
           currentPullRequest.fold {
             for
-              history <- issueHistory(root, task.number).handleErrorWith {
+              history <- issueHistory(root, TaskNumber(task.number)).handleErrorWith {
                 error =>
                   progress(
                     s"Failed to read replay CI history for task #${task.number}: ${error.getMessage}"
@@ -293,7 +315,7 @@ object GitHub:
           }(pullRequest => List(pullRequest).pure[F])
       yield historicalPullRequests
 
-    def loop(deadlineMillis: Long): F[Unit] =
+    def loop(deadlineMillis: DeadlineMillis): F[Unit] =
       for
         now <- F.blocking(System.currentTimeMillis())
         pullRequests <- pullRequests
@@ -302,7 +324,7 @@ object GitHub:
         _ <- failure match
           case Some(message) =>
             F.raiseError(new RuntimeException(message))
-          case None if now >= deadlineMillis && pending.nonEmpty =>
+          case None if now >= deadlineMillis.value && pending.nonEmpty =>
             F.raiseError(
               new RuntimeException(
                 s"Timed out waiting for related replay CI: ${pending.get}"
@@ -312,7 +334,7 @@ object GitHub:
             pending match
               case Some(message) =>
                 progress(message) *>
-                  F.blocking(Thread.sleep(PullRequestCheckPollMillis)) *>
+                  F.blocking(Thread.sleep(PullRequestCheckPollMillis.value)) *>
                   loop(deadlineMillis)
               case None if pullRequests.nonEmpty =>
                 progress(
@@ -326,21 +348,21 @@ object GitHub:
 
     for
       _ <- progress(
-        s"Waiting for related replay CI on task #${task.number} with ${PullRequestCheckTimeoutMillis / 1000}s timeout..."
+        s"Waiting for related replay CI on task #${task.number} with ${PullRequestCheckTimeoutMillis.value / 1000}s timeout..."
       )
       started <- F.blocking(System.currentTimeMillis())
-      _ <- loop(started + PullRequestCheckTimeoutMillis)
+      _ <- loop(DeadlineMillis(started) + PullRequestCheckTimeoutMillis)
     yield ()
 
   def hasOpenPullRequestForBranch[F[_]: Sync](
       root: os.Path,
-      branchName: String
+      branchName: BranchName
   ): F[Boolean] =
     pullRequestForBranch(root, branchName).map(_.exists(_.state === "OPEN"))
 
   private final case class IssueHistory(
       comments: List[IssueComment],
-      pullRequests: List[Int]
+      pullRequests: List[TaskNumber]
   )
 
   private final case class IssueComment(
@@ -351,7 +373,7 @@ object GitHub:
 
   private def issueHistory[F[_]: Sync](
       root: os.Path,
-      taskId: Int
+      taskId: TaskNumber
   ): F[IssueHistory] =
     callOutput(
       root,
@@ -378,8 +400,10 @@ object GitHub:
             values.toList.flatMap(parsePullRequestNumber)
           }
           .getOrElse(Nil)
+          .map(TaskNumber.apply)
         val mentionedPullRequests =
           comments.flatMap(comment => pullRequestMentions(comment.body))
+            .map(TaskNumber.apply)
         IssueHistory(comments, (pullRequests ++ mentionedPullRequests).distinct)
     }
 
@@ -429,15 +453,15 @@ object GitHub:
       number: Int,
       state: String,
       url: String,
-      baseRefName: String,
-      headRefName: String,
-      mergeCommit: Option[String],
+      baseRefName: BranchName,
+      headRefName: BranchName,
+      mergeCommit: Option[CommitSha],
       runs: List[WorkflowRun]
   )
 
   private def pullRequestReplayContext[F[_]](
       root: os.Path,
-      number: Int
+      number: TaskNumber
   )(using F: Sync[F]): F[Option[PullRequestReplay]] =
     callOutputUnchecked(
       root,
@@ -458,7 +482,7 @@ object GitHub:
 
   private def pullRequestReplayForBranch[F[_]](
       root: os.Path,
-      branchName: String
+      branchName: BranchName
   )(using F: Sync[F]): F[Option[PullRequestReplay]] =
     pullRequestForBranch(root, branchName).flatMap {
       case Some(pullRequest) =>
@@ -484,28 +508,31 @@ object GitHub:
           .get("url")
           .collect { case ujson.Str(value) => value }
           .getOrElse(""),
-        baseRefName = fields
-          .get("baseRefName")
-          .collect { case ujson.Str(value) => value }
-          .getOrElse(""),
-        headRefName = fields
+        baseRefName = BranchName(
+          fields
+            .get("baseRefName")
+            .collect { case ujson.Str(value) => value }
+            .getOrElse("")
+        ),
+        headRefName = BranchName(fields
           .get("headRefName")
           .collect { case ujson.Str(value) => value }
-          .getOrElse(""),
+          .getOrElse("")),
         mergeCommit = fields
           .get("mergeCommit")
           .collect { case ujson.Obj(commitFields) =>
             commitFields.get("oid").collect { case ujson.Str(value) => value }
           }
-          .flatten,
+          .flatten
+          .map(CommitSha.apply),
         runs = Nil
       )
     }
 
   private def workflowRuns[F[_]: Sync](
       root: os.Path,
-      branchName: String,
-      commitSha: String
+      branchName: BranchName,
+      commitSha: CommitSha
   ): F[List[WorkflowRun]] =
     callOutputUnchecked(
       root,
@@ -513,9 +540,9 @@ object GitHub:
       "run",
       "list",
       "--branch",
-      branchName,
+      branchName.value,
       "--commit",
-      commitSha,
+      commitSha.value,
       "--limit",
       "100",
       "--json",
@@ -653,7 +680,7 @@ ${runner.display}
   // view without ever touching the issue body.
   def metadataCommentBodies[F[_]](
       root: os.Path,
-      taskId: Int
+      taskId: TaskNumber
   )(using F: Sync[F]): F[List[String]] =
     issueHistory(root, taskId)
       .handleErrorWith(_ => F.pure(IssueHistory(Nil, Nil)))
@@ -667,7 +694,7 @@ ${runner.display}
 
   def commentTaskMetadata[F[_]](
       root: os.Path,
-      taskId: Int,
+      taskId: TaskNumber,
       metadataText: String,
       progress: String => F[Unit]
   )(using Sync[F]): F[Unit] =
@@ -695,7 +722,7 @@ ${runner.display}
       root: os.Path,
       task: Issue
   )(using F: Sync[F]): F[Boolean] =
-    issueHistory(root, task.number)
+    issueHistory(root, TaskNumber(task.number))
       .handleErrorWith(_ => F.pure(IssueHistory(Nil, Nil)))
       .map(_.comments.exists { comment =>
         comment.body.trim.toLowerCase.startsWith("questions before execution:")
@@ -709,7 +736,7 @@ ${runner.display}
       task: Issue,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Option[String]] =
-    issueHistory(root, task.number)
+    issueHistory(root, TaskNumber(task.number))
       .handleErrorWith(_ => F.pure(IssueHistory(Nil, Nil)))
       .flatMap { history =>
         val comments = history.comments
@@ -828,12 +855,12 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
   private def mergeIntegrationBranch[F[_]](
       root: os.Path,
-      parentId: Int,
+      parentId: TaskNumber,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Unit] =
-    val branchName = s"task-$parentId"
+    val branchName = BranchName(s"task-$parentId")
     F.blocking {
-      os.proc("git", "rev-parse", "--verify", branchName)
+      os.proc("git", "rev-parse", "--verify", branchName.value)
         .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
         .exitCode === 0
     }.flatMap {
@@ -857,9 +884,9 @@ This parent task will not be implemented directly. Run child tasks first; when a
           )
           _ <- awaitPullRequestChecks(
             root,
-            pullRequest.number.toString,
-            PullRequestCheckTimeoutMillis,
-            PullRequestCheckPollMillis,
+            BranchName(pullRequest.number.value.toString),
+            DeadlineMillis(PullRequestCheckTimeoutMillis),
+            DeadlineMillis(PullRequestCheckPollMillis),
             progress
           )
           _ <- progress("Merging integration Pull Request...")
@@ -870,7 +897,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
             "merge",
             pullRequest.number.toString,
             "--merge"
-          ).map(_ => true).handleErrorWith { error =>
+          ).as(true).handleErrorWith { error =>
             val msg = error.getMessage.toLowerCase
             val isConflict = msg.contains("conflict") || msg
               .contains("mergeable") || msg.contains("fail")
@@ -904,8 +931,8 @@ This parent task will not be implemented directly. Run child tasks first; when a
                   root,
                   merged.baseRefName,
                   merged.mergeCommit,
-                  PullRequestCheckTimeoutMillis,
-                  PullRequestCheckPollMillis,
+                  DeadlineMillis(PullRequestCheckTimeoutMillis),
+                  DeadlineMillis(PullRequestCheckPollMillis),
                   progress
                 )
                 _ <- setIssueStatus(root, parentId, "completed", progress)
@@ -918,8 +945,8 @@ This parent task will not be implemented directly. Run child tasks first; when a
   def pushCreateAndMergePr[F[_]](
       root: os.Path,
       worktreePath: os.Path,
-      branchName: String,
-      baseBranch: Option[String],
+      branchName: BranchName,
+      baseBranch: Option[BranchName],
       task: Issue,
       pullRequestTitle: Option[String],
       pullRequestBody: Option[String],
@@ -932,7 +959,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
         worktreePath,
         branchName,
         baseBranch,
-        task.number,
+        TaskNumber(task.number),
         task.title,
         pullRequestTitle,
         pullRequestBody,
@@ -947,18 +974,18 @@ This parent task will not be implemented directly. Run child tasks first; when a
   // and retry — looping as long as the user keeps accepting the retry.
   private def pushWithRepair[F[_]](
       worktreePath: os.Path,
-      branchName: String,
+      branchName: BranchName,
       task: Issue,
       runner: TaskRunner,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Unit] =
-    call(worktreePath, "git", "push", "-u", "origin", branchName)
+    call(worktreePath, "git", "push", "-u", "origin", branchName.value)
       .handleErrorWith { error =>
         for
           _ <- progress(
             s"Push failed for task #${task.number}: ${error.getMessage}"
           )
-          shouldRepair <- askRetryWithRepair[F](task.number)
+          shouldRepair <- askRetryWithRepair[F](TaskNumber(task.number))
           _ <-
             if shouldRepair then
               repairAndCommit(worktreePath, task, runner, error, progress) *>
@@ -968,7 +995,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       }
 
   private def askRetryWithRepair[F[_]](
-      taskNumber: Int
+      taskNumber: TaskNumber
   )(using F: Sync[F]): F[Boolean] =
     F.blocking {
       print(
@@ -1032,9 +1059,9 @@ This parent task will not be implemented directly. Run child tasks first; when a
     for
       _ <- awaitPullRequestChecks(
         root,
-        pullRequest.number.toString,
-        PullRequestCheckTimeoutMillis,
-        PullRequestCheckPollMillis,
+        BranchName(pullRequest.number.value.toString),
+        DeadlineMillis(PullRequestCheckTimeoutMillis),
+        DeadlineMillis(PullRequestCheckPollMillis),
         progress
       )
       _ <- progress("Merging Pull Request...")
@@ -1048,13 +1075,16 @@ This parent task will not be implemented directly. Run child tasks first; when a
       )
       merged <- mergedPullRequest(root, pullRequest.number)
       _ <-
-        if merged.baseRefName === "master" || merged.baseRefName === "main" then
+        if merged.baseRefName === BranchName(
+            "master"
+          ) || merged.baseRefName === BranchName("main")
+        then
           awaitBranchChecks(
             root,
             merged.baseRefName,
             merged.mergeCommit,
-            PullRequestCheckTimeoutMillis,
-            PullRequestCheckPollMillis,
+            DeadlineMillis(PullRequestCheckTimeoutMillis),
+            DeadlineMillis(PullRequestCheckPollMillis),
             progress
           )
         else
@@ -1071,7 +1101,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
   // verify the base branch's post-merge CI.
   def resumeOpenPullRequest[F[_]](
       root: os.Path,
-      branchName: String,
+      branchName: BranchName,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Unit] =
     pullRequestForBranch(root, branchName).flatMap {
@@ -1085,13 +1115,13 @@ This parent task will not be implemented directly. Run child tasks first; when a
         )
     }
 
-  private final case class PullRequest(number: Int, state: String)
+  private final case class PullRequest(number: TaskNumber, state: String)
 
   private def ensurePullRequest[F[_]](
       worktreePath: os.Path,
-      branchName: String,
-      baseBranch: Option[String],
-      taskNumber: Int,
+      branchName: BranchName,
+      baseBranch: Option[BranchName],
+      taskNumber: TaskNumber,
       taskTitle: String,
       pullRequestTitle: Option[String],
       pullRequestBody: Option[String],
@@ -1119,8 +1149,10 @@ This parent task will not be implemented directly. Run child tasks first; when a
                 .filter(_.trim.nonEmpty)
                 .getOrElse(s"Closes #$taskNumber"),
               "--head",
-              branchName
-            ) ++ baseBranch.toList.flatMap(base => Seq("--base", base))*
+              branchName.value
+            ) ++ baseBranch.toList
+              .map(_.value)
+              .flatMap(base => Seq("--base", base))*
           ) *>
           pullRequestForBranch(worktreePath, branchName).flatMap {
             case Some(pullRequest) if pullRequest.state === "OPEN" =>
@@ -1136,14 +1168,14 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
   private def pullRequestForBranch[F[_]](
       root: os.Path,
-      branchName: String
+      branchName: BranchName
   )(using F: Sync[F]): F[Option[PullRequest]] =
     callOutputUnchecked(
       root,
       "gh",
       "pr",
       "view",
-      branchName,
+      branchName.value,
       "--json",
       "number,state"
     ).map(parsePullRequest)
@@ -1152,7 +1184,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
     Try(ujson.read(output).obj).toOption.flatMap { fields =>
       for
         number <- fields.get("number").collect { case ujson.Num(value) =>
-          value.toInt
+          TaskNumber(value.toInt)
         }
         state <- fields.get("state").collect { case ujson.Str(value) =>
           value.trim.toUpperCase
@@ -1162,16 +1194,19 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
   private def awaitPullRequestChecks[F[_]](
       root: os.Path,
-      branchName: String,
-      timeoutMillis: Long,
-      pollMillis: Long,
+      branchName: BranchName,
+      timeoutMillis: DeadlineMillis,
+      pollMillis: DeadlineMillis,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Unit] =
-    def loop(deadlineMillis: Long, noChecksSince: Option[Long]): F[Unit] =
+    def loop(
+        deadlineMillis: DeadlineMillis,
+        noChecksSince: Option[Long]
+    ): F[Unit] =
       for
         now <- F.blocking(System.currentTimeMillis())
         _ <-
-          if now >= deadlineMillis then
+          if now >= deadlineMillis.value then
             F.raiseError(
               new RuntimeException(
                 s"Timed out waiting for Pull Request checks on $branchName."
@@ -1181,7 +1216,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
             pullRequestCheckStatus(root, branchName).flatMap {
               case PullRequestChecksPending(message) =>
                 progress(message) *>
-                  F.blocking(Thread.sleep(pollMillis)) *>
+                  F.blocking(Thread.sleep(pollMillis.value)) *>
                   loop(deadlineMillis, None)
               case PullRequestChecksUnavailable(message) =>
                 pullRequestMergeConflict(root, branchName).flatMap {
@@ -1193,13 +1228,14 @@ This parent task will not be implemented directly. Run child tasks first; when a
                     )
                   case false =>
                     val firstSeen = noChecksSince.getOrElse(now)
-                    if now - firstSeen >= PullRequestNoChecksGraceMillis then
+                    if now - firstSeen >= PullRequestNoChecksGraceMillis.value
+                    then
                       progress(
-                        s"$message Proceeding after ${PullRequestNoChecksGraceMillis / 1000}s with no PR checks."
+                        s"$message Proceeding after ${PullRequestNoChecksGraceMillis.value / 1000}s with no PR checks."
                       )
                     else
                       progress(message) *>
-                        F.blocking(Thread.sleep(pollMillis)) *>
+                        F.blocking(Thread.sleep(pollMillis.value)) *>
                         loop(deadlineMillis, Some(firstSeen))
                 }
               case PullRequestChecksPassed(message) =>
@@ -1211,22 +1247,22 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
     for
       _ <- progress(
-        s"Waiting for Pull Request checks on $branchName with ${timeoutMillis / 1000}s timeout..."
+        s"Waiting for Pull Request checks on $branchName with ${timeoutMillis.value / 1000}s timeout..."
       )
       started <- F.blocking(System.currentTimeMillis())
-      _ <- loop(started + timeoutMillis, None)
+      _ <- loop(DeadlineMillis(started) + timeoutMillis, None)
     yield ()
 
   private def pullRequestMergeConflict[F[_]](
       root: os.Path,
-      branchName: String
+      branchName: BranchName
   )(using F: Sync[F]): F[Boolean] =
     callOutputUnchecked(
       root,
       "gh",
       "pr",
       "view",
-      branchName,
+      branchName.value,
       "--json",
       "mergeable"
     ).map { output =>
@@ -1252,14 +1288,14 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
   private def pullRequestCheckStatus[F[_]](
       root: os.Path,
-      branchName: String
+      branchName: BranchName
   )(using F: Sync[F]): F[PullRequestCheckStatus] =
     callOutputUnchecked(
       root,
       "gh",
       "pr",
       "checks",
-      branchName,
+      branchName.value,
       "--json",
       "name,state"
     ).map { output =>
@@ -1306,13 +1342,13 @@ This parent task will not be implemented directly. Run child tasks first; when a
     checks.map(check => s"${check.name}=${check.state}").mkString(", ")
 
   private final case class MergedPullRequest(
-      baseRefName: String,
-      mergeCommit: String
+      baseRefName: BranchName,
+      mergeCommit: CommitSha
   )
 
   private def mergedPullRequest[F[_]](
       root: os.Path,
-      pullRequestNumber: Int
+      pullRequestNumber: TaskNumber
   )(using F: Sync[F]): F[MergedPullRequest] =
     callOutput(
       root,
@@ -1341,25 +1377,25 @@ This parent task will not be implemented directly. Run child tasks first; when a
         mergeCommit <- fields
           .get("mergeCommit")
           .collect { case ujson.Obj(commitFields) =>
-            commitFields.get("oid").collect { case ujson.Str(value) => value }
+            commitFields.get("oid").collect { case ujson.Str(value) => CommitSha(value) }
           }
           .flatten
-      yield MergedPullRequest(baseRefName, mergeCommit)
+      yield MergedPullRequest(BranchName(baseRefName), mergeCommit)
     }
 
   private def awaitBranchChecks[F[_]](
       root: os.Path,
-      branchName: String,
-      commitSha: String,
-      timeoutMillis: Long,
-      pollMillis: Long,
+      branchName: BranchName,
+      commitSha: CommitSha,
+      timeoutMillis: DeadlineMillis,
+      pollMillis: DeadlineMillis,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Unit] =
-    def loop(deadlineMillis: Long): F[Unit] =
+    def loop(deadlineMillis: DeadlineMillis): F[Unit] =
       for
         now <- F.blocking(System.currentTimeMillis())
         _ <-
-          if now >= deadlineMillis then
+          if now >= deadlineMillis.value then
             F.raiseError(
               new RuntimeException(
                 s"Timed out waiting for CI on $branchName at $commitSha."
@@ -1369,7 +1405,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
             branchCheckStatus(root, branchName, commitSha).flatMap {
               case BranchChecksPending(message) =>
                 progress(message) *>
-                  F.blocking(Thread.sleep(pollMillis)) *>
+                  F.blocking(Thread.sleep(pollMillis.value)) *>
                   loop(deadlineMillis)
               case BranchChecksPassed(message) =>
                 progress(message)
@@ -1380,10 +1416,10 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
     for
       _ <- progress(
-        s"Waiting for CI on $branchName at $commitSha with ${timeoutMillis / 1000}s timeout..."
+        s"Waiting for CI on $branchName at $commitSha with ${timeoutMillis.value / 1000}s timeout..."
       )
       started <- F.blocking(System.currentTimeMillis())
-      _ <- loop(started + timeoutMillis)
+      _ <- loop(DeadlineMillis(started) + timeoutMillis)
     yield ()
 
   private sealed trait BranchCheckStatus
@@ -1399,8 +1435,8 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
   private def branchCheckStatus[F[_]](
       root: os.Path,
-      branchName: String,
-      commitSha: String
+      branchName: BranchName,
+      commitSha: CommitSha
   )(using F: Sync[F]): F[BranchCheckStatus] =
     callOutputUnchecked(
       root,
@@ -1408,9 +1444,9 @@ This parent task will not be implemented directly. Run child tasks first; when a
       "run",
       "list",
       "--branch",
-      branchName,
+      branchName.value,
       "--commit",
-      commitSha,
+      commitSha.value,
       "--limit",
       "100",
       "--json",
@@ -1489,7 +1525,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       )
       .mkString(", ")
 
-  def closeIssue[F[_]: Sync](root: os.Path, taskId: Int): F[Unit] =
+  def closeIssue[F[_]: Sync](root: os.Path, taskId: TaskNumber): F[Unit] =
     call(
       root,
       "gh",
@@ -1502,7 +1538,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
   def setIssueStatus[F[_]](
       root: os.Path,
-      taskId: Int,
+      taskId: TaskNumber,
       status: String,
       progress: String => F[Unit]
   )(using Sync[F]): F[Unit] =

@@ -4,7 +4,7 @@ import cats.effect.Ref
 import io.github.mercurievv.minuscles.fieldsnames.derivation.semiauto.FieldNamesDerivation.fieldsNames
 import munit.CatsEffectSuite
 
-import ArrowLogging._
+import ArrowLogging.*
 
 final case class LoggingInner[-->[_, _]](
     increment: Int --> Int
