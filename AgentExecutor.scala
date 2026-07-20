@@ -68,11 +68,39 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
               attempt + 1
             )
         else
-          RuntimeException(
-            s"${runner.agent} exited with ${result.exitCode}"
-          )
-            .raiseError[F, String]
+          val reason = terminationReason(output)
+          reason.traverse_(r =>
+            TaskLogger.llm(s"!!! Termination reason: $r")
+          ) *>
+            RuntimeException(
+              reason.fold(
+                s"${runner.agent} exited with ${result.exitCode}"
+              )(r => s"${runner.agent} exited with ${result.exitCode}: $r")
+            ).raiseError[F, String]
     yield value
+
+  private val TerminationReasonPatterns: List[String] = List(
+    "session limit",
+    "usage limit",
+    "quota exceeded",
+    "rate limit",
+    "please run /login",
+    "invalid api key",
+    "authentication_error",
+    "permission denied",
+    "out of memory",
+    "context length exceeded",
+    "context_length_exceeded"
+  )
+
+  private def terminationReason(output: String): Option[String] =
+    val lower = output.toLowerCase
+    TerminationReasonPatterns
+      .find(lower.contains)
+      .flatMap(pattern =>
+        output.linesIterator.find(_.toLowerCase.contains(pattern))
+      )
+      .map(_.trim)
 
   private def isTransientAgentFailure(output: String): Boolean =
     val lower = output.toLowerCase

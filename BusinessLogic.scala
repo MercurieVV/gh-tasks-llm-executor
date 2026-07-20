@@ -2,12 +2,17 @@ import arrowstep.core.ProgramSays
 import cats.arrow.ArrowChoice
 import cats.syntax.all.*
 
-final case class AppInput(root: os.Path, taskNumber: Option[Int])
+final case class AppInput(
+    root: os.Path,
+    taskNumber: Option[Int],
+    recursive: Boolean = false
+)
 
 final case class RunContext(
     root: os.Path,
     agentInventory: AgentInventory,
-    taskNumber: Option[Int]
+    taskNumber: Option[Int],
+    recursive: Boolean = false
 )
 
 final case class TaskRunner(

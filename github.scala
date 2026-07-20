@@ -1,4 +1,5 @@
 import cats.effect.kernel.Sync
+import cats.syntax.all
 import cats.syntax.all.*
 
 import scala.concurrent.duration.*
@@ -8,7 +9,8 @@ final case class Issue(
     number: Int,
     title: String,
     body: String,
-    state: String
+    state: String,
+    labels: List[String] = Nil
 )
 
 object GitHub:
@@ -34,7 +36,7 @@ object GitHub:
           "--limit",
           "1000",
           "--json",
-          "number,title,body,state"
+          "number,title,body,state,labels"
         )
         .call(cwd = root)
         .out
@@ -63,7 +65,18 @@ object GitHub:
           state = fields
             .get("state")
             .collect { case ujson.Str(value) => value }
-            .getOrElse("")
+            .getOrElse(""),
+          labels = fields
+            .get("labels")
+            .collect { case ujson.Arr(items) => items.toList }
+            .getOrElse(Nil)
+            .flatMap {
+              case ujson.Obj(labelFields) =>
+                labelFields.get("name").collect { case ujson.Str(name) =>
+                  name
+                }
+              case _ => None
+            }
         )
       case _ => None
 
@@ -211,39 +224,50 @@ object GitHub:
       task: Issue,
       progress: String => F[Unit]
   )(using F: Sync[F]): F[Option[String]] =
-    getDependencies(task.body).headOption match
-      case None => F.pure(None)
-      case Some(dependencyId) =>
-        progress(
-          s"Found dependency task #$dependencyId. Fetching conclusion comment..."
-        ) *>
-          F.blocking {
-            Try {
-              val res = os
-                .proc(
-                  "gh",
-                  "issue",
-                  "view",
-                  dependencyId.toString,
-                  "--json",
-                  "comments"
-                )
-                .call(cwd = root)
-              val comments = ujson.read(res.out.text())("comments").arr.toList
-              comments
-                .find(
-                  commentBody(_).exists(_.toLowerCase.contains("conclusion"))
-                )
-                .orElse(comments.lastOption)
-                .flatMap(commentBody)
-            }.toEither
-          }.flatMap {
-            case Right(comment) => F.pure(comment)
-            case Left(error) =>
-              progress(
-                s"Failed to read comments for dependency task #$dependencyId: ${error.getMessage}"
-              ).as(None)
-          }
+    getDependencies(task.body).distinct
+      .traverse(id => singleDependencyConclusion(root, id, progress))
+      .map { conclusions =>
+        val rendered = conclusions.flatten.map { case (id, comment) =>
+          s"- #$id: $comment"
+        }
+        Option.when(rendered.nonEmpty)(rendered.mkString("\n"))
+      }
+
+  private def singleDependencyConclusion[F[_]](
+      root: os.Path,
+      dependencyId: Int,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Option[(Int, String)]] =
+    progress(
+      s"Found dependency task #$dependencyId. Fetching conclusion comment..."
+    ) *>
+      F.blocking {
+        Try {
+          val res = os
+            .proc(
+              "gh",
+              "issue",
+              "view",
+              dependencyId.toString,
+              "--json",
+              "comments"
+            )
+            .call(cwd = root)
+          val comments = ujson.read(res.out.text())("comments").arr.toList
+          comments
+            .find(
+              commentBody(_).exists(_.toLowerCase.contains("conclusion"))
+            )
+            .orElse(comments.lastOption)
+            .flatMap(commentBody)
+        }.toEither
+      }.flatMap {
+        case Right(comment) => F.pure(comment.map(dependencyId -> _))
+        case Left(error) =>
+          progress(
+            s"Failed to read comments for dependency task #$dependencyId: ${error.getMessage}"
+          ).as(None)
+      }
 
   def replayContext[F[_]](
       root: os.Path,
@@ -617,12 +641,15 @@ $prText
       root: os.Path,
       task: Issue,
       runner: TaskRunner,
+      conclusion: Option[String],
       progress: String => F[Unit]
   )(using Sync[F]): F[Unit] =
+    val conclusionLine =
+      conclusion.fold("")(text => s"\nConclusion:\n$text\n")
     val body =
       s"""Script conclusion:
 Task #${task.number} completed successfully.
-
+$conclusionLine
 Runner:
 ${runner.display}
 """
@@ -863,14 +890,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
             progress
           )
           _ <- progress("Merging integration Pull Request...")
-          mergeResult <- call(
-            root,
-            "gh",
-            "pr",
-            "merge",
-            pullRequest.number.toString,
-            "--merge"
-          ).map(_ => true).handleErrorWith { error =>
+          mergeResult <- call(root, "gh", "pr", "merge", pullRequest.number.toString, "--merge").as(true).handleErrorWith { error =>
             val msg = error.getMessage.toLowerCase
             val isConflict = msg.contains("conflict") || msg
               .contains("mergeable") || msg.contains("fail")
@@ -1520,14 +1540,29 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
     val addFlags = toAdd.flatMap(label => Seq("--add-label", label))
     val removeFlags = toRemove.flatMap(label => Seq("--remove-label", label))
-    val fullCmd =
-      Seq("gh", "issue", "edit", taskId.toString) ++ addFlags ++ removeFlags
+    val addCmd = Seq("gh", "issue", "edit", taskId.toString) ++ addFlags
+    val removeCmd = Seq("gh", "issue", "edit", taskId.toString) ++ removeFlags
 
-    call(root, fullCmd*).handleErrorWith { error =>
-      progress(
-        s"Warning: Failed to update GitHub labels for task #$taskId: ${error.getMessage}"
-      )
-    }
+    def run(cmd: Seq[String]): F[Unit] =
+      call(root, cmd*).handleErrorWith { error =>
+        progress(
+          s"Warning: Failed to update GitHub labels for task #$taskId: ${error.getMessage}"
+        )
+      }
+
+    def ensureLabel(label: String): F[Unit] =
+      call(
+        root,
+        "gh",
+        "label",
+        "create",
+        label,
+        "--color",
+        "ededed",
+        "--force"
+      ).handleErrorWith(_ => Sync[F].unit)
+
+    toAdd.traverse_(ensureLabel) *> run(addCmd) *> run(removeCmd)
 
   private def call[F[_]: Sync](cwd: os.Path, command: String*): F[Unit] =
     TaskLogger.trace[F](s"command cwd=$cwd args=${formatCommand(command)}") *>

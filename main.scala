@@ -8,6 +8,7 @@ import cats.effect.IOApp
 import cats.effect.Ref
 import cats.effect.Resource
 import cats.effect.kernel.Sync
+import cats.syntax.all
 import cats.syntax.all.*
 import io.github.mercurievv.minuscles.fieldsnames.derivation.semiauto.FieldNamesDerivation.fieldsNames
 
@@ -24,7 +25,7 @@ object Main extends IOApp:
   private val evaluatorRunner: TaskRunner =
     TaskRunner("claude", Some("opus"), None, None)
   private val UserInputWaitMillis =
-    envLong("GH_TASKS_USER_INPUT_WAIT_MINUTES", 45).minutes.toMillis
+    envLong("GH_TASKS_USER_INPUT_WAIT_MINUTES", 120).minutes.toMillis
   private val UserInputPollMillis =
     envLong("GH_TASKS_USER_INPUT_POLL_SECONDS", 30).seconds.toMillis
   private val UserInputSoundEnabled =
@@ -36,10 +37,13 @@ object Main extends IOApp:
 
   def run(args: List[String]): IO[ExitCode] =
     val taskNumber = parseTaskNumber(args)
+    val recursive = parseRecursiveFlag(args)
     val arrowstepArgs = removeScriptArgs(args)
     AgentMain
       .run[IO](arrowstepArgs, os.pwd)(_ =>
-        businessLogic[IO].programArrows.program(AppInput(os.pwd, taskNumber))
+        businessLogic[IO].programArrows.program(
+          AppInput(os.pwd, taskNumber, recursive)
+        )
       )
       .flatMap { outcome =>
         IO.print(outcome.stdout) *>
@@ -60,7 +64,7 @@ object Main extends IOApp:
         noTaskSummary = noTaskSummary[F],
         executeNonEmptySelection = executeNonEmptySelection[F],
         toProgramSays =
-          Kleisli(summary => Sync[F].pure(ProgramSays.Done(summary.toJson)))
+          Kleisli(summary => ProgramSays.Done(summary.toJson).pure[F])
       ),
       taskArrows = TaskArrows[Flow[F]](
         resumePlan = resumePlan[F],
@@ -96,7 +100,7 @@ object Main extends IOApp:
     Kleisli { input =>
       AgentInventory
         .loadF[F](input.root)
-        .map(RunContext(input.root, _, input.taskNumber))
+        .map(RunContext(input.root, _, input.taskNumber, input.recursive))
     }
 
   private def selectTask[F[_]: Sync]: -->[F, RunContext, TaskSelection] =
@@ -114,6 +118,19 @@ object Main extends IOApp:
             // If a specific task is targeted, do not filter out by dependencies/children.
             // We want to run it and traverse its tree recursively!
             true.pure[F]
+          else if context.recursive then
+            // --recursive walks each root's dependency tree to closure, so an
+            // unresolved dependency is not a reason to exclude a root candidate
+            // (unlike above, still exclude issues that are themselves still a
+            // child/dependency of another open issue, to avoid entering the
+            // same subtree from more than one root entry point).
+            val openChildren = GitHub.hasOpenChildren(task, issues)
+            Option
+              .when(openChildren)("has open child tasks")
+              .traverse_(why =>
+                TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
+              )
+              .as(!openChildren)
           else
             val unresolvedDeps =
               GitHub.hasUnresolvedDependencies(task, openIssueNumbers)
@@ -131,7 +148,18 @@ object Main extends IOApp:
               )
               .as(!excluded)
         }
-        eligible <- filteredByDeps.filterA { task =>
+        notAlreadyClaimed <- filteredByDeps.filterA { task =>
+          val claimed = task.labels.exists(label =>
+            label === "status: in progress" || label === "in progress"
+          )
+          Option
+            .when(claimed)("already labeled in progress (claimed by another run)")
+            .traverse_(why =>
+              TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
+            )
+            .as(!claimed)
+        }
+        eligible <- notAlreadyClaimed.filterA { task =>
           val needsInputMetadata =
             evaluationStatus(task.body).contains("needs-input") ||
               executionStatus(task.body).contains("needs-input")
@@ -209,8 +237,7 @@ object Main extends IOApp:
   private def partitionCandidates[F[_]: Sync]
       : -->[F, TaskSelection, Either[NoTask, TaskSelection]] =
     Kleisli.fromFunction { selection =>
-      if selection.candidates.isEmpty then Left(NoTask(selection.context))
-      else Right(selection)
+      Either.cond(!(selection.candidates.isEmpty), selection, NoTask(selection.context))
     }
 
   private def executeNonEmptySelection[F[_]: Sync]
@@ -224,22 +251,25 @@ object Main extends IOApp:
         openIssuesRef <- Ref[F].of(openIssuesMap)
         recursiveFlow = executeRecursive[F](context, openIssuesRef)
         summaries <- candidates.traverse { candidate =>
-          for
-            currentMap <- openIssuesRef.get
-            summary <- currentMap.get(candidate.issue.number) match {
-              case Some(latestIssue) =>
-                recursiveFlow.run(latestIssue)
-              case None =>
-                Sync[F].pure(
-                  RunSummary(
-                    status = "completed",
-                    message =
-                      s"Task #${candidate.issue.number} is already completed.",
-                    task = Some(candidate.issue)
-                  )
-                )
-            }
-          yield summary
+          if context.recursive then
+            runRootUntilClosed[F](
+              context,
+              openIssuesRef,
+              recursiveFlow,
+              candidate.issue.number
+            )
+          else
+            for
+              currentMap <- openIssuesRef.get
+              summary <- currentMap.get(candidate.issue.number) match {
+                case Some(latestIssue) =>
+                  recursiveFlow.run(latestIssue)
+                case None =>
+                  RunSummary(status = "completed", message = s"Task #${
+    candidate.issue.number
+  } is already completed.", task = Some(candidate.issue)).pure[F]
+              }
+            yield summary
         }
       yield summaries.lastOption.getOrElse(
         RunSummary(
@@ -249,6 +279,49 @@ object Main extends IOApp:
         )
       )
     }
+
+  private val RecursiveRootIterationCap = 50
+
+  // Repeats the dependency-tree walk against a single root task until it
+  // closes: a split mid-tree creates new sub-issues that `openIssues` (a
+  // one-shot snapshot) doesn't know about, so a single pass can short-circuit
+  // without ever running them. Refetching and retrying picks those up on the
+  // next pass, same as re-invoking the script by hand would.
+  private def runRootUntilClosed[F[_]: Sync](
+      context: RunContext,
+      openIssues: Ref[F, Map[Int, Issue]],
+      recursiveFlow: -->[F, Issue, RunSummary],
+      rootNumber: Int
+  ): F[RunSummary] =
+    def loop(iteration: Int, previous: Option[RunSummary]): F[RunSummary] =
+      for
+        freshIssues <- GitHub.fetchIssues(context.root)
+        freshMap = freshIssues.map(i => i.number -> i).toMap
+        _ <- openIssues.set(freshMap)
+        result <- freshMap.get(rootNumber) match
+          case None =>
+            RunSummary(
+              status = "completed",
+              message = s"Task #$rootNumber is already completed.",
+              task = None
+            ).pure[F]
+          case Some(rootIssue) =>
+            for
+              summary <- recursiveFlow.run(rootIssue)
+              next <-
+                if summary.status === "needs-input" then summary.pure[F]
+                else if previous.contains(summary) then
+                  progress(
+                    s"Task #$rootNumber made no further progress under --recursive; stopping."
+                  ).as(summary)
+                else if iteration >= RecursiveRootIterationCap then
+                  progress(
+                    s"Task #$rootNumber hit the --recursive iteration cap ($RecursiveRootIterationCap); stopping."
+                  ).as(summary)
+                else loop(iteration + 1, Some(summary))
+            yield next
+      yield result
+    loop(1, None)
 
   private def executeRecursive[F[_]: Sync](
       context: RunContext,
@@ -265,16 +338,10 @@ object Main extends IOApp:
       : -->[F, Issue, Either[RunSummary, Issue]] =
     Kleisli { issue =>
       if issue.state.toLowerCase == "closed" then
-        Sync[F].pure(
-          Left(
-            RunSummary(
-              status = "completed",
-              message = s"Task #${issue.number} is already completed.",
-              task = Some(issue)
-            )
-          )
-        )
-      else Sync[F].pure(Right(issue))
+        Left(RunSummary(status = "completed", message = s"Task #${
+  issue.number
+} is already completed.", task = Some(issue))).pure[F]
+      else Right(issue).pure[F]
     }
 
   private def runDependencies[F[_]: Sync](
@@ -289,14 +356,13 @@ object Main extends IOApp:
         dependencyResult <- openDeps.foldLeftM[F, Either[RunSummary, Unit]](
           Right(())
         ) {
-          case (Left(failedSummary), _) => Sync[F].pure(Left(failedSummary))
+          case (Left(failedSummary), _) => Left(failedSummary).pure[F]
           case (Right(_), depIssue) =>
             executeRecursive.run(depIssue).map { summary =>
-              if summary.status == "completed" then Right(())
-              else Left(summary)
+              Either.cond(summary.status == "completed", (), summary)
             }
         }
-      yield dependencyResult.map(_ => issue)
+      yield dependencyResult.as(issue)
     }
 
   private def claimAndRun[F[_]: Sync](
@@ -338,9 +404,9 @@ object Main extends IOApp:
       GitHub.fetchIssues(root).flatMap { issues =>
         issues.find(_.number == taskId) match
           case Some(issue) if issue.state.toLowerCase == "closed" =>
-            Sync[F].pure(issue)
+            issue.pure[F]
           case None =>
-            Sync[F].pure(Issue(taskId, s"Task #$taskId", "", "closed"))
+            Issue(taskId, s"Task #$taskId", "", "closed").pure[F]
           case _ =>
             Sync[F].blocking(Thread.sleep(pollInterval.toMillis)) *> loop
       }
@@ -354,13 +420,7 @@ object Main extends IOApp:
       )(number =>
         s"No runnable open task found for #$number. It may be closed, blocked by dependencies or open child tasks, marked needs-input, or already claimed by another process."
       )
-      Sync[F].pure(
-        RunSummary(
-          status = "no-task",
-          message = message,
-          task = None
-        )
-      )
+      RunSummary(status = "no-task", message = message, task = None).pure[F]
     }
 
   private def resumePlan[F[_]: Sync]
@@ -794,7 +854,7 @@ object Main extends IOApp:
   private def commentOutput[F[_]: Sync]
       : -->[F, TaskWithOutput, TaskWithOutput] =
     Kleisli { task =>
-      Sync[F].pure(task)
+      task.pure[F]
     }
 
   private def runProjectValidation[F[_]: Sync]
@@ -820,9 +880,7 @@ object Main extends IOApp:
           task.run.branchName
         )
       yield
-        if filesChanged || hasPublishableCommits || hasOpenPullRequest then
-          Left(ChangedTask(task))
-        else Right(UnchangedTask(task))
+        Either.cond(!(filesChanged || hasPublishableCommits || hasOpenPullRequest), UnchangedTask(task), ChangedTask(task))
     }
 
   private def commitChangedTask[
@@ -830,17 +888,7 @@ object Main extends IOApp:
   ]: -->[F, ChangedTask, TaskWithOutput] =
     val toPublishRequest = Kleisli[F, ChangedTask, PublishRequest] { changed =>
       val run = changed.run.run
-      Sync[F].pure(
-        PublishRequest(
-          run.context.root,
-          run.worktreePath,
-          run.branchName,
-          run.baseBranch,
-          run.task,
-          extractAgentFinalization(changed.run.output),
-          run.runner
-        )
-      )
+      PublishRequest(run.context.root, run.worktreePath, run.branchName, run.baseBranch, run.task, extractAgentFinalization(changed.run.output), run.runner).pure[F]
     }
 
     val handleError = Kleisli[F, (ChangedTask, Throwable), TaskWithOutput] {
@@ -900,12 +948,14 @@ object Main extends IOApp:
   private def closeTask[F[_]: Sync]: -->[F, TaskWithOutput, TaskRun] =
     Kleisli { task =>
       val run = task.run
+      val conclusion = extractPrefixedLine(task.output, "Conclusion")
       for
         _ <- progress(s"Closing task #${run.task.number} with comment...")
         _ <- GitHub.commentConclusion(
           run.context.root,
           run.task,
           run.runner,
+          conclusion,
           progress
         )
         _ <- GitHub.setIssueStatus(
@@ -1020,11 +1070,11 @@ object Main extends IOApp:
   private def summarize(value: Any): String =
     value match
       case null => "null"
-      case AppInput(root, taskNumber) =>
-        s"AppInput(root=$root,task=${taskNumber.fold("auto")(_.toString)})"
-      case RunContext(root, agentInventory, taskNumber) =>
-        s"RunContext(root=$root,task=${taskNumber.fold("auto")(_.toString)},availableAgents=${agentInventory.availableTools.size})"
-      case Issue(number, title, body, state) =>
+      case AppInput(root, taskNumber, recursive) =>
+        s"AppInput(root=$root,task=${taskNumber.fold("auto")(_.toString)},recursive=$recursive)"
+      case RunContext(root, agentInventory, taskNumber, recursive) =>
+        s"RunContext(root=$root,task=${taskNumber.fold("auto")(_.toString)},recursive=$recursive,availableAgents=${agentInventory.availableTools.size})"
+      case Issue(number, title, body, state, _) =>
         s"Issue(#$number,title=${quote(title)},state=$state,bodyChars=${body.length})"
       case TaskRunner(agent, model, effort, version) =>
         s"TaskRunner(agent=$agent,model=${model.getOrElse("")},effort=${effort
@@ -1191,6 +1241,7 @@ Final answer contract:
 - List validation commands you ran and whether they passed.
 - Include a proposed commit title.
 - Include a proposed pull request body when useful.
+- Include a one-line "Conclusion:" summary for tasks that depend on this one (what changed, what's now available to build on).
 """
 
   // Scoped tool permission for the evaluator run only: "split" verdicts
@@ -1297,6 +1348,7 @@ Rules:
 - Evaluate whether the task should be split before implementation. Record the evaluation in the body.
 - If splitting is needed, create GitHub subtasks before returning. Each subtask must have parent, dependencies if needed, acceptance criteria, narrow scope, and preferred llms/models/efforts/versions.
 - Prefer a target scope that a weaker model such as Haiku could implement without another split.
+- If the task's existing preferred runner metadata pins claude/opus (or any top-tier model) for the whole task, treat that as a signal to split: opus-level judgment is only needed for plan/source-of-truth-shaped work, so carve those parts out and route implement/test leaves to cheaper runners instead of leaving the whole task on opus.
 - If important information is missing and cannot be inferred, set status to "questions" and put concrete user questions in "questions".
 - If questions are needed, still provide the best improved body possible in "body".
 - Do not implement code changes.
@@ -1491,8 +1543,7 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       Git[F]
         .filesChanged(request.worktreePath)
         .map(filesChanged =>
-          if filesChanged then Left(ChangedPublication(request))
-          else Right(ExistingPublication(request))
+          Either.cond(!(filesChanged), ExistingPublication(request), ChangedPublication(request))
         )
     }
 
@@ -1525,8 +1576,7 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       Git[F]
         .hasRemote(request.root)
         .map(hasRemote =>
-          if hasRemote then Left(RemotePublication(request))
-          else Right(LocalPublication(request))
+          Either.cond(!(hasRemote), LocalPublication(request), RemotePublication(request))
         )
     }
 
@@ -1584,6 +1634,9 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       }
       .flatMap(_.trim.stripPrefix("#").toIntOption)
 
+  private def parseRecursiveFlag(args: List[String]): Boolean =
+    args.contains("--recursive")
+
   private def removeScriptArgs(args: List[String]): List[String] =
     @tailrec
     def loop(
@@ -1602,6 +1655,8 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
           loop(Nil, clean)
         case flag :: tail
             if flag.startsWith("--task=") || flag.startsWith("--issue=") =>
+          loop(tail, clean)
+        case "--recursive" :: tail =>
           loop(tail, clean)
         case head :: tail =>
           loop(tail, head :: clean)
