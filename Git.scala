@@ -324,13 +324,17 @@ final class Git[F[_]](using F: Sync[F]):
       .filter(_.trim.nonEmpty)
       .getOrElse(s"Implement task #${task.number}: ${task.title}")
     call(worktreePath, "git", "add", "-A") *>
-      call(worktreePath, "git", "commit", "-m", message).onError { case _ =>
+      call(worktreePath, "git", "commit", "-m", message).handleErrorWith { original =>
         // A rejecting pre-commit hook (e.g. failing lint/format check) leaves
         // the work staged but uncommitted. releaseWorktree force-removes the
         // worktree unconditionally, which would silently discard it. Snapshot
         // it with --no-verify so it becomes a real commit; preserveUnpushedCommits
         // (called on error before the worktree is released) then pushes it to
-        // a recovery ref instead of losing it.
+        // a recovery ref instead of losing it. onError would still rethrow
+        // `original` after running this handler, defeating the point (the
+        // caller would still crash/treat the task as failed even though the
+        // work is now safely committed) — so recover instead, and only
+        // rethrow if the recovery commit itself also fails.
         call(
           worktreePath,
           "git",
@@ -338,7 +342,10 @@ final class Git[F[_]](using F: Sync[F]):
           "--no-verify",
           "-m",
           s"WIP (recovery, pre-commit hook failed): $message"
-        ).attempt.void
+        ).attempt.flatMap {
+          case Right(_) => F.unit
+          case Left(_)  => F.raiseError(original)
+        }
       }
 
   def hasRemote: Kleisli[F, os.Path, Boolean] =

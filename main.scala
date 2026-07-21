@@ -727,7 +727,7 @@ object Main extends IOApp:
       task: TaskWithPrompt
   ): Resource[F, TaskWithPrompt] =
     val run = task.run
-    Resource.make {
+    Resource.makeCase {
       for
         _ <- TaskLogger.trace[F](
           s"enter acquireWorktree input=${summarize(task)}"
@@ -743,26 +743,43 @@ object Main extends IOApp:
           s"exit acquireWorktree output=${summarize(task)}"
         )
       yield task
-    } { acquiredTask =>
+    } { (acquiredTask, exitCase) =>
       val acquiredRun = acquiredTask.run
-      TaskLogger.trace[F](
-        s"enter releaseWorktree input=${summarize(acquiredTask)}"
-      ) *>
-        Git[F]
-          .releaseWorktree(
-            acquiredRun.context.root,
-            acquiredRun.worktreePath,
-            acquiredRun.branchName,
-            progress
-          )
-          .handleErrorWith(error =>
-            TaskLogger.trace[F](
-              s"fail releaseWorktree error=${error.getClass.getSimpleName}: ${error.getMessage}"
-            )
+      exitCase match
+        case Resource.ExitCase.Succeeded =>
+          TaskLogger.trace[F](
+            s"enter releaseWorktree input=${summarize(acquiredTask)}"
           ) *>
-        TaskLogger.trace[F](
-          s"exit releaseWorktree output=${summarize(acquiredTask)}"
-        )
+            Git[F]
+              .releaseWorktree(
+                acquiredRun.context.root,
+                acquiredRun.worktreePath,
+                acquiredRun.branchName,
+                progress
+              )
+              .handleErrorWith(error =>
+                TaskLogger.trace[F](
+                  s"fail releaseWorktree error=${error.getClass.getSimpleName}: ${error.getMessage}"
+                )
+              ) *>
+            TaskLogger.trace[F](
+              s"exit releaseWorktree output=${summarize(acquiredTask)}"
+            )
+        case Resource.ExitCase.Errored(error) =>
+          progress(
+            s"Task #${acquiredRun.task.number} failed (${error.getClass.getSimpleName}: ${error.getMessage}). " +
+              s"Leaving worktree at ${acquiredRun.worktreePath} in place for inspection/recovery instead of deleting it."
+          ) *>
+            TaskLogger.trace[F](
+              s"skip releaseWorktree (errored) output=${summarize(acquiredTask)}"
+            )
+        case Resource.ExitCase.Canceled =>
+          progress(
+            s"Task #${acquiredRun.task.number} canceled. Leaving worktree at ${acquiredRun.worktreePath} in place."
+          ) *>
+            TaskLogger.trace[F](
+              s"skip releaseWorktree (canceled) output=${summarize(acquiredTask)}"
+            )
     }
 
   private def attemptWithInput[F[_]: Sync, A, B](
