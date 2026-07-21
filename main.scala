@@ -1608,18 +1608,104 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
           request.runner,
           progress
         )
-        _ <- GitHub.createAndMergePr(
-          request.root,
-          request.worktreePath,
-          request.branchName,
-          request.baseBranch,
-          request.task,
-          request.finalization.commitTitle,
-          request.finalization.pullRequestBody,
-          progress
-        )
+        _ <- createAndMergePrWithConflictRepair(request, progress)
       yield ()
     }
+
+  // GitHub cannot trigger checks on a PR with merge conflicts against its base
+  // branch (see GitHub.awaitPullRequestChecks). Rather than failing the task,
+  // try folding the base branch into the worktree ourselves; if that leaves
+  // conflict markers, hand it to a repair agent (same pattern as
+  // pushWithRepair/repairAndCommit above), then retry the PR creation/merge.
+  private def createAndMergePrWithConflictRepair[F[_]](
+      request: PublishRequest,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    GitHub
+      .createAndMergePr(
+        request.root,
+        request.worktreePath,
+        request.branchName,
+        request.baseBranch,
+        request.task,
+        request.finalization.commitTitle,
+        request.finalization.pullRequestBody,
+        progress
+      )
+      .handleErrorWith { error =>
+        if isMergeConflictError(error) then
+          for
+            _ <- progress(
+              s"Merge conflict detected for task #${request.task.number}; attempting automatic resolution..."
+            )
+            resolved <- resolveMergeConflict(request, progress)
+            _ <-
+              if resolved then createAndMergePrWithConflictRepair(request, progress)
+              else F.raiseError(error)
+          yield ()
+        else F.raiseError(error)
+      }
+
+  private def isMergeConflictError(error: Throwable): Boolean =
+    Option(error.getMessage).exists(
+      _.contains("has merge conflicts with its base branch")
+    )
+
+  private def resolveMergeConflict[F[_]](
+      request: PublishRequest,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Boolean] =
+    val baseBranch = request.baseBranch.getOrElse("master")
+    for
+      autoMerged <- Git[F].mergeBaseBranch(request.worktreePath, baseBranch)
+      resolved <-
+        if autoMerged then
+          progress(
+            s"Automatically merged $baseBranch into ${request.branchName} for task #${request.task.number}."
+          ) *> Git[F].push(request.worktreePath, request.branchName).as(true)
+        else
+          for
+            _ <- progress(
+              s"Automatic merge failed for task #${request.task.number}; running repair agent (${request.runner.display})..."
+            )
+            _ <- AgentExecutor[F].run(
+              request.runner,
+              mergeConflictRepairPrompt(request.task, baseBranch),
+              request.worktreePath,
+              RepairAllowedTools
+            )
+            stillConflicted <- Git[F].hasUnresolvedConflicts(
+              request.worktreePath
+            )
+            resolved <-
+              if stillConflicted then
+                progress(
+                  s"Repair agent left unresolved conflicts for task #${request.task.number}; aborting merge."
+                ) *> Git[F].abortMerge(request.worktreePath).as(false)
+              else
+                Git[F]
+                  .commitAll(
+                    request.worktreePath,
+                    request.task,
+                    Some(
+                      s"Merge $baseBranch into ${request.branchName}, resolve conflicts"
+                    )
+                  ) *> Git[F].push(request.worktreePath, request.branchName).as(true)
+          yield resolved
+    yield resolved
+
+  private def mergeConflictRepairPrompt(
+      task: Issue,
+      baseBranch: String
+  ): String =
+    s"""This branch has a `git merge` in progress against `$baseBranch` that produced conflict
+       |markers (`<<<<<<<` / `=======` / `>>>>>>>`). Resolve every conflict in this worktree so
+       |the merge can complete cleanly, preserving the intended behavior of both sides, without
+       |changing the task's intended behavior. Do not run `git commit`, `git merge --abort`, or
+       |`git push` yourself.
+       |
+       |Task: #${task.number} ${task.title}
+       |""".stripMargin
 
   // `git push` runs the repo's prePush hook (tests/lint/format). A failure
   // there is usually fixable in-worktree (e.g. a broken test), so before

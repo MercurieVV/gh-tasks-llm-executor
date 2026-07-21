@@ -401,6 +401,34 @@ final class Git[F[_]](using F: Sync[F]):
         yield ()
     }
 
+  // Attempts to fold the PR's base branch into the current worktree branch to
+  // resolve a GitHub-reported merge conflict. A clean, non-conflicting merge
+  // commits itself; a conflicting one is left mid-merge (conflict markers in
+  // place) for the caller to hand off to a repair agent — see main.scala's
+  // resolveMergeConflict.
+  def mergeBaseBranch(worktreePath: os.Path, baseBranch: String): F[Boolean] =
+    call(worktreePath, "git", "fetch", "origin", baseBranch) *>
+      F.blocking(
+        os
+          .proc("git", "merge", s"origin/$baseBranch", "--no-edit")
+          .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+          .exitCode === 0
+      )
+
+  def hasUnresolvedConflicts(worktreePath: os.Path): F[Boolean] =
+    F.blocking(
+      os
+        .proc("git", "diff", "--name-only", "--diff-filter=U")
+        .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        .out
+        .text()
+        .trim
+        .nonEmpty
+    )
+
+  def abortMerge(worktreePath: os.Path): F[Unit] =
+    call(worktreePath, "git", "merge", "--abort").attempt.void
+
   def cleanupWorktree
       : Kleisli[F, (os.Path, os.Path, String, String => F[Unit]), Unit] =
     Kleisli.apply { case (root, worktreePath, branchName, progress) =>
