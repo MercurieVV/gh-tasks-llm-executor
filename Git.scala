@@ -348,6 +348,12 @@ final class Git[F[_]](using F: Sync[F]):
         }
       }
 
+  // Runs the repo's prePush hook (tests/lint/format); raises on rejection.
+  // Repair/retry on failure is an orchestration concern, not a git concern —
+  // see main.scala's publishRemote.
+  def push(worktreePath: os.Path, branchName: String): F[Unit] =
+    call(worktreePath, "git", "push", "-u", "origin", branchName)
+
   def hasRemote: Kleisli[F, os.Path, Boolean] =
     Kleisli.apply { root =>
       F.blocking(

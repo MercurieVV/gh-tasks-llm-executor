@@ -1600,18 +1600,134 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
   private def publishRemote[F[_]: Sync]: -->[F, RemotePublication, Unit] =
     Kleisli { remote =>
       val request = remote.request
-      GitHub.pushCreateAndMergePr(
-        request.root,
-        request.worktreePath,
-        request.branchName,
-        request.baseBranch,
-        request.task,
-        request.finalization.commitTitle,
-        request.finalization.pullRequestBody,
-        request.runner,
-        progress
-      )
+      for
+        _ <- pushWithRepair(
+          request.worktreePath,
+          request.branchName,
+          request.task,
+          request.runner,
+          progress
+        )
+        _ <- GitHub.createAndMergePr(
+          request.root,
+          request.worktreePath,
+          request.branchName,
+          request.baseBranch,
+          request.task,
+          request.finalization.commitTitle,
+          request.finalization.pullRequestBody,
+          progress
+        )
+      yield ()
     }
+
+  // `git push` runs the repo's prePush hook (tests/lint/format). A failure
+  // there is usually fixable in-worktree (e.g. a broken test), so before
+  // giving up and releasing the task claim, offer to spawn a repair agent
+  // and retry — looping as long as the user keeps accepting the retry.
+  private def pushWithRepair[F[_]](
+      worktreePath: os.Path,
+      branchName: String,
+      task: Issue,
+      runner: TaskRunner,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    Git[F]
+      .push(worktreePath, branchName)
+      .handleErrorWith { error =>
+        for
+          _ <- progress(
+            s"Push failed for task #${task.number}: ${error.getMessage}"
+          )
+          shouldRepair <- askRetryWithRepair[F](task.number)
+          _ <-
+            if shouldRepair then
+              repairAndCommit(worktreePath, task, runner, error, progress) *>
+                pushWithRepair(worktreePath, branchName, task, runner, progress)
+            else F.raiseError(error)
+        yield ()
+      }
+
+  private val RetryPromptTimeout = 30.seconds
+
+  private def askRetryWithRepair[F[_]](
+      taskNumber: Int
+  )(using F: Sync[F]): F[Boolean] =
+    F.blocking {
+      print(
+        s"Repair push failure for task #$taskNumber with an agent and retry? [y/N]: "
+      )
+      System.out.flush()
+      readLineWithTimeout(RetryPromptTimeout) match
+        case Some(answer) =>
+          answer.trim.equalsIgnoreCase("y") ||
+          answer.trim.equalsIgnoreCase("yes")
+        case None =>
+          println(
+            s"No response in ${RetryPromptTimeout.toSeconds}s, defaulting to y"
+          )
+          true
+    }
+
+  // scala.io.StdIn.readLine() blocks with no timeout support, so read on a
+  // daemon thread and join with a deadline; an unanswered prompt must not
+  // hang the process forever.
+  private def readLineWithTimeout(timeout: FiniteDuration): Option[String] =
+    val result = new java.util.concurrent.atomic.AtomicReference[String](null)
+    val reader = new Thread(() =>
+      result.set(Option(scala.io.StdIn.readLine()).getOrElse(""))
+    )
+    reader.setDaemon(true)
+    reader.start()
+    reader.join(timeout.toMillis)
+    Option(result.get())
+
+  // Repair agent runs unattended just like the implementer (see
+  // ImplementerAllowedTools) — without tool grants it hits the permission
+  // wall on every Edit/Bash call, gives up instantly, and the retry loop
+  // spins forever with zero progress.
+  private val RepairAllowedTools = ImplementerAllowedTools
+
+  private def repairAndCommit[F[_]](
+      worktreePath: os.Path,
+      task: Issue,
+      runner: TaskRunner,
+      pushError: Throwable,
+      progress: String => F[Unit]
+  )(using F: Sync[F]): F[Unit] =
+    for
+      _ <- progress(
+        s"Running repair agent (${runner.display}) for task #${task.number}..."
+      )
+      _ <- AgentExecutor[F].run(
+        runner,
+        repairPrompt(task, pushError),
+        worktreePath,
+        RepairAllowedTools
+      )
+      changed <- Git[F].filesChanged(worktreePath)
+      _ <-
+        if changed then
+          Git[F].commitAll(
+            worktreePath,
+            task,
+            Some(s"Repair prePush failure for task #${task.number}")
+          )
+        else
+          progress(
+            s"Repair agent made no file changes for task #${task.number}."
+          )
+    yield ()
+
+  private def repairPrompt(task: Issue, pushError: Throwable): String =
+    s"""`git push` failed for task #${task.number} (${task.title}), most likely because the
+       |repo's prePush hook (tests/lint/format) rejected the current commit. Fix the underlying
+       |issue in this worktree so the prePush hook passes, without changing the task's intended
+       |behavior. Do not run git push yourself.
+       |
+       |Failure output:
+       |${pushError.getMessage}
+       |""".stripMargin
 
   private def publishLocal[F[_]: Sync]: -->[F, LocalPublication, Unit] =
     Kleisli { local =>
