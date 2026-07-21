@@ -987,6 +987,8 @@ This parent task will not be implemented directly. Run child tasks first; when a
         yield ()
       }
 
+  private val retryPromptTimeout = 30.seconds
+
   private def askRetryWithRepair[F[_]](
       taskNumber: Int
   )(using F: Sync[F]): F[Boolean] =
@@ -995,10 +997,29 @@ This parent task will not be implemented directly. Run child tasks first; when a
         s"Repair push failure for task #$taskNumber with an agent and retry? [y/N]: "
       )
       System.out.flush()
-      val answer = Option(scala.io.StdIn.readLine()).getOrElse("")
-      answer.trim.equalsIgnoreCase("y") ||
-      answer.trim.equalsIgnoreCase("yes")
+      readLineWithTimeout(retryPromptTimeout) match
+        case Some(answer) =>
+          answer.trim.equalsIgnoreCase("y") ||
+          answer.trim.equalsIgnoreCase("yes")
+        case None =>
+          println(
+            s"No response in ${retryPromptTimeout.toSeconds}s, defaulting to y"
+          )
+          true
     }
+
+  // scala.io.StdIn.readLine() blocks with no timeout support, so read on a
+  // daemon thread and join with a deadline; an unanswered prompt must not
+  // hang the process forever.
+  private def readLineWithTimeout(timeout: FiniteDuration): Option[String] =
+    val result = new java.util.concurrent.atomic.AtomicReference[String](null)
+    val reader = new Thread(() =>
+      result.set(Option(scala.io.StdIn.readLine()).getOrElse(""))
+    )
+    reader.setDaemon(true)
+    reader.start()
+    reader.join(timeout.toMillis)
+    Option(result.get())
 
   private def repairAndCommit[F[_]](
       worktreePath: os.Path,
