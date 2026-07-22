@@ -1,4 +1,5 @@
 import cats.effect.kernel.Sync
+import cats.data.Kleisli
 
 final case class AgentTool(
     id: String,
@@ -138,8 +139,10 @@ object AgentInventory:
     )
   )
 
-  def loadF[F[_]: Sync](root: os.Path): F[AgentInventory] =
+  def loadF[F[_]: Sync]: Kleisli[F, os.Path, AgentInventory] =
+  Kleisli.apply { root =>
     Sync[F].blocking(load(root))
+  }
 
   def load(root: os.Path): AgentInventory =
     val path = root / RelativeConfigPath

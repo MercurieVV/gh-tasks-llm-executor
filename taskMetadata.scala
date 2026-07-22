@@ -156,9 +156,9 @@ object TaskMetadataStore:
       ): F[Unit] =
         if metadata.isEmpty then F.unit
         else
-          GitHub.commentTaskMetadata(
+          GitHub.commentTaskMetadata(progress)(
             root,
             taskId,
             TaskMetadata.render(metadata),
-            progress
+            
           )

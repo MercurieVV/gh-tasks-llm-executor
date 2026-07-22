@@ -351,8 +351,10 @@ final class Git[F[_]](using F: Sync[F]):
   // Runs the repo's prePush hook (tests/lint/format); raises on rejection.
   // Repair/retry on failure is an orchestration concern, not a git concern —
   // see main.scala's publishRemote.
-  def push(worktreePath: os.Path, branchName: String): F[Unit] =
+  def push: Kleisli[F, (os.Path, String), Unit] =
+  Kleisli.apply { case (worktreePath, branchName) =>
     call(worktreePath, "git", "push", "-u", "origin", branchName)
+  }
 
   def hasRemote: Kleisli[F, os.Path, Boolean] =
     Kleisli.apply { root =>
@@ -406,7 +408,8 @@ final class Git[F[_]](using F: Sync[F]):
   // commits itself; a conflicting one is left mid-merge (conflict markers in
   // place) for the caller to hand off to a repair agent — see main.scala's
   // resolveMergeConflict.
-  def mergeBaseBranch(worktreePath: os.Path, baseBranch: String): F[Boolean] =
+  def mergeBaseBranch: Kleisli[F, (os.Path, String), Boolean] =
+  Kleisli.apply { case (worktreePath, baseBranch) =>
     call(worktreePath, "git", "fetch", "origin", baseBranch) *>
       F.blocking(
         os
@@ -414,8 +417,10 @@ final class Git[F[_]](using F: Sync[F]):
           .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
           .exitCode === 0
       )
+  }
 
-  def hasUnresolvedConflicts(worktreePath: os.Path): F[Boolean] =
+  def hasUnresolvedConflicts: Kleisli[F, os.Path, Boolean] =
+  Kleisli.apply { worktreePath =>
     F.blocking(
       os
         .proc("git", "diff", "--name-only", "--diff-filter=U")
@@ -425,9 +430,12 @@ final class Git[F[_]](using F: Sync[F]):
         .trim
         .nonEmpty
     )
+  }
 
-  def abortMerge(worktreePath: os.Path): F[Unit] =
+  def abortMerge: Kleisli[F, os.Path, Unit] =
+  Kleisli.apply { worktreePath =>
     call(worktreePath, "git", "merge", "--abort").attempt.void
+  }
 
   def cleanupWorktree
       : Kleisli[F, (os.Path, os.Path, String, String => F[Unit]), Unit] =

@@ -15,8 +15,9 @@ import io.github.mercurievv.minuscles.fieldsnames.derivation.semiauto.FieldNames
 import scala.annotation.tailrec
 import scala.concurrent.duration.*
 import scala.util.Try
-
 import ArrowLogging.*
+import Main.progress
+import cats.syntax.arrow.*
 
 object Main extends IOApp:
 
@@ -153,7 +154,9 @@ object Main extends IOApp:
             label === "status: in progress" || label === "in progress"
           )
           Option
-            .when(claimed)("already labeled in progress (claimed by another run)")
+            .when(claimed)(
+              "already labeled in progress (claimed by another run)"
+            )
             .traverse_(why =>
               TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
             )
@@ -173,7 +176,7 @@ object Main extends IOApp:
                   true.pure[F]
                 case true =>
                   GitHub
-                    .userAnswer(context.root, task, progress)
+                    .userAnswer(progress)(context.root, task)
                     .map(_.nonEmpty)
                     .flatTap { hasAnswer =>
                       if hasAnswer then ().pure[F]
@@ -237,7 +240,11 @@ object Main extends IOApp:
   private def partitionCandidates[F[_]: Sync]
       : -->[F, TaskSelection, Either[NoTask, TaskSelection]] =
     Kleisli.fromFunction { selection =>
-      Either.cond(!(selection.candidates.isEmpty), selection, NoTask(selection.context))
+      Either.cond(
+        !(selection.candidates.isEmpty),
+        selection,
+        NoTask(selection.context)
+      )
     }
 
   private def executeNonEmptySelection[F[_]: Sync]
@@ -253,10 +260,7 @@ object Main extends IOApp:
         summaries <- candidates.traverse { candidate =>
           if context.recursive then
             runRootUntilClosed[F](
-              context,
-              openIssuesRef,
-              recursiveFlow,
-              candidate.issue.number
+              (context, openIssuesRef, recursiveFlow, candidate.issue.number)
             )
           else
             for
@@ -265,9 +269,12 @@ object Main extends IOApp:
                 case Some(latestIssue) =>
                   recursiveFlow.run(latestIssue)
                 case None =>
-                  RunSummary(status = "completed", message = s"Task #${
-    candidate.issue.number
-  } is already completed.", task = Some(candidate.issue)).pure[F]
+                  RunSummary(
+                    status = "completed",
+                    message =
+                      s"Task #${candidate.issue.number} is already completed.",
+                    task = Some(candidate.issue)
+                  ).pure[F]
               }
             yield summary
         }
@@ -287,41 +294,42 @@ object Main extends IOApp:
   // one-shot snapshot) doesn't know about, so a single pass can short-circuit
   // without ever running them. Refetching and retrying picks those up on the
   // next pass, same as re-invoking the script by hand would.
-  private def runRootUntilClosed[F[_]: Sync](
-      context: RunContext,
-      openIssues: Ref[F, Map[Int, Issue]],
-      recursiveFlow: -->[F, Issue, RunSummary],
-      rootNumber: Int
-  ): F[RunSummary] =
-    def loop(iteration: Int, previous: Option[RunSummary]): F[RunSummary] =
-      for
-        freshIssues <- GitHub.fetchIssues(context.root)
-        freshMap = freshIssues.map(i => i.number -> i).toMap
-        _ <- openIssues.set(freshMap)
-        result <- freshMap.get(rootNumber) match
-          case None =>
-            RunSummary(
-              status = "completed",
-              message = s"Task #$rootNumber is already completed.",
-              task = None
-            ).pure[F]
-          case Some(rootIssue) =>
-            for
-              summary <- recursiveFlow.run(rootIssue)
-              next <-
-                if summary.status === "needs-input" then summary.pure[F]
-                else if previous.contains(summary) then
-                  progress(
-                    s"Task #$rootNumber made no further progress under --recursive; stopping."
-                  ).as(summary)
-                else if iteration >= RecursiveRootIterationCap then
-                  progress(
-                    s"Task #$rootNumber hit the --recursive iteration cap ($RecursiveRootIterationCap); stopping."
-                  ).as(summary)
-                else loop(iteration + 1, Some(summary))
-            yield next
-      yield result
-    loop(1, None)
+  private def runRootUntilClosed[F[_]: Sync]: Kleisli[
+    F,
+    (RunContext, Ref[F, Map[Int, Issue]], -->[F, Issue, RunSummary], Int),
+    RunSummary
+  ] =
+    Kleisli.apply { case (context, openIssues, recursiveFlow, rootNumber) =>
+      def loop(iteration: Int, previous: Option[RunSummary]): F[RunSummary] =
+        for
+          freshIssues <- GitHub.fetchIssues(context.root)
+          freshMap = freshIssues.map(i => i.number -> i).toMap
+          _ <- openIssues.set(freshMap)
+          result <- freshMap.get(rootNumber) match
+            case None =>
+              RunSummary(
+                status = "completed",
+                message = s"Task #$rootNumber is already completed.",
+                task = None
+              ).pure[F]
+            case Some(rootIssue) =>
+              for
+                summary <- recursiveFlow.run(rootIssue)
+                next <-
+                  if summary.status === "needs-input" then summary.pure[F]
+                  else if previous.contains(summary) then
+                    progress(
+                      s"Task #$rootNumber made no further progress under --recursive; stopping."
+                    ).as(summary)
+                  else if iteration >= RecursiveRootIterationCap then
+                    progress(
+                      s"Task #$rootNumber hit the --recursive iteration cap ($RecursiveRootIterationCap); stopping."
+                    ).as(summary)
+                  else loop(iteration + 1, Some(summary))
+              yield next
+        yield result
+      loop(1, None)
+    }
 
   private def executeRecursive[F[_]: Sync](
       context: RunContext,
@@ -331,16 +339,20 @@ object Main extends IOApp:
       checkIfCompleted = checkIfCompleted[F],
       runDependencies = self => runDependencies[F](openIssues, self),
       claimAndRun = claimAndRun[F](context),
-      defer = self => Kleisli(issue => self.run(issue))
+      defer = self => self
     ).executeRecursive
 
   private def checkIfCompleted[F[_]: Sync]
       : -->[F, Issue, Either[RunSummary, Issue]] =
     Kleisli { issue =>
       if issue.state.toLowerCase == "closed" then
-        Left(RunSummary(status = "completed", message = s"Task #${
-  issue.number
-} is already completed.", task = Some(issue))).pure[F]
+        Left(
+          RunSummary(
+            status = "completed",
+            message = s"Task #${issue.number} is already completed.",
+            task = Some(issue)
+          )
+        ).pure[F]
       else Right(issue).pure[F]
     }
 
@@ -383,7 +395,7 @@ object Main extends IOApp:
           progress(
             s"Task #${issue.number} is claimed by another process. Waiting for completion..."
           ) *>
-            pollGitHubForCompletion[F](context.root, issue.number).map {
+            pollGitHubForCompletion[F]((context.root, issue.number)).map {
               finalIssue =>
                 RunSummary(
                   status = "completed",
@@ -395,22 +407,22 @@ object Main extends IOApp:
         }
     }
 
-  private def pollGitHubForCompletion[F[_]: Sync](
-      root: os.Path,
-      taskId: Int
-  ): F[Issue] =
-    val pollInterval = 30.seconds
-    def loop: F[Issue] =
-      GitHub.fetchIssues(root).flatMap { issues =>
-        issues.find(_.number == taskId) match
-          case Some(issue) if issue.state.toLowerCase == "closed" =>
-            issue.pure[F]
-          case None =>
-            Issue(taskId, s"Task #$taskId", "", "closed").pure[F]
-          case _ =>
-            Sync[F].blocking(Thread.sleep(pollInterval.toMillis)) *> loop
-      }
-    loop
+  private def pollGitHubForCompletion[F[_]: Sync]
+      : Kleisli[F, (os.Path, Int), Issue] =
+    Kleisli.apply { case (root, taskId) =>
+      val pollInterval = 30.seconds
+      def loop: F[Issue] =
+        GitHub.fetchIssues(root).flatMap { issues =>
+          issues.find(_.number == taskId) match
+            case Some(issue) if issue.state.toLowerCase == "closed" =>
+              issue.pure[F]
+            case None =>
+              Issue(taskId, s"Task #$taskId", "", "closed").pure[F]
+            case _ =>
+              Sync[F].blocking(Thread.sleep(pollInterval.toMillis)) *> loop
+        }
+      loop
+    }
 
   private def noTaskSummary[F[_]: Sync]: -->[F, NoTask, RunSummary] =
     Kleisli { noTask =>
@@ -491,10 +503,9 @@ object Main extends IOApp:
   private def splitTaskSummary[F[_]: Sync]: -->[F, SplitTask, RunSummary] =
     Kleisli { split =>
       GitHub
-        .commentSplitEvaluation(
+        .commentSplitEvaluation(progress)(
           split.run.context.root,
-          split.run.task,
-          progress
+          split.run.task
         )
         .as(
           RunSummary(
@@ -517,11 +528,10 @@ object Main extends IOApp:
     Kleisli { task =>
       val run = task.run
       GitHub
-        .setIssueStatus(
+        .setIssueStatus(progress)(
           run.context.root,
           run.task.number,
-          "in progress",
-          progress
+          "in progress"
         )
         .as(task)
     }
@@ -529,20 +539,13 @@ object Main extends IOApp:
   private def fetchTaskContext[
       F[_]: Sync
   ]: -->[F, TaskRun, TaskWithPrompt] =
-    Kleisli { run =>
-      for
-        dependencyConclusion <- GitHub.dependencyConclusion(
-          run.context.root,
-          run.task,
-          progress
-        )
-        replayContext <- GitHub.replayContext(
-          run.context.root,
-          run.task,
-          progress
-        )
-      yield TaskWithPrompt(run, dependencyConclusion, replayContext)
-    }
+    (Kleisli.ask[F, TaskRun] &&& Kleisli { (run: TaskRun) =>
+      GitHub.dependencyConclusion(progress)(run.context.root, run.task)
+    } &&& Kleisli { (run: TaskRun) =>
+      GitHub.replayContext(progress)(run.context.root, run.task)
+    }).map({ case ((run, dependencyConclusion), replayContext) =>
+      TaskWithPrompt(run, dependencyConclusion, replayContext)
+    })
 
   private def evaluateTask[
       F[_]: Sync
@@ -553,7 +556,7 @@ object Main extends IOApp:
     Kleisli { task =>
       val run = task.run
       for
-        userAnswer <- GitHub.userAnswer(run.context.root, run.task, progress)
+        userAnswer <- GitHub.userAnswer(progress)(run.context.root, run.task)
         hasRealQuestion <- GitHub.hasQuestionComment(run.context.root, run.task)
         evaluation <- existingEvaluation(run.task, hasRealQuestion)
           .filter(_ => userAnswer.isEmpty)
@@ -637,7 +640,7 @@ object Main extends IOApp:
         result <- {
           verifiedEvaluation.questions.filter(_.trim.nonEmpty) match
             case Some(questions) =>
-              waitForUserInput[F](task.copy(run = updatedRun), questions.trim)
+              waitForUserInput[F]((task.copy(run = updatedRun), questions.trim))
             case None if verifiedEvaluation.execution === "split" =>
               Right(Left(SplitTask(updatedRun))).pure[F]
             case None =>
@@ -646,81 +649,83 @@ object Main extends IOApp:
       yield result
     }
 
-  private def waitForUserInput[
-      F[_]: Sync
-  ](
-      task: TaskWithPrompt,
-      questions: String
-  ): F[Either[NeedsUserInput, Either[SplitTask, TaskWithPrompt]]] =
-    val run = task.run
-    for
-      _ <- GitHub.commentNeedsUserInput(
-        run.context.root,
-        run.task,
-        questions,
-        progress
-      )
-      _ <- notifyUserInputRequired[F](run.task)
-      answer <- awaitUserAnswer[F](run.context.root, run.task)
-      result <-
-        answer match
-          case Some(_) =>
-            progress(
-              s"Continuing task #${run.task.number} after receiving user input..."
-            ) *> evaluateTask[F].run(task)
-          case None =>
-            Left(NeedsUserInput(run, questions)).pure[F]
-    yield result
-
-  private def awaitUserAnswer[F[_]: Sync](
-      root: os.Path,
-      task: Issue
-  ): F[Option[String]] =
-    def loop(deadlineMillis: Long): F[Option[String]] =
+  private def waitForUserInput[F[_]: Sync]: Kleisli[
+    F,
+    (TaskWithPrompt, String),
+    Either[NeedsUserInput, Either[SplitTask, TaskWithPrompt]]
+  ] =
+    Kleisli.apply { case (task, questions) =>
+      val run = task.run
       for
-        answer <- GitHub.userAnswer(root, task, progress)
+        _ <- GitHub.commentNeedsUserInput(progress)(
+          run.context.root,
+          run.task,
+          questions
+        )
+        _ <- notifyUserInputRequired[F](run.task)
+        answer <- awaitUserAnswer[F]((run.context.root, run.task))
         result <-
           answer match
-            case some @ Some(_) => some.pure[F]
+            case Some(_) =>
+              progress(
+                s"Continuing task #${run.task.number} after receiving user input..."
+              ) *> evaluateTask[F].run(task)
             case None =>
-              Sync[F].blocking(System.currentTimeMillis()).flatMap { now =>
-                if now >= deadlineMillis then
-                  progress(
-                    s"No user answer received for task #${task.number} within ${UserInputWaitMillis / 60000} minutes."
-                  ).as(None)
-                else
-                  progress(
-                    s"Waiting for a user answer on task #${task.number}..."
-                  ) *>
-                    Sync[F].blocking(Thread.sleep(UserInputPollMillis)) *>
-                    loop(deadlineMillis)
-              }
+              Left(NeedsUserInput(run, questions)).pure[F]
       yield result
+    }
 
-    for
-      _ <- progress(
-        s"Awaiting user answer on task #${task.number} for up to ${UserInputWaitMillis / 60000} minutes..."
-      )
-      started <- Sync[F].blocking(System.currentTimeMillis())
-      answer <- loop(started + UserInputWaitMillis)
-    yield answer
+  private def awaitUserAnswer[F[_]: Sync]
+      : Kleisli[F, (os.Path, Issue), Option[String]] =
+    Kleisli.apply { case (root, task) =>
+      def loop(deadlineMillis: Long): F[Option[String]] =
+        for
+          answer <- GitHub.userAnswer(progress)(root, task)
+          result <-
+            answer match
+              case some @ Some(_) => some.pure[F]
+              case None =>
+                Sync[F].blocking(System.currentTimeMillis()).flatMap { now =>
+                  if now >= deadlineMillis then
+                    progress(
+                      s"No user answer received for task #${task.number} within ${UserInputWaitMillis / 60000} minutes."
+                    ).as(None)
+                  else
+                    progress(
+                      s"Waiting for a user answer on task #${task.number}..."
+                    ) *>
+                      Sync[F].blocking(Thread.sleep(UserInputPollMillis)) *>
+                      loop(deadlineMillis)
+                }
+        yield result
 
-  private def notifyUserInputRequired[F[_]: Sync](task: Issue): F[Unit] =
-    progress(
-      s"User input required for task #${task.number}; notification sound requested."
-    ) *> Sync[F].blocking {
-      if UserInputSoundEnabled then
-        print("\u0007")
-        System.out.flush()
-        Try {
-          val sound = os.Path("/System/Library/Sounds/Glass.aiff")
-          if os.exists(sound) then
-            os.proc("afplay", sound.toString)
-              .call(stdout = os.Pipe, stderr = os.Pipe, check = false)
-          else
-            os.proc("osascript", "-e", "beep 2")
-              .call(stdout = os.Pipe, stderr = os.Pipe, check = false)
-        }.toOption
+      for
+        _ <- progress(
+          s"Awaiting user answer on task #${task.number} for up to ${UserInputWaitMillis / 60000} minutes..."
+        )
+        started <- Sync[F].blocking(System.currentTimeMillis())
+        answer <- loop(started + UserInputWaitMillis)
+      yield answer
+    }
+
+  private def notifyUserInputRequired[F[_]: Sync]: Kleisli[F, Issue, Unit] =
+    Kleisli.apply { task =>
+      progress(
+        s"User input required for task #${task.number}; notification sound requested."
+      ) *> Sync[F].blocking {
+        if UserInputSoundEnabled then
+          print("\u0007")
+          System.out.flush()
+          Try {
+            val sound = os.Path("/System/Library/Sounds/Glass.aiff")
+            if os.exists(sound) then
+              os.proc("afplay", sound.toString)
+                .call(stdout = os.Pipe, stderr = os.Pipe, check = false)
+            else
+              os.proc("osascript", "-e", "beep 2")
+                .call(stdout = os.Pipe, stderr = os.Pipe, check = false)
+          }.toOption
+      }
     }
 
   private def worktreeResource[F[_]: Sync](
@@ -884,38 +889,54 @@ object Main extends IOApp:
 
   private def changedPlan[F[_]: Sync]
       : -->[F, TaskWithOutput, Either[ChangedTask, UnchangedTask]] =
-    Kleisli { task =>
-      for
-        filesChanged <- Git[F].filesChanged(task.run.worktreePath)
-        hasPublishableCommits <- Git[F].hasPublishableCommits(
-          task.run.worktreePath,
-          task.run.branchName,
-          task.run.baseBranch
+    (Kleisli.ask[F, TaskWithOutput] &&& Kleisli { (task: TaskWithOutput) =>
+      Git[F].filesChanged(task.run.worktreePath)
+    } &&& Kleisli { (task: TaskWithOutput) =>
+      Git[F].hasPublishableCommits(
+        task.run.worktreePath,
+        task.run.branchName,
+        task.run.baseBranch
+      )
+    } &&& Kleisli { (task: TaskWithOutput) =>
+      GitHub.hasOpenPullRequestForBranch(
+        task.run.worktreePath,
+        task.run.branchName
+      )
+    }).map({
+      case (
+            ((task, filesChanged), hasPublishableCommits),
+            hasOpenPullRequest
+          ) =>
+        Either.cond(
+          !(filesChanged || hasPublishableCommits || hasOpenPullRequest),
+          UnchangedTask(task),
+          ChangedTask(task)
         )
-        hasOpenPullRequest <- GitHub.hasOpenPullRequestForBranch(
-          task.run.worktreePath,
-          task.run.branchName
-        )
-      yield
-        Either.cond(!(filesChanged || hasPublishableCommits || hasOpenPullRequest), UnchangedTask(task), ChangedTask(task))
-    }
+    })
 
   private def commitChangedTask[
       F[_]: Sync
   ]: -->[F, ChangedTask, TaskWithOutput] =
     val toPublishRequest = Kleisli[F, ChangedTask, PublishRequest] { changed =>
       val run = changed.run.run
-      PublishRequest(run.context.root, run.worktreePath, run.branchName, run.baseBranch, run.task, extractAgentFinalization(changed.run.output), run.runner).pure[F]
+      PublishRequest(
+        run.context.root,
+        run.worktreePath,
+        run.branchName,
+        run.baseBranch,
+        run.task,
+        extractAgentFinalization(changed.run.output),
+        run.runner
+      ).pure[F]
     }
 
     val handleError = Kleisli[F, (ChangedTask, Throwable), TaskWithOutput] {
       case (changed, error) =>
         val run = changed.run.run
-        GitHub.commentTaskFailure(
+        GitHub.commentTaskFailure(progress)(
           run.context.root,
           run.task,
-          error.getMessage,
-          progress
+          error.getMessage
         ) *> Sync[F].raiseError(error)
     }
 
@@ -944,19 +965,17 @@ object Main extends IOApp:
       : -->[F, TaskWithOutput, TaskWithOutput] =
     Kleisli { task =>
       GitHub
-        .verifyTaskReplayCi(
+        .verifyTaskReplayCi(progress)(
           task.run.context.root,
           task.run.task,
-          task.run.branchName,
-          progress
+          task.run.branchName
         )
         .handleErrorWith { error =>
           GitHub
-            .commentTaskFailure(
+            .commentTaskFailure(progress)(
               task.run.context.root,
               task.run.task,
-              error.getMessage,
-              progress
+              error.getMessage
             ) *> Sync[F].raiseError(error)
         }
         .as(task)
@@ -968,24 +987,21 @@ object Main extends IOApp:
       val conclusion = extractPrefixedLine(task.output, "Conclusion")
       for
         _ <- progress(s"Closing task #${run.task.number} with comment...")
-        _ <- GitHub.commentConclusion(
+        _ <- GitHub.commentConclusion(progress)(
           run.context.root,
           run.task,
           run.runner,
-          conclusion,
-          progress
+          conclusion
         )
-        _ <- GitHub.setIssueStatus(
+        _ <- GitHub.setIssueStatus(progress)(
           run.context.root,
           run.task.number,
-          "completed",
-          progress
+          "completed"
         )
         _ <- GitHub.closeIssue(run.context.root, run.task.number)
-        _ <- GitHub.checkParentsForCompletion(
+        _ <- GitHub.checkParentsForCompletion(progress)(
           run.context.root,
-          run.task,
-          progress
+          run.task
         )
         _ <- progress("Task execution finished successfully.")
       yield run
@@ -1003,10 +1019,9 @@ object Main extends IOApp:
           _ <- progress(
             s"Task #${run.task.number} already has an open Pull Request for ${run.branchName}; resuming to verify and merge instead of re-implementing..."
           )
-          _ <- GitHub.resumeOpenPullRequest(
+          _ <- GitHub.resumeOpenPullRequest(progress)(
             run.context.root,
-            run.branchName,
-            progress
+            run.branchName
           )
         yield TaskWithOutput(run, output = "")
       } >>> closeTask[F] >>> Kleisli[F, TaskRun, RunSummary] { completedRun =>
@@ -1049,11 +1064,10 @@ object Main extends IOApp:
 
     val handleOtherError = Kleisli[F, (TaskRun, Throwable), RunSummary] {
       case (run, error) =>
-        GitHub.commentTaskFailure(
+        GitHub.commentTaskFailure(progress)(
           run.context.root,
           run.task,
-          error.getMessage,
-          progress
+          error.getMessage
         ) *> Sync[F].raiseError(error)
     }
 
@@ -1560,7 +1574,11 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       Git[F]
         .filesChanged(request.worktreePath)
         .map(filesChanged =>
-          Either.cond(!(filesChanged), ExistingPublication(request), ChangedPublication(request))
+          Either.cond(
+            !(filesChanged),
+            ExistingPublication(request),
+            ChangedPublication(request)
+          )
         )
     }
 
@@ -1593,7 +1611,11 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       Git[F]
         .hasRemote(request.root)
         .map(hasRemote =>
-          Either.cond(!(hasRemote), LocalPublication(request), RemotePublication(request))
+          Either.cond(
+            !(hasRemote),
+            LocalPublication(request),
+            RemotePublication(request)
+          )
         )
     }
 
@@ -1601,14 +1623,15 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
     Kleisli { remote =>
       val request = remote.request
       for
-        _ <- pushWithRepair(
-          request.worktreePath,
-          request.branchName,
-          request.task,
-          request.runner,
-          progress
+        _ <- pushWithRepair(progress)(
+          (
+            request.worktreePath,
+            request.branchName,
+            request.task,
+            request.runner
+          )
         )
-        _ <- createAndMergePrWithConflictRepair(request, progress)
+        _ <- createAndMergePrWithConflictRepair(progress)(request)
       yield ()
     }
 
@@ -1618,81 +1641,85 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
   // conflict markers, hand it to a repair agent (same pattern as
   // pushWithRepair/repairAndCommit above), then retry the PR creation/merge.
   private def createAndMergePrWithConflictRepair[F[_]](
-      request: PublishRequest,
       progress: String => F[Unit]
-  )(using F: Sync[F]): F[Unit] =
-    GitHub
-      .createAndMergePr(
-        request.root,
-        request.worktreePath,
-        request.branchName,
-        request.baseBranch,
-        request.task,
-        request.finalization.commitTitle,
-        request.finalization.pullRequestBody,
-        progress
-      )
-      .handleErrorWith { error =>
-        if isMergeConflictError(error) then
-          for
-            _ <- progress(
-              s"Merge conflict detected for task #${request.task.number}; attempting automatic resolution..."
-            )
-            resolved <- resolveMergeConflict(request, progress)
-            _ <-
-              if resolved then createAndMergePrWithConflictRepair(request, progress)
-              else F.raiseError(error)
-          yield ()
-        else F.raiseError(error)
-      }
+  )(using F: Sync[F]): Kleisli[F, PublishRequest, Unit] =
+    Kleisli.apply { request =>
+      GitHub
+        .createAndMergePr(progress)(
+          request.root,
+          request.worktreePath,
+          request.branchName,
+          request.baseBranch,
+          request.task,
+          request.finalization.commitTitle,
+          request.finalization.pullRequestBody
+        )
+        .handleErrorWith { error =>
+          if isMergeConflictError(error) then
+            for
+              _ <- progress(
+                s"Merge conflict detected for task #${request.task.number}; attempting automatic resolution..."
+              )
+              resolved <- resolveMergeConflict(progress)(request)
+              _ <-
+                if resolved then
+                  createAndMergePrWithConflictRepair(progress)(request)
+                else F.raiseError(error)
+            yield ()
+          else F.raiseError(error)
+        }
+    }
 
   private def isMergeConflictError(error: Throwable): Boolean =
     Option(error.getMessage).exists(
       _.contains("has merge conflicts with its base branch")
     )
 
-  private def resolveMergeConflict[F[_]](
-      request: PublishRequest,
-      progress: String => F[Unit]
-  )(using F: Sync[F]): F[Boolean] =
-    val baseBranch = request.baseBranch.getOrElse("master")
-    for
-      autoMerged <- Git[F].mergeBaseBranch(request.worktreePath, baseBranch)
-      resolved <-
-        if autoMerged then
-          progress(
-            s"Automatically merged $baseBranch into ${request.branchName} for task #${request.task.number}."
-          ) *> Git[F].push(request.worktreePath, request.branchName).as(true)
-        else
-          for
-            _ <- progress(
-              s"Automatic merge failed for task #${request.task.number}; running repair agent (${request.runner.display})..."
-            )
-            _ <- AgentExecutor[F].run(
-              request.runner,
-              mergeConflictRepairPrompt(request.task, baseBranch),
-              request.worktreePath,
-              RepairAllowedTools
-            )
-            stillConflicted <- Git[F].hasUnresolvedConflicts(
-              request.worktreePath
-            )
-            resolved <-
-              if stillConflicted then
-                progress(
-                  s"Repair agent left unresolved conflicts for task #${request.task.number}; aborting merge."
-                ) *> Git[F].abortMerge(request.worktreePath).as(false)
-              else
-                Git[F]
-                  .commitAll(
-                    request.worktreePath,
-                    request.task,
-                    Some(
-                      s"Merge $baseBranch into ${request.branchName}, resolve conflicts"
-                    )
-                  ) *> Git[F].push(request.worktreePath, request.branchName).as(true)
-          yield resolved
-    yield resolved
+  private def resolveMergeConflict[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, PublishRequest, Boolean] =
+    Kleisli.apply { request =>
+      val baseBranch = request.baseBranch.getOrElse("master")
+      for
+        autoMerged <- Git[F].mergeBaseBranch(request.worktreePath, baseBranch)
+        resolved <-
+          if autoMerged then
+            progress(
+              s"Automatically merged $baseBranch into ${request.branchName} for task #${request.task.number}."
+            ) *> Git[F].push(request.worktreePath, request.branchName).as(true)
+          else
+            for
+              _ <- progress(
+                s"Automatic merge failed for task #${request.task.number}; running repair agent (${request.runner.display})..."
+              )
+              _ <- AgentExecutor[F].run(
+                request.runner,
+                mergeConflictRepairPrompt(request.task, baseBranch),
+                request.worktreePath,
+                RepairAllowedTools
+              )
+              stillConflicted <- Git[F].hasUnresolvedConflicts(
+                request.worktreePath
+              )
+              resolved <-
+                if stillConflicted then
+                  progress(
+                    s"Repair agent left unresolved conflicts for task #${request.task.number}; aborting merge."
+                  ) *> Git[F].abortMerge(request.worktreePath).as(false)
+                else
+                  Git[F]
+                    .commitAll(
+                      request.worktreePath,
+                      request.task,
+                      Some(
+                        s"Merge $baseBranch into ${request.branchName}, resolve conflicts"
+                      )
+                    ) *> Git[F]
+                    .push(request.worktreePath, request.branchName)
+                    .as(true)
+            yield resolved
+      yield resolved
+    }
 
   private def mergeConflictRepairPrompt(
       task: Issue,
@@ -1711,48 +1738,50 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
   // there is usually fixable in-worktree (e.g. a broken test), so before
   // giving up and releasing the task claim, offer to spawn a repair agent
   // and retry — looping as long as the user keeps accepting the retry.
-  private def pushWithRepair[F[_]](
-      worktreePath: os.Path,
-      branchName: String,
-      task: Issue,
-      runner: TaskRunner,
-      progress: String => F[Unit]
-  )(using F: Sync[F]): F[Unit] =
-    Git[F]
-      .push(worktreePath, branchName)
-      .handleErrorWith { error =>
-        for
-          _ <- progress(
-            s"Push failed for task #${task.number}: ${error.getMessage}"
-          )
-          shouldRepair <- askRetryWithRepair[F](task.number)
-          _ <-
-            if shouldRepair then
-              repairAndCommit(worktreePath, task, runner, error, progress) *>
-                pushWithRepair(worktreePath, branchName, task, runner, progress)
-            else F.raiseError(error)
-        yield ()
-      }
+  private def pushWithRepair[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, (os.Path, String, Issue, TaskRunner), Unit] =
+    Kleisli.apply { case input @ (worktreePath, branchName, task, runner) =>
+      Git[F]
+        .push(worktreePath, branchName)
+        .handleErrorWith { error =>
+          for
+            _ <- progress(
+              s"Push failed for task #${task.number}: ${error.getMessage}"
+            )
+            shouldRepair <- askRetryWithRepair[F](task.number)
+            _ <-
+              if shouldRepair then
+                repairAndCommit(progress)(
+                  (worktreePath, task, runner, error)
+                ) *>
+                  pushWithRepair(progress)(input)
+              else F.raiseError(error)
+          yield ()
+        }
+    }
 
   private val RetryPromptTimeout = 30.seconds
 
-  private def askRetryWithRepair[F[_]](
-      taskNumber: Int
-  )(using F: Sync[F]): F[Boolean] =
-    F.blocking {
-      print(
-        s"Repair push failure for task #$taskNumber with an agent and retry? [y/N]: "
-      )
-      System.out.flush()
-      readLineWithTimeout(RetryPromptTimeout) match
-        case Some(answer) =>
-          answer.trim.equalsIgnoreCase("y") ||
-          answer.trim.equalsIgnoreCase("yes")
-        case None =>
-          println(
-            s"No response in ${RetryPromptTimeout.toSeconds}s, defaulting to y"
-          )
-          true
+  private def askRetryWithRepair[F[_]](using
+      F: Sync[F]
+  ): Kleisli[F, Int, Boolean] =
+    Kleisli.apply { taskNumber =>
+      F.blocking {
+        print(
+          s"Repair push failure for task #$taskNumber with an agent and retry? [y/N]: "
+        )
+        System.out.flush()
+        readLineWithTimeout(RetryPromptTimeout) match
+          case Some(answer) =>
+            answer.trim.equalsIgnoreCase("y") ||
+            answer.trim.equalsIgnoreCase("yes")
+          case None =>
+            println(
+              s"No response in ${RetryPromptTimeout.toSeconds}s, defaulting to y"
+            )
+            true
+      }
     }
 
   // scala.io.StdIn.readLine() blocks with no timeout support, so read on a
@@ -1774,36 +1803,34 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
   // spins forever with zero progress.
   private val RepairAllowedTools = ImplementerAllowedTools
 
-  private def repairAndCommit[F[_]](
-      worktreePath: os.Path,
-      task: Issue,
-      runner: TaskRunner,
-      pushError: Throwable,
-      progress: String => F[Unit]
-  )(using F: Sync[F]): F[Unit] =
-    for
-      _ <- progress(
-        s"Running repair agent (${runner.display}) for task #${task.number}..."
-      )
-      _ <- AgentExecutor[F].run(
-        runner,
-        repairPrompt(task, pushError),
-        worktreePath,
-        RepairAllowedTools
-      )
-      changed <- Git[F].filesChanged(worktreePath)
-      _ <-
-        if changed then
-          Git[F].commitAll(
-            worktreePath,
-            task,
-            Some(s"Repair prePush failure for task #${task.number}")
-          )
-        else
-          progress(
-            s"Repair agent made no file changes for task #${task.number}."
-          )
-    yield ()
+  private def repairAndCommit[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, (os.Path, Issue, TaskRunner, Throwable), Unit] =
+    Kleisli.apply { case (worktreePath, task, runner, pushError) =>
+      for
+        _ <- progress(
+          s"Running repair agent (${runner.display}) for task #${task.number}..."
+        )
+        _ <- AgentExecutor[F].run(
+          runner,
+          repairPrompt(task, pushError),
+          worktreePath,
+          RepairAllowedTools
+        )
+        changed <- Git[F].filesChanged(worktreePath)
+        _ <-
+          if changed then
+            Git[F].commitAll(
+              worktreePath,
+              task,
+              Some(s"Repair prePush failure for task #${task.number}")
+            )
+          else
+            progress(
+              s"Repair agent made no file changes for task #${task.number}."
+            )
+      yield ()
+    }
 
   private def repairPrompt(task: Issue, pushError: Throwable): String =
     s"""`git push` failed for task #${task.number} (${task.title}), most likely because the
