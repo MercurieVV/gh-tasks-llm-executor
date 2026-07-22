@@ -159,10 +159,16 @@ final class Git[F[_]](using F: Sync[F]):
     }
 
   // Commits that never made it to a normal push/PR (e.g. the push step
-  // itself failed, such as a rejected pre-push hook) would otherwise be
+  // itself failed, such as a rejected pre-push hook, or commitAll's --no-verify
+  // recovery commit after a rejected pre-commit hook) would otherwise be
   // destroyed when releaseWorktree force-removes the worktree/branch.
   // Call this from within the worktree resource's `.use` block on failure,
-  // while the worktree still exists, to push them to a recovery ref first.
+  // while the worktree still exists, to preserve them at a recovery ref first.
+  // The local ref is created unconditionally (branch -D in releaseWorktree
+  // only deletes the branch ref, not refs/gh-tasks-llm-executor/*, and worktree
+  // refs live in the shared .git dir so they survive worktree removal); the
+  // ref is additionally pushed to origin, when a remote exists, as an offsite
+  // backup.
   def preserveUnpushedCommits
       : Kleisli[F, (os.Path, BranchName, Option[BranchName], String => F[Unit]), Unit] =
     Kleisli.apply { case (worktreePath, branchName, baseBranch, progress) =>
@@ -173,20 +179,32 @@ final class Git[F[_]](using F: Sync[F]):
           val recoveryRef = s"refs/gh-tasks-llm-executor/failed/$branchName"
           progress(
             s"Branch $branchName has commits not on origin; preserving them at $recoveryRef before cleanup..."
-          ) *> call(
-            worktreePath,
-            "git",
-            "push",
-            "-f",
-            "origin",
-            s"HEAD:$recoveryRef"
-          ).attempt.flatMap {
-            case Right(_) =>
-              progress(s"Preserved unpushed commits at $recoveryRef.")
-            case Left(error) =>
-              progress(
-                s"Warning: failed to preserve unpushed commits at $recoveryRef: ${error.getMessage}"
-              )
+          ) *> call(worktreePath, "git", "update-ref", recoveryRef, "HEAD").attempt
+            .flatMap {
+              case Right(_) =>
+                progress(s"Preserved unpushed commits locally at $recoveryRef.")
+              case Left(error) =>
+                progress(
+                  s"Warning: failed to create local recovery ref $recoveryRef: ${error.getMessage}"
+                )
+            } *> hasRemote(worktreePath).flatMap {
+            case false => F.unit
+            case true =>
+              call(
+                worktreePath,
+                "git",
+                "push",
+                "-f",
+                "origin",
+                s"HEAD:$recoveryRef"
+              ).attempt.flatMap {
+                case Right(_) =>
+                  progress(s"Pushed recovery ref $recoveryRef to origin.")
+                case Left(error) =>
+                  progress(
+                    s"Warning: failed to push recovery ref $recoveryRef to origin: ${error.getMessage}"
+                  )
+              }
           }
       }
     }
@@ -294,16 +312,41 @@ final class Git[F[_]](using F: Sync[F]):
       task: Issue,
       commitTitle: Option[String] = None
   ): F[Unit] =
+    val message = commitTitle
+      .filter(_.trim.nonEmpty)
+      .getOrElse(s"Implement task #${task.number}: ${task.title}")
     call(worktreePath, "git", "add", "-A") *>
-      call(
-        worktreePath,
-        "git",
-        "commit",
-        "-m",
-        commitTitle
-          .filter(_.trim.nonEmpty)
-          .getOrElse(s"Implement task #${task.number}: ${task.title}")
-      )
+      call(worktreePath, "git", "commit", "-m", message).handleErrorWith { original =>
+        // A rejecting pre-commit hook (e.g. failing lint/format check) leaves
+        // the work staged but uncommitted. releaseWorktree force-removes the
+        // worktree unconditionally, which would silently discard it. Snapshot
+        // it with --no-verify so it becomes a real commit; preserveUnpushedCommits
+        // (called on error before the worktree is released) then pushes it to
+        // a recovery ref instead of losing it. onError would still rethrow
+        // `original` after running this handler, defeating the point (the
+        // caller would still crash/treat the task as failed even though the
+        // work is now safely committed) — so recover instead, and only
+        // rethrow if the recovery commit itself also fails.
+        call(
+          worktreePath,
+          "git",
+          "commit",
+          "--no-verify",
+          "-m",
+          s"WIP (recovery, pre-commit hook failed): $message"
+        ).attempt.flatMap {
+          case Right(_) => F.unit
+          case Left(_)  => F.raiseError(original)
+        }
+      }
+
+  // Runs the repo's prePush hook (tests/lint/format); raises on rejection.
+  // Repair/retry on failure is an orchestration concern, not a git concern —
+  // see main.scala's publishRemote.
+  def push: Kleisli[F, (os.Path, BranchName), Unit] =
+  Kleisli.apply { case (worktreePath, branchName) =>
+    call(worktreePath, "git", "push", "-u", "origin", branchName.value)
+  }
 
   def hasRemote: Kleisli[F, os.Path, Boolean] =
     Kleisli.apply { root =>
@@ -351,6 +394,40 @@ final class Git[F[_]](using F: Sync[F]):
             else F.unit
         yield ()
     }
+
+  // Attempts to fold the PR's base branch into the current worktree branch to
+  // resolve a GitHub-reported merge conflict. A clean, non-conflicting merge
+  // commits itself; a conflicting one is left mid-merge (conflict markers in
+  // place) for the caller to hand off to a repair agent — see main.scala's
+  // resolveMergeConflict.
+  def mergeBaseBranch: Kleisli[F, (os.Path, String), Boolean] =
+  Kleisli.apply { case (worktreePath, baseBranch) =>
+    call(worktreePath, "git", "fetch", "origin", baseBranch) *>
+      F.blocking(
+        os
+          .proc("git", "merge", s"origin/$baseBranch", "--no-edit")
+          .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+          .exitCode === 0
+      )
+  }
+
+  def hasUnresolvedConflicts: Kleisli[F, os.Path, Boolean] =
+  Kleisli.apply { worktreePath =>
+    F.blocking(
+      os
+        .proc("git", "diff", "--name-only", "--diff-filter=U")
+        .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        .out
+        .text()
+        .trim
+        .nonEmpty
+    )
+  }
+
+  def abortMerge: Kleisli[F, os.Path, Unit] =
+  Kleisli.apply { worktreePath =>
+    call(worktreePath, "git", "merge", "--abort").attempt.void
+  }
 
   def cleanupWorktree
       : Kleisli[F, (os.Path, os.Path, BranchName, String => F[Unit]), Unit] =

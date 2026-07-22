@@ -21,6 +21,9 @@ curl -fsSL https://raw.githubusercontent.com/MercurieVV/gh-tasks-llm-executor/ma
   the script only pins which source files to fetch.
 - Drop `--task=123` to let it auto-select the next runnable open issue
   instead of a specific one. `--issue=123` also works.
+- Add `--recursive` to walk each open root task's full dependency tree to
+  closure (including subtasks created mid-run by a split) before moving to
+  the next root, instead of only picking off already-ready leaf tasks.
 - Pin a release instead of always running latest `master` with
   `GH_TASKS_REF`:
 
@@ -59,6 +62,20 @@ only reads this committed file and never calls the network. To refresh it,
 review updated vendor prices into a JSON file with the same schema, then run
 `scala-cli scripts/refresh-model-prices.scala -- /path/to/reviewed-prices.json`
 followed by `scala-cli scripts/discover-agent-runners.scala`.
+
+### Collect agent-runners info
+
+Run from repo root (writes/updates
+`.gh-tasks-llm-executor/agent-runners.json` in place):
+
+```bash
+scala-cli scripts/discover-agent-runners.scala
+```
+
+Probes locally installed CLIs (`claude`, `codex`, `gemini`, ...) for
+availability/version, cross-references `model-prices.json` for pricing, and
+regenerates the runner list the executor selects from at run time — rerun it
+whenever installed agent CLIs or their models change.
 
 ## What it does
 

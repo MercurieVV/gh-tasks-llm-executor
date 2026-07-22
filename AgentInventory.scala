@@ -1,4 +1,10 @@
 import cats.effect.kernel.Sync
+import cats.data.Kleisli
+
+opaque type Id = String
+object Id:
+  def apply(value: String): Id = value
+  extension (self: Id) def value: String = self
 
 opaque type AgentToolId = String
 object AgentToolId:
@@ -32,10 +38,10 @@ final case class AgentTool(
       math.round(raw * 1000.0) / 1000.0
 
   def runner: TaskRunner =
-    TaskRunner(agent = agent, model = model, effort = effort, version = version)
+    TaskRunner(agent = Agent(agent), model = model, effort = effort, version = version)
 
   def matches(runner: TaskRunner): Boolean =
-    agent.equalsIgnoreCase(runner.agent) &&
+    agent.equalsIgnoreCase(runner.agent.value) &&
       optionMatches(model, runner.model) &&
       optionMatches(effort, runner.effort) &&
       versionMatches(version, runner.version)
@@ -145,8 +151,10 @@ object AgentInventory:
     )
   )
 
-  def loadF[F[_]: Sync](root: os.Path): F[AgentInventory] =
+  def loadF[F[_]: Sync]: Kleisli[F, os.Path, AgentInventory] =
+  Kleisli.apply { root =>
     Sync[F].blocking(load(root))
+  }
 
   def load(root: os.Path): AgentInventory =
     val path = root / RelativeConfigPath

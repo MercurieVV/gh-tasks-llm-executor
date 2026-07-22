@@ -2,11 +2,21 @@ import arrowstep.core.ProgramSays
 import cats.arrow.ArrowChoice
 import cats.syntax.all.*
 
+opaque type Agent = String
+object Agent:
+  def apply(value: String): Agent = value
+  extension (self: Agent) def value: String = self
+
 opaque type BranchName = String
 object BranchName:
   def apply(value: String): BranchName = value.asInstanceOf[BranchName]
   extension (opaqueValue: BranchName) def value: String = opaqueValue.asInstanceOf[String]
   given cats.Eq[BranchName] = cats.Eq.by(_.value)
+
+opaque type Recursive = Boolean
+object Recursive:
+  def apply(value: Boolean): Recursive = value
+  extension (self: Recursive) def value: Boolean = self
 
 opaque type TaskNumber = Int
 object TaskNumber:
@@ -14,17 +24,21 @@ object TaskNumber:
   extension (opaqueValue: TaskNumber) def value: Int = opaqueValue.asInstanceOf[Int]
   given cats.Eq[TaskNumber] = cats.Eq.by(_.value)
 
-
-final case class AppInput(root: os.Path, taskNumber: Option[TaskNumber])
+final case class AppInput(
+    root: os.Path,
+    taskNumber: Option[TaskNumber],
+    recursive: Recursive = Recursive(false)
+)
 
 final case class RunContext(
     root: os.Path,
     agentInventory: AgentInventory,
-    taskNumber: Option[TaskNumber]
+    taskNumber: Option[TaskNumber],
+    recursive: Recursive = Recursive(false)
 )
 
 final case class TaskRunner(
-    agent: String,
+    agent: Agent,
     model: Option[String],
     effort: Option[String],
     version: Option[String]
@@ -36,17 +50,17 @@ final case class TaskRunner(
     s"agent: $agent$modelPart$effortPart$versionPart"
 
   def command(
-      prompt: String,
+      prompt: Prompt,
       allowedTools: Seq[String] = Nil,
       jsonSchema: Option[String] = None
   ): Seq[String] =
-    agent match
+    agent.value match
       case "claude" =>
-        Seq(agent) ++ model.toList.flatMap(value => Seq("--model", value)) ++
+        Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
           (if allowedTools.isEmpty then Nil
            else Seq("--allowedTools") ++ allowedTools) ++
           jsonSchema.toList.flatMap(schema => Seq("--json-schema", schema)) ++
-          Seq("-p", prompt)
+          Seq("-p", prompt.value)
       case "codex" =>
         val mappedModel = (model, effort) match
           case (Some("gpt-5") | Some("gpt-5-codex"), Some("medium")) =>
@@ -56,18 +70,18 @@ final case class TaskRunner(
           case (Some("gpt-5") | Some("gpt-5-codex"), Some("low")) =>
             Some("gpt-5.6-luna")
           case _ => model
-        Seq(agent, "exec") ++
+        Seq(agent.value, "exec") ++
           mappedModel.toList.flatMap(value => Seq("--model", value)) ++
           effort.toList.flatMap(value =>
             Seq("--config", s"model_reasoning_effort=$value")
           ) ++
-          Seq(prompt)
+          Seq(prompt.value)
       case "aider" =>
-        Seq(agent) ++ model.toList.flatMap(value => Seq("--model", value)) ++
-          Seq("--yes-always", "--no-auto-commits", "--message", prompt)
+        Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
+          Seq("--yes-always", "--no-auto-commits", "--message", prompt.value)
       case _ =>
-        Seq(agent) ++ model.toList.flatMap(value => Seq("-m", value)) ++
-          Seq("-p", prompt)
+        Seq(agent.value) ++ model.toList.flatMap(value => Seq("-m", value)) ++
+          Seq("-p", prompt.value)
 
 final case class RunnableTask(
     context: RunContext,
@@ -106,14 +120,14 @@ final case class TaskWithPrompt(
     replayContext: Option[String]
 )
 
-final case class TaskWithOutput(run: TaskRun, output: String)
+final case class TaskWithOutput(run: TaskRun, output: Output)
 
 final case class NeedsUserInput(run: TaskRun, questions: String)
 
 final case class SplitTask(run: TaskRun)
 
 final case class TaskEvaluation(
-    body: String,
+    body: Body,
     questions: Option[String],
     execution: String
 )
@@ -163,7 +177,7 @@ final case class RunSummary(
           ujson.Obj.from(
             Seq(
               "number" -> ujson.Num(issue.number.value),
-              "title" -> ujson.Str(issue.title),
+              "title" -> ujson.Str(issue.title.value),
               "state" -> ujson.Str(issue.state)
             )
           )

@@ -1,6 +1,7 @@
 import cats.effect.Resource
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
+import cats.data.Kleisli
 
 final class IssueAlreadyClaimedException(taskNumber: TaskNumber)
     extends RuntimeException(
@@ -18,17 +19,16 @@ object IssueClaim:
       taskNumber: TaskNumber,
       progress: String => F[Unit]
   ): Resource[F, Unit] =
-    Resource.make(claim[F](root, taskNumber, progress))(_ =>
-      release[F](root, taskNumber, progress)
+    Resource.make(claim[F](progress).run((root, taskNumber)))(_ =>
+      release[F](progress).run((root, taskNumber))
     )
 
   private val StaleThresholdSeconds = 4 * 60 * 60 // 4 hours
 
-  private def checkAndReleaseIfStale[F[_]](
-      root: os.Path,
-      taskNumber: TaskNumber,
-      progress: String => F[Unit]
-  )(using F: Sync[F]): F[Boolean] =
+  private def checkAndReleaseIfStale[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, (os.Path, TaskNumber), Boolean] =
+    Kleisli.apply { case (root, taskNumber) =>
     val ref = refName(taskNumber)
     for
       _ <- progress(s"Checking if claim on task #$taskNumber is stale...")
@@ -69,12 +69,12 @@ object IssueClaim:
           yield isStale
         else F.pure(false)
     yield stale
+  }
 
-  private def claim[F[_]](
-      root: os.Path,
-      taskNumber: TaskNumber,
-      progress: String => F[Unit]
-  )(using F: Sync[F]): F[Unit] =
+  private def claim[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, (os.Path, TaskNumber), Unit] =
+    Kleisli.apply { case (root, taskNumber) =>
     val uuid = java.util.UUID.randomUUID().toString
     for
       _ <- progress(s"Claiming task #$taskNumber...")
@@ -99,10 +99,10 @@ object IssueClaim:
         else
           val stderr = result.err.text()
           if isRefConflict(stderr) then
-            checkAndReleaseIfStale[F](root, taskNumber, progress).flatMap {
+            checkAndReleaseIfStale[F](progress).run((root, taskNumber)).flatMap {
               case true =>
                 // Stale lock was released, try again
-                claim[F](root, taskNumber, progress)
+                claim[F](progress).run((root, taskNumber))
               case false =>
                 F.raiseError(IssueAlreadyClaimedException(taskNumber))
             }
@@ -113,18 +113,19 @@ object IssueClaim:
               )
             )
     yield ()
+  }
 
-  private def release[F[_]](
-      root: os.Path,
-      taskNumber: TaskNumber,
-      progress: String => F[Unit]
-  )(using F: Sync[F]): F[Unit] =
+  private def release[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, (os.Path, TaskNumber), Unit] =
+    Kleisli.apply { case (root, taskNumber) =>
     progress(s"Releasing claim on task #$taskNumber...") *>
       F.blocking(
         os.proc("git", "push", "origin", "--delete", refName(taskNumber))
           .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
       ).attempt
         .void
+  }
 
   private def isRefConflict(stderr: String): Boolean =
     val lower = stderr.toLowerCase
@@ -132,4 +133,4 @@ object IssueClaim:
     lower.contains("fetch first") || lower.contains("non-fast-forward")
 
   private def refName(taskNumber: TaskNumber): String =
-    s"refs/gh-tasks-llm-executor/claims/task-$taskNumber"
+    s"refs/gh-tasks-llm-executor/claims/task-${taskNumber.value}"

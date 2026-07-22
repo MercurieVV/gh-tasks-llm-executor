@@ -66,7 +66,7 @@ class AgentInventorySuite extends CatsEffectSuite:
     assert(
       codexTool.matches(
         TaskRunner(
-          agent = "codex",
+          agent = Agent("codex"),
           model = Some("gpt-5-codex"),
           effort = Some("medium"),
           version = Some("0.144.4")
@@ -76,7 +76,7 @@ class AgentInventorySuite extends CatsEffectSuite:
     assert(
       claudeTool.matches(
         TaskRunner(
-          agent = "claude",
+          agent = Agent("claude"),
           model = Some("sonnet"),
           effort = None,
           version = Some("2.1.210")
@@ -86,7 +86,7 @@ class AgentInventorySuite extends CatsEffectSuite:
     assert(
       !codexTool.matches(
         TaskRunner(
-          agent = "codex",
+          agent = Agent("codex"),
           model = Some("gpt-5-codex"),
           effort = Some("medium"),
           version = Some("0.144.3")
