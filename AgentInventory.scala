@@ -6,8 +6,15 @@ object Id:
   def apply(value: String): Id = value
   extension (self: Id) def value: String = self
 
+opaque type AgentToolId = String
+object AgentToolId:
+  def apply(value: String): AgentToolId = value.asInstanceOf[AgentToolId]
+  extension (opaqueValue: AgentToolId) def value: String = opaqueValue.asInstanceOf[String]
+  given cats.Eq[AgentToolId] = cats.Eq.by(_.value)
+
+
 final case class AgentTool(
-    id: Id,
+    id: AgentToolId,
     agent: String,
     model: Option[String],
     effort: Option[String],
@@ -129,7 +136,7 @@ object AgentInventory:
   private val Fallback = AgentInventory(
     List(
       AgentTool(
-        id = Id("claude-opus"),
+        id = AgentToolId("claude-opus"),
         agent = "claude",
         model = Some("opus"),
         effort = None,
@@ -166,7 +173,7 @@ object AgentInventory:
       case ujson.Obj(fields) =>
         for id <- stringField(fields, "id")
         yield AgentTool(
-          id = Id(id),
+          id = AgentToolId(id),
           agent = stringField(fields, "agent").getOrElse(id),
           model = stringField(fields, "model"),
           effort = stringField(fields, "effort"),

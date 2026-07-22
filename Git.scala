@@ -2,16 +2,11 @@ import cats.data.Kleisli
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
-opaque type BranchName = String
-object BranchName:
-  def apply(value: String): BranchName = value
-  extension (self: BranchName) def value: String = self
-
 final class Git[F[_]](using F: Sync[F]):
 
   def acquireWorktree: Kleisli[
     F,
-    (os.Path, os.Path, BranchName, Option[String], String => F[Unit]),
+    (os.Path, os.Path, BranchName, Option[BranchName], String => F[Unit]),
     Unit
   ] =
     Kleisli.apply {
@@ -21,13 +16,13 @@ final class Git[F[_]](using F: Sync[F]):
             progress(
               s"Leftover worktree detected at $worktreePath. Cleaning up..."
             ) *> (releaseWorktree.local[
-              (os.Path, os.Path, BranchName, Option[String], String => F[Unit])
+              (os.Path, os.Path, BranchName, Option[BranchName], String => F[Unit])
             ] {
               case (
                     root: os.Path,
                     worktreePath: os.Path,
                     branchName: BranchName,
-                    _: Option[String],
+                    _: Option[BranchName],
                     progress: (String => F[Unit])
                   ) =>
                 (root, worktreePath, branchName, progress)
@@ -39,7 +34,7 @@ final class Git[F[_]](using F: Sync[F]):
               "branch",
               "-D",
               branchName.value
-            ).attempt.void *> branchExistsOnOrigin((root, branchName.value)).flatMap {
+            ).attempt.void *> branchExistsOnOrigin((root, branchName)).flatMap {
               case true =>
                 progress(
                   s"Remote branch origin/$branchName found. Recreating worktree tracking remote..."
@@ -71,7 +66,7 @@ final class Git[F[_]](using F: Sync[F]):
                     "-b",
                     branchName.value,
                     worktreePath.toString
-                  ) ++ baseBranch.toList*
+                  ) ++ baseBranch.toList.map(_.value)*
                 )
             }
         }
@@ -85,7 +80,7 @@ final class Git[F[_]](using F: Sync[F]):
   // on first use, from wherever HEAD currently is.
   def ensureBranch(
       root: os.Path,
-      branchName: String,
+      branchName: BranchName,
       progress: String => F[Unit]
   ): F[Unit] =
     branchExistsLocally((root, branchName)).flatMap {
@@ -101,30 +96,30 @@ final class Git[F[_]](using F: Sync[F]):
                   root,
                   "git",
                   "branch",
-                  branchName,
+                  branchName.value,
                   s"origin/$branchName"
                 )
               case false =>
                 progress(s"Creating integration branch $branchName...") *>
-                  call(root, "git", "branch", branchName) *>
-                  call(root, "git", "push", "-u", "origin", branchName)
+                  call(root, "git", "branch", branchName.value) *>
+                  call(root, "git", "push", "-u", "origin", branchName.value)
             }
           else
             progress(s"Creating integration branch $branchName...") *>
-              call(root, "git", "branch", branchName)
+              call(root, "git", "branch", branchName.value)
         }
     }
 
-  private def branchExistsLocally: Kleisli[F, (os.Path, String), Boolean] =
+  private def branchExistsLocally: Kleisli[F, (os.Path, BranchName), Boolean] =
     Kleisli.apply { case (root, branchName) =>
       F.blocking {
-        os.proc("git", "rev-parse", "--verify", branchName)
+        os.proc("git", "rev-parse", "--verify", branchName.value)
           .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
           .exitCode === 0
       }
     }
 
-  private def branchExistsOnOrigin: Kleisli[F, (os.Path, String), Boolean] =
+  private def branchExistsOnOrigin: Kleisli[F, (os.Path, BranchName), Boolean] =
     Kleisli.apply { case (root, branchName) =>
       F.blocking {
         os.proc("git", "rev-parse", "--verify", s"origin/$branchName")
@@ -175,7 +170,7 @@ final class Git[F[_]](using F: Sync[F]):
   // ref is additionally pushed to origin, when a remote exists, as an offsite
   // backup.
   def preserveUnpushedCommits
-      : Kleisli[F, (os.Path, BranchName, Option[String], String => F[Unit]), Unit] =
+      : Kleisli[F, (os.Path, BranchName, Option[BranchName], String => F[Unit]), Unit] =
     Kleisli.apply { case (worktreePath, branchName, baseBranch, progress) =>
       hasPublishableCommits((worktreePath, branchName, baseBranch)).flatMap {
         case false =>
@@ -227,12 +222,12 @@ final class Git[F[_]](using F: Sync[F]):
     }
 
   def hasPublishableCommits
-      : Kleisli[F, (os.Path, BranchName, Option[String]), Boolean] =
+      : Kleisli[F, (os.Path, BranchName, Option[BranchName]), Boolean] =
     Kleisli.apply { case (worktreePath, branchName, baseBranch) =>
       F.blocking {
-        val remoteBranch = s"origin/$branchName"
+        val remoteBranch = BranchName(s"origin/$branchName")
         val hasRemoteBranch = os
-          .proc("git", "rev-parse", "--verify", remoteBranch)
+          .proc("git", "rev-parse", "--verify", remoteBranch.value)
           .call(
             cwd = worktreePath,
             stdout = os.Pipe,
@@ -243,18 +238,10 @@ final class Git[F[_]](using F: Sync[F]):
         val baseRef =
           if (hasRemoteBranch) remoteBranch
           else
-            baseBranch.getOrElse {
-              val hasMaster = os
-                .proc("git", "rev-parse", "--verify", "master")
-                .call(
-                  cwd = worktreePath,
-                  stdout = os.Pipe,
-                  stderr = os.Pipe,
-                  check = false
-                )
-                .exitCode === 0
-              if (hasMaster) "master" else "main"
-            }
+            baseBranch.getOrElse(BranchName({
+  val hasMaster = os.proc("git", "rev-parse", "--verify", "master").call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false).exitCode === 0
+  if (hasMaster) "master" else "main"
+}))
         val result = os
           .proc("git", "rev-list", "--count", s"$baseRef..HEAD")
           .call(
@@ -370,7 +357,7 @@ final class Git[F[_]](using F: Sync[F]):
 
   def mergeLocally: Kleisli[
     F,
-    (os.Path, os.Path, BranchName, Option[String], String => F[Unit]),
+    (os.Path, os.Path, BranchName, Option[BranchName], String => F[Unit]),
     Unit
   ] =
     Kleisli.apply {
@@ -383,8 +370,8 @@ final class Git[F[_]](using F: Sync[F]):
               .text()
               .trim
           )
-          targetBranch = baseBranch.getOrElse(currentBranch)
-          switchesBranch = targetBranch =!= currentBranch
+          targetBranch = baseBranch.getOrElse(BranchName(currentBranch))
+          switchesBranch = targetBranch =!= BranchName(currentBranch)
           _ <- progress(s"Removing worktree at $worktreePath")
           _ <- call(
             root,
@@ -396,7 +383,7 @@ final class Git[F[_]](using F: Sync[F]):
           )
           _ <- baseBranch.traverse_(ensureBranch(root, _, progress))
           _ <-
-            if switchesBranch then call(root, "git", "checkout", targetBranch)
+            if switchesBranch then call(root, "git", "checkout", targetBranch.value)
             else F.unit
           _ <- progress(s"Merging branch $branchName into $targetBranch...")
           _ <- call(root, "git", "merge", branchName.value)

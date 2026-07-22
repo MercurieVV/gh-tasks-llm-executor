@@ -7,21 +7,33 @@ object Agent:
   def apply(value: String): Agent = value
   extension (self: Agent) def value: String = self
 
+opaque type BranchName = String
+object BranchName:
+  def apply(value: String): BranchName = value.asInstanceOf[BranchName]
+  extension (opaqueValue: BranchName) def value: String = opaqueValue.asInstanceOf[String]
+  given cats.Eq[BranchName] = cats.Eq.by(_.value)
+
 opaque type Recursive = Boolean
 object Recursive:
   def apply(value: Boolean): Recursive = value
   extension (self: Recursive) def value: Boolean = self
 
+opaque type TaskNumber = Int
+object TaskNumber:
+  def apply(value: Int): TaskNumber = value.asInstanceOf[TaskNumber]
+  extension (opaqueValue: TaskNumber) def value: Int = opaqueValue.asInstanceOf[Int]
+  given cats.Eq[TaskNumber] = cats.Eq.by(_.value)
+
 final case class AppInput(
     root: os.Path,
-    taskNumber: Option[Int],
+    taskNumber: Option[TaskNumber],
     recursive: Recursive = Recursive(false)
 )
 
 final case class RunContext(
     root: os.Path,
     agentInventory: AgentInventory,
-    taskNumber: Option[Int],
+    taskNumber: Option[TaskNumber],
     recursive: Recursive = Recursive(false)
 )
 
@@ -99,7 +111,7 @@ final case class TaskRun(
     // instead of the default branch, so sibling subtasks land together in
     // one final merge (GitHub.checkParentsForCompletion) rather than each
     // hitting the default branch independently.
-    baseBranch: Option[String]
+    baseBranch: Option[BranchName]
 )
 
 final case class TaskWithPrompt(
@@ -137,7 +149,7 @@ final case class PublishRequest(
     root: os.Path,
     worktreePath: os.Path,
     branchName: BranchName,
-    baseBranch: Option[String],
+    baseBranch: Option[BranchName],
     task: Issue,
     finalization: AgentFinalization,
     runner: TaskRunner
@@ -164,7 +176,7 @@ final case class RunSummary(
         "task" -> task.fold[ujson.Value](ujson.Null) { issue =>
           ujson.Obj.from(
             Seq(
-              "number" -> ujson.Num(issue.number),
+              "number" -> ujson.Num(issue.number.value),
               "title" -> ujson.Str(issue.title.value),
               "state" -> ujson.Str(issue.state)
             )

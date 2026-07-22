@@ -56,8 +56,24 @@ object BaseRefName2:
   def apply(value: String): BaseRefName2 = value
   extension (self: BaseRefName2) def value: String = self
 
+opaque type CommitSha = String
+object CommitSha:
+  def apply(value: String): CommitSha = value.asInstanceOf[CommitSha]
+  extension (opaqueValue: CommitSha)
+    def value: String = opaqueValue.asInstanceOf[String]
+  given cats.Eq[CommitSha] = cats.Eq.by(_.value)
+
+opaque type DeadlineMillis = Long
+object DeadlineMillis:
+  def apply(value: Long): DeadlineMillis = value.asInstanceOf[DeadlineMillis]
+  extension (opaqueValue: DeadlineMillis)
+    def value: Long = opaqueValue.asInstanceOf[Long]
+    def +(another: DeadlineMillis): DeadlineMillis =
+      DeadlineMillis(opaqueValue.value + another.value)
+  given cats.Eq[DeadlineMillis] = cats.Eq.by(_.value)
+
 final case class Issue(
-    number: Int,
+    number: TaskNumber,
     title: Title,
     body: Body,
     state: String,
@@ -71,9 +87,13 @@ object GitHub:
         s"No open Pull Request found for $branchName to resume."
       )
 
-  private val PullRequestCheckTimeoutMillis = 30.minutes.toMillis
-  private val PullRequestCheckPollMillisV = PullRequestCheckPollMillis(30.seconds.toMillis)
-  private val PullRequestNoChecksGraceMillis = 3.minutes.toMillis
+  private val PullRequestCheckTimeoutMillis = DeadlineMillis(
+    30.minutes.toMillis
+  )
+  private val PullRequestCheckPollMillis = DeadlineMillis(30.seconds.toMillis)
+  private val PullRequestNoChecksGraceMillis = DeadlineMillis(
+    3.minutes.toMillis
+  )
 
   def fetchIssues[F[_]: Sync]: Kleisli[F, os.Path, List[Issue]] =
   Kleisli.apply { root =>
@@ -103,7 +123,7 @@ object GitHub:
       case ujson.Obj(fields) =>
         for
           number <- fields.get("number").collect { case ujson.Num(value) =>
-            value.toInt
+            TaskNumber(value.toInt)
           }
           title <- fields.get("title").collect { case ujson.Str(value) =>
             value
@@ -246,26 +266,27 @@ object GitHub:
   private val PullRequestMentionRegex =
     """(?i)\bPR\s*#(\d+)|/pull/(\d+)""".r
 
-  def getDependencies(body: Body): List[Int] =
+  def getDependencies(body: Body): List[TaskNumber] =
     body.value.linesIterator
       .flatMap { line =>
         val lower = line.toLowerCase
         if DepLineKeywords.exists(keyword => lower.contains(keyword)) then
-          IssueNumRegex.findAllMatchIn(line).map(_.group(1).toInt)
+          IssueNumRegex.findAllMatchIn(line).map(_.group(1).toInt).map(TaskNumber.apply)
         else Nil
       }
       .toList
       .distinct
 
-  def parentIds(issue: Issue): List[Int] =
+  def parentIds(issue: Issue): List[TaskNumber] =
     issue.body.value.linesIterator
       .flatMap(line => ParentRegex.findAllMatchIn(line).map(_.group(1).toInt))
       .toList
       .distinct
+      .map(TaskNumber(_))
 
   def hasUnresolvedDependencies(
       issue: Issue,
-      openIssueNumbers: Set[Int]
+      openIssueNumbers: Set[TaskNumber]
   ): Boolean =
     getDependencies(issue.body).exists(openIssueNumbers.contains)
 
@@ -275,7 +296,7 @@ object GitHub:
   def dependencyConclusion[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, Issue), Option[String]] =
   Kleisli.apply { case (root, task) =>
     getDependencies(task.body).distinct
-      .traverse(id => singleDependencyConclusion(progress)((root, id)))
+      .traverse(id => singleDependencyConclusion(progress).run((root, id)))
       .map { conclusions =>
         val rendered = conclusions.flatten.map { case (id, comment) =>
           s"- #$id: $comment"
@@ -284,7 +305,7 @@ object GitHub:
       }
   }
 
-  private def singleDependencyConclusion[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, Int), Option[(Int, String)]] =
+  private def singleDependencyConclusion[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, TaskNumber), Option[(TaskNumber, String)]] =
   Kleisli.apply { case (root, dependencyId) =>
     progress(
       s"Found dependency task #$dependencyId. Fetching conclusion comment..."
@@ -360,7 +381,7 @@ object GitHub:
           }(pullRequest => List(pullRequest).pure[F])
       yield historicalPullRequests
 
-    def loop(deadlineMillis: Long): F[Unit] =
+    def loop(deadlineMillis: DeadlineMillis): F[Unit] =
       for
         now <- F.blocking(System.currentTimeMillis())
         pullRequests <- pullRequests
@@ -369,7 +390,7 @@ object GitHub:
         _ <- failure match
           case Some(message) =>
             F.raiseError(new RuntimeException(message))
-          case None if now >= deadlineMillis && pending.nonEmpty =>
+          case None if now >= deadlineMillis.value && pending.nonEmpty =>
             F.raiseError(
               new RuntimeException(
                 s"Timed out waiting for related replay CI: ${pending.get}"
@@ -379,7 +400,7 @@ object GitHub:
             pending match
               case Some(message) =>
                 progress(message) *>
-                  F.blocking(Thread.sleep(PullRequestCheckPollMillisV.value)) *>
+                  F.blocking(Thread.sleep(PullRequestCheckPollMillis.value)) *>
                   loop(deadlineMillis)
               case None if pullRequests.nonEmpty =>
                 progress(
@@ -393,21 +414,21 @@ object GitHub:
 
     for
       _ <- progress(
-        s"Waiting for related replay CI on task #${task.number} with ${PullRequestCheckTimeoutMillis / 1000}s timeout..."
+        s"Waiting for related replay CI on task #${task.number} with ${PullRequestCheckTimeoutMillis.value / 1000}s timeout..."
       )
       started <- F.blocking(System.currentTimeMillis())
-      _ <- loop(started + PullRequestCheckTimeoutMillis)
+      _ <- loop(DeadlineMillis(started) + PullRequestCheckTimeoutMillis)
     yield ()
   }
 
   def hasOpenPullRequestForBranch[F[_]: Sync]: Kleisli[F, (os.Path, BranchName), Boolean] =
   Kleisli.apply { case (root, branchName) =>
-    pullRequestForBranch((root, branchName.value)).map(_.exists(_.state === "OPEN"))
+    pullRequestForBranch((root, branchName)).map(_.exists(_.state === "OPEN"))
   }
 
   private final case class IssueHistory(
       comments: List[IssueComment],
-      pullRequests: List[Int]
+      pullRequests: List[TaskNumber]
   )
 
   private final case class IssueComment(
@@ -416,7 +437,7 @@ object GitHub:
       body: Body2
   )
 
-  private def issueHistory[F[_]: Sync]: Kleisli[F, (os.Path, Int), IssueHistory] =
+  private def issueHistory[F[_]: Sync]: Kleisli[F, (os.Path, TaskNumber), IssueHistory] =
   Kleisli.apply { case (root, taskId) =>
     callOutput(
       root,
@@ -444,8 +465,10 @@ object GitHub:
             values.toList.flatMap(parsePullRequestNumber)
           }
           .getOrElse(Nil)
+          .map(TaskNumber.apply)
         val mentionedPullRequests =
           comments.flatMap(comment => pullRequestMentions(comment.body))
+            .map(TaskNumber.apply)
         IssueHistory(comments, (pullRequests ++ mentionedPullRequests).distinct)
     }
 
@@ -495,13 +518,13 @@ object GitHub:
       number: Int,
       state: String,
       url: String,
-      baseRefName: BaseRefName2,
-      headRefName: String,
-      mergeCommit: Option[String],
+      baseRefName: BranchName,
+      headRefName: BranchName,
+      mergeCommit: Option[CommitSha],
       runs: List[WorkflowRun]
   )
 
-  private def pullRequestReplayContext[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, Int), Option[PullRequestReplay]] =
+  private def pullRequestReplayContext[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, TaskNumber), Option[PullRequestReplay]] =
   Kleisli.apply { case (root, number) =>
     callOutputUnchecked(
       root,
@@ -523,7 +546,7 @@ object GitHub:
 
   private def pullRequestReplayForBranch[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, BranchName), Option[PullRequestReplay]] =
   Kleisli.apply { case (root, branchName) =>
-    pullRequestForBranch((root, branchName.value)).flatMap {
+    pullRequestForBranch((root, branchName)).flatMap {
       case Some(pullRequest) =>
         pullRequestReplayContext((root, pullRequest.number))
       case None => F.pure(None)
@@ -548,25 +571,28 @@ object GitHub:
           .get("url")
           .collect { case ujson.Str(value) => value }
           .getOrElse(""),
-        baseRefName = BaseRefName2(fields
-          .get("baseRefName")
-          .collect { case ujson.Str(value) => value }
-          .getOrElse("")),
-        headRefName = fields
+        baseRefName = BranchName(
+          fields
+            .get("baseRefName")
+            .collect { case ujson.Str(value) => value }
+            .getOrElse("")
+        ),
+        headRefName = BranchName(fields
           .get("headRefName")
           .collect { case ujson.Str(value) => value }
-          .getOrElse(""),
+          .getOrElse("")),
         mergeCommit = fields
           .get("mergeCommit")
           .collect { case ujson.Obj(commitFields) =>
             commitFields.get("oid").collect { case ujson.Str(value) => value }
           }
-          .flatten,
+          .flatten
+          .map(CommitSha.apply),
         runs = Nil
       )
     }
 
-  private def workflowRuns[F[_]: Sync]: Kleisli[F, (os.Path, BaseRefName2, String), List[WorkflowRun]] =
+  private def workflowRuns[F[_]: Sync]: Kleisli[F, (os.Path, BranchName, CommitSha), List[WorkflowRun]] =
   Kleisli.apply { case (root, branchName, commitSha) =>
     callOutputUnchecked(
       root,
@@ -576,7 +602,7 @@ object GitHub:
       "--branch",
       branchName.value,
       "--commit",
-      commitSha,
+      commitSha.value,
       "--limit",
       "100",
       "--json",
@@ -712,7 +738,7 @@ ${runner.display}
   // Chronological (oldest first) bodies of comments this script posted to
   // persist TaskMetadata, so TaskMetadataStore can fold them into one merged
   // view without ever touching the issue body.
-  def metadataCommentBodies[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, Int), List[Body2]] =
+  def metadataCommentBodies[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, TaskNumber), List[Body2]] =
   Kleisli.apply { case (root, taskId) =>
     issueHistory((root, taskId))
       .handleErrorWith(_ => F.pure(IssueHistory(Nil, Nil)))
@@ -725,7 +751,7 @@ ${runner.display}
       )
   }
 
-  def commentTaskMetadata[F[_]](progress: String => F[Unit])(using Sync[F]): Kleisli[F, (os.Path, Int, Body), Unit] =
+  def commentTaskMetadata[F[_]](progress: String => F[Unit])(using Sync[F]): Kleisli[F, (os.Path, TaskNumber, Body), Unit] =
   Kleisli.apply { case (root, taskId, metadataText) =>
     progress(s"Leaving metadata comment on task #$taskId...") *>
       call(
@@ -870,11 +896,11 @@ This parent task will not be implemented directly. Run child tasks first; when a
     }
   }
 
-  private def mergeIntegrationBranch[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, Int), Unit] =
+  private def mergeIntegrationBranch[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, TaskNumber), Unit] =
   Kleisli.apply { case (root, parentId) =>
-    val branchName = s"task-$parentId"
+    val branchName = BranchName(s"task-$parentId")
     F.blocking {
-      os.proc("git", "rev-parse", "--verify", branchName)
+      os.proc("git", "rev-parse", "--verify", branchName.value)
         .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
         .exitCode === 0
     }.flatMap {
@@ -884,10 +910,17 @@ This parent task will not be implemented directly. Run child tasks first; when a
         )
       case true =>
         for
-          pullRequest <- ensurePullRequest(progress)((root, branchName, None, parentId, Title(s"Integrate subtasks for #$parentId"), Some(s"Integrate subtasks for #$parentId"), Some(s"Merges completed subtasks of #$parentId into the default branch.\n\nCloses #$parentId")))
-          _ <- awaitPullRequestChecks(progress)((root, pullRequest.number.toString, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillisV))
+          pullRequest <- ensurePullRequest(progress).run((root, branchName, None, parentId, Title(s"Integrate subtasks for #$parentId"), Some(s"Integrate subtasks for #$parentId"), Some(s"Merges completed subtasks of #$parentId into the default branch.\n\nCloses #$parentId")))
+          _ <- awaitPullRequestChecks(progress).run((root, BranchName(pullRequest.number.value.toString), PullRequestCheckTimeoutMillis, PullRequestCheckPollMillis))
           _ <- progress("Merging integration Pull Request...")
-          mergeResult <- call(root, "gh", "pr", "merge", pullRequest.number.toString, "--merge").as(true).handleErrorWith { error =>
+          mergeResult <- call(
+            root,
+            "gh",
+            "pr",
+            "merge",
+            pullRequest.number.toString,
+            "--merge"
+          ).as(true).handleErrorWith { error =>
             val msg = error.getMessage.toLowerCase
             val isConflict = msg.contains("conflict") || msg
               .contains("mergeable") || msg.contains("fail")
@@ -917,7 +950,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
             if mergeResult then
               for
                 merged <- mergedPullRequest((root, pullRequest.number))
-                _ <- awaitBranchChecks(progress)((root, merged.baseRefName, merged.mergeCommit, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillisV))
+                _ <- awaitBranchChecks(progress)((root, merged.baseRefName, merged.mergeCommit, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillis))
                 _ <- setIssueStatus(progress)((root, parentId, "completed"))
                 _ <- closeIssue((root, parentId))
               yield ()
@@ -929,10 +962,10 @@ This parent task will not be implemented directly. Run child tasks first; when a
   // Assumes the branch has already been pushed (see Git[F].push in main.scala's
   // publishRemote, which owns the push-failure repair/retry loop) — this just
   // opens/reuses the PR and merges it.
-  def createAndMergePr[F[_]](progress: String => F[Unit])(using Sync[F]): Kleisli[F, (os.Path, os.Path, BranchName, Option[String], Issue, Option[String], Option[String]), Unit] =
+  def createAndMergePr[F[_]](progress: String => F[Unit])(using Sync[F]): Kleisli[F, (os.Path, os.Path, BranchName, Option[BranchName], Issue, Option[String], Option[String]), Unit] =
   Kleisli.apply { case (root, worktreePath, branchName, baseBranch, task, pullRequestTitle, pullRequestBody) =>
     for
-      pullRequest <- ensurePullRequest(progress)((worktreePath, branchName.value, baseBranch, task.number, task.title, pullRequestTitle, pullRequestBody))
+      pullRequest <- ensurePullRequest(progress).run((worktreePath, branchName, baseBranch, task.number, task.title, pullRequestTitle, pullRequestBody))
       _ <- mergeAndVerify(progress)((root, pullRequest))
     yield ()
   }
@@ -944,7 +977,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
   private def mergeAndVerify[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, PullRequest), Unit] =
   Kleisli.apply { case (root, pullRequest) =>
     for
-      _ <- awaitPullRequestChecks(progress)((root, pullRequest.number.toString, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillisV))
+      _ <- awaitPullRequestChecks(progress)((root, BranchName(pullRequest.number.value.toString), PullRequestCheckTimeoutMillis, PullRequestCheckPollMillis))
       _ <- progress("Merging Pull Request...")
       _ <- call(
         root,
@@ -957,7 +990,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       merged <- mergedPullRequest((root, pullRequest.number))
       _ <-
         if merged.baseRefName.value === "master" || merged.baseRefName.value === "main" then
-          awaitBranchChecks(progress)((root, merged.baseRefName, merged.mergeCommit, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillisV))
+          awaitBranchChecks(progress)((root, merged.baseRefName, merged.mergeCommit, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillis))
         else
           progress(
             s"Skipping branch checks for non-default base branch ${merged.baseRefName.value}."
@@ -973,7 +1006,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
   // verify the base branch's post-merge CI.
   def resumeOpenPullRequest[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, BranchName), Unit] =
   Kleisli.apply { case (root, branchName) =>
-    pullRequestForBranch((root, branchName.value)).flatMap {
+    pullRequestForBranch((root, branchName)).flatMap {
       case Some(pullRequest) if pullRequest.state === "OPEN" =>
         progress(
           s"Found open Pull Request #${pullRequest.number} for $branchName; verifying checks and merging..."
@@ -985,9 +1018,9 @@ This parent task will not be implemented directly. Run child tasks first; when a
     }
   }
 
-  private final case class PullRequest(number: Int, state: String)
+  private final case class PullRequest(number: TaskNumber, state: String)
 
-  private def ensurePullRequest[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, String, Option[String], Int, Title, Option[String], Option[String]), PullRequest] =
+  private def ensurePullRequest[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, BranchName, Option[BranchName], TaskNumber, Title, Option[String], Option[String]), PullRequest] =
   Kleisli.apply { case (worktreePath, branchName, baseBranch, taskNumber, taskTitle, pullRequestTitle, pullRequestBody) =>
     pullRequestForBranch((worktreePath, branchName)).flatMap {
       case Some(pullRequest) if pullRequest.state === "OPEN" =>
@@ -1005,14 +1038,16 @@ This parent task will not be implemented directly. Run child tasks first; when a
               "--title",
               pullRequestTitle
                 .filter(_.trim.nonEmpty)
-                .getOrElse(s"Task #$taskNumber: $taskTitle"),
+                .getOrElse(s"Task #$taskNumber: ${taskTitle.value}"),
               "--body",
               pullRequestBody
                 .filter(_.trim.nonEmpty)
                 .getOrElse(s"Closes #$taskNumber"),
               "--head",
-              branchName
-            ) ++ baseBranch.toList.flatMap(base => Seq("--base", base))*
+              branchName.value
+            ) ++ baseBranch.toList
+              .map(_.value)
+              .flatMap(base => Seq("--base", base))*
           ) *>
           pullRequestForBranch((worktreePath, branchName)).flatMap {
             case Some(pullRequest) if pullRequest.state === "OPEN" =>
@@ -1027,14 +1062,14 @@ This parent task will not be implemented directly. Run child tasks first; when a
     }
   }
 
-  private def pullRequestForBranch[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, String), Option[PullRequest]] =
+  private def pullRequestForBranch[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, BranchName), Option[PullRequest]] =
   Kleisli.apply { case (root, branchName) =>
     callOutputUnchecked(
       root,
       "gh",
       "pr",
       "view",
-      branchName,
+      branchName.value,
       "--json",
       "number,state"
     ).map(parsePullRequest)
@@ -1044,7 +1079,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
     Try(ujson.read(output).obj).toOption.flatMap { fields =>
       for
         number <- fields.get("number").collect { case ujson.Num(value) =>
-          value.toInt
+          TaskNumber(value.toInt)
         }
         state <- fields.get("state").collect { case ujson.Str(value) =>
           value.trim.toUpperCase
@@ -1052,13 +1087,16 @@ This parent task will not be implemented directly. Run child tasks first; when a
       yield PullRequest(number, state)
     }
 
-  private def awaitPullRequestChecks[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, String, Long, PullRequestCheckPollMillis), Unit] =
-  (Kleisli.apply { case (root, branchName, timeoutMillis, pollMillis) =>
-    def loop(deadlineMillis: Long, noChecksSince: Option[Long]): F[Unit] =
+  private def awaitPullRequestChecks[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, BranchName, DeadlineMillis, DeadlineMillis), Unit] =
+  Kleisli.apply { case (root, branchName, timeoutMillis, pollMillis) =>
+    def loop(
+        deadlineMillis: DeadlineMillis,
+        noChecksSince: Option[Long]
+    ): F[Unit] =
       for
         now <- F.blocking(System.currentTimeMillis())
         _ <-
-          if now >= deadlineMillis then
+          if now >= deadlineMillis.value then
             F.raiseError(
               new RuntimeException(
                 s"Timed out waiting for Pull Request checks on $branchName."
@@ -1080,9 +1118,10 @@ This parent task will not be implemented directly. Run child tasks first; when a
                     )
                   case false =>
                     val firstSeen = noChecksSince.getOrElse(now)
-                    if now - firstSeen >= PullRequestNoChecksGraceMillis then
+                    if now - firstSeen >= PullRequestNoChecksGraceMillis.value
+                    then
                       progress(
-                        s"$message Proceeding after ${PullRequestNoChecksGraceMillis / 1000}s with no PR checks."
+                        s"$message Proceeding after ${PullRequestNoChecksGraceMillis.value / 1000}s with no PR checks."
                       )
                     else
                       progress(message) *>
@@ -1098,21 +1137,21 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
     for
       _ <- progress(
-        s"Waiting for Pull Request checks on $branchName with ${timeoutMillis / 1000}s timeout..."
+        s"Waiting for Pull Request checks on $branchName with ${timeoutMillis.value / 1000}s timeout..."
       )
       started <- F.blocking(System.currentTimeMillis())
-      _ <- loop(started + timeoutMillis, None)
+      _ <- loop(DeadlineMillis(started) + timeoutMillis, None)
     yield ()
-  })
+  }
 
-  private def pullRequestMergeConflict[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, String), Boolean] =
+  private def pullRequestMergeConflict[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, BranchName), Boolean] =
   Kleisli.apply { case (root, branchName) =>
     callOutputUnchecked(
       root,
       "gh",
       "pr",
       "view",
-      branchName,
+      branchName.value,
       "--json",
       "mergeable"
     ).map { output =>
@@ -1137,14 +1176,14 @@ This parent task will not be implemented directly. Run child tasks first; when a
   private final case class PullRequestChecksFailed(message: String)
       extends PullRequestCheckStatus
 
-  private def pullRequestCheckStatus[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, String), PullRequestCheckStatus] =
+  private def pullRequestCheckStatus[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, BranchName), PullRequestCheckStatus] =
   Kleisli.apply { case (root, branchName) =>
     callOutputUnchecked(
       root,
       "gh",
       "pr",
       "checks",
-      branchName,
+      branchName.value,
       "--json",
       "name,state"
     ).map { output =>
@@ -1192,11 +1231,11 @@ This parent task will not be implemented directly. Run child tasks first; when a
     checks.map(check => s"${check.name}=${check.state}").mkString(", ")
 
   private final case class MergedPullRequest(
-      baseRefName: BaseRefName,
-      mergeCommit: MergeCommit
+      baseRefName: BranchName,
+      mergeCommit: CommitSha
   )
 
-  private def mergedPullRequest[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, Int), MergedPullRequest] =
+  private def mergedPullRequest[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, TaskNumber), MergedPullRequest] =
   Kleisli.apply { case (root, pullRequestNumber) =>
     callOutput(
       root,
@@ -1226,19 +1265,19 @@ This parent task will not be implemented directly. Run child tasks first; when a
         mergeCommit <- fields
           .get("mergeCommit")
           .collect { case ujson.Obj(commitFields) =>
-            commitFields.get("oid").collect { case ujson.Str(value) => value }
+            commitFields.get("oid").collect { case ujson.Str(value) => CommitSha(value) }
           }
           .flatten
-      yield MergedPullRequest(BaseRefName(baseRefName), MergeCommit(mergeCommit))
+      yield MergedPullRequest(BranchName(baseRefName), mergeCommit)
     }
 
-  private def awaitBranchChecks[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, BaseRefName, MergeCommit, Long, PullRequestCheckPollMillis), Unit] =
-  (Kleisli.apply { case (root, branchName, commitSha, timeoutMillis, pollMillis) =>
-    def loop(deadlineMillis: Long): F[Unit] =
+  private def awaitBranchChecks[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, BranchName, CommitSha, DeadlineMillis, DeadlineMillis), Unit] =
+  Kleisli.apply { case (root, branchName, commitSha, timeoutMillis, pollMillis) =>
+    def loop(deadlineMillis: DeadlineMillis): F[Unit] =
       for
         now <- F.blocking(System.currentTimeMillis())
         _ <-
-          if now >= deadlineMillis then
+          if now >= deadlineMillis.value then
             F.raiseError(
               new RuntimeException(
                 s"Timed out waiting for CI on $branchName at $commitSha."
@@ -1259,12 +1298,12 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
     for
       _ <- progress(
-        s"Waiting for CI on $branchName at $commitSha with ${timeoutMillis / 1000}s timeout..."
+        s"Waiting for CI on $branchName at $commitSha with ${timeoutMillis.value / 1000}s timeout..."
       )
       started <- F.blocking(System.currentTimeMillis())
-      _ <- loop(started + timeoutMillis)
+      _ <- loop(DeadlineMillis(started) + timeoutMillis)
     yield ()
-  })
+  }
 
   private sealed trait BranchCheckStatus
 
@@ -1277,7 +1316,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
   private final case class BranchChecksFailed(message: Message)
       extends BranchCheckStatus
 
-  private def branchCheckStatus[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, BaseRefName, MergeCommit), BranchCheckStatus] =
+  private def branchCheckStatus[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, BranchName, CommitSha), BranchCheckStatus] =
   Kleisli.apply { case (root, branchName, commitSha) =>
     callOutputUnchecked(
       root,
@@ -1367,7 +1406,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       )
       .mkString(", ")
 
-  def closeIssue[F[_]: Sync]: Kleisli[F, (os.Path, Int), Unit] =
+  def closeIssue[F[_]: Sync]: Kleisli[F, (os.Path, TaskNumber), Unit] =
   Kleisli.apply { case (root, taskId) =>
     call(
       root,
@@ -1380,7 +1419,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
     )
   }
 
-  def setIssueStatus[F[_]](progress: String => F[Unit])(using Sync[F]): Kleisli[F, (os.Path, Int, String), Unit] =
+  def setIssueStatus[F[_]](progress: String => F[Unit])(using Sync[F]): Kleisli[F, (os.Path, TaskNumber, String), Unit] =
   Kleisli.apply { case (root, taskId, status) =>
     val (toAdd, toRemove) =
       if status === "in progress" then

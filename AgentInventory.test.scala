@@ -19,7 +19,7 @@ class AgentInventorySuite extends CatsEffectSuite:
 
   test("treats missing or zero raw price fields as cost unknown") {
     val unknown = AgentTool(
-      id = Id("unknown"),
+      id = AgentToolId("unknown"),
       agent = "unknown",
       model = Some("unknown"),
       effort = None,
@@ -39,7 +39,7 @@ class AgentInventorySuite extends CatsEffectSuite:
 
   test("matches bare task-metadata version against full probe version string") {
     val codexTool = AgentTool(
-      id = Id("codex-gpt-5-codex-medium"),
+      id = AgentToolId("codex-gpt-5-codex-medium"),
       agent = "codex",
       model = Some("gpt-5-codex"),
       effort = Some("medium"),
@@ -51,7 +51,7 @@ class AgentInventorySuite extends CatsEffectSuite:
       priority = 111
     )
     val claudeTool = AgentTool(
-      id = Id("claude-sonnet"),
+      id = AgentToolId("claude-sonnet"),
       agent = "claude",
       model = Some("sonnet"),
       effort = None,

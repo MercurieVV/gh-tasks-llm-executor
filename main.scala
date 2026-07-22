@@ -35,9 +35,9 @@ object Main extends IOApp:
   private val evaluatorRunner: TaskRunner =
     TaskRunner(Agent("claude"), Some("opus"), None, None)
   private val UserInputWaitMillis =
-    envLong("GH_TASKS_USER_INPUT_WAIT_MINUTES", 120).minutes.toMillis
+    DeadlineMillis(envLong("GH_TASKS_USER_INPUT_WAIT_MINUTES", 120).minutes.toMillis)
   private val UserInputPollMillis =
-    envLong("GH_TASKS_USER_INPUT_POLL_SECONDS", 30).seconds.toMillis
+    DeadlineMillis(envLong("GH_TASKS_USER_INPUT_POLL_SECONDS", 30).seconds.toMillis)
   private val UserInputSoundEnabled =
     sys.env
       .get("GH_TASKS_USER_INPUT_SOUND")
@@ -308,7 +308,7 @@ object Main extends IOApp:
   // next pass, same as re-invoking the script by hand would.
   private def runRootUntilClosed[F[_]: Sync]: Kleisli[
     F,
-    (RunContext, Ref[F, Map[Int, Issue]], -->[F, Issue, RunSummary], Int),
+    (RunContext, Ref[F, Map[TaskNumber, Issue]], -->[F, Issue, RunSummary], TaskNumber),
     RunSummary
   ] =
     Kleisli.apply { case (context, openIssues, recursiveFlow, rootNumber) =>
@@ -345,7 +345,7 @@ object Main extends IOApp:
 
   private def executeRecursive[F[_]: Sync](
       context: RunContext,
-      openIssues: Ref[F, Map[Int, Issue]]
+      openIssues: Ref[F, Map[TaskNumber, Issue]]
   ): -->[F, Issue, RunSummary] =
     RecursiveArrows[Flow[F]](
       checkIfCompleted = checkIfCompleted[F],
@@ -369,7 +369,7 @@ object Main extends IOApp:
     }
 
   private def runDependencies[F[_]: Sync](
-      openIssues: Ref[F, Map[Int, Issue]],
+      openIssues: Ref[F, Map[TaskNumber, Issue]],
       executeRecursive: -->[F, Issue, RunSummary]
   ): -->[F, Issue, Either[RunSummary, Issue]] =
     Kleisli { issue =>
@@ -420,12 +420,12 @@ object Main extends IOApp:
     }
 
   private def pollGitHubForCompletion[F[_]: Sync]
-      : Kleisli[F, (os.Path, Int), Issue] =
+      : Kleisli[F, (os.Path, TaskNumber), Issue] =
     Kleisli.apply { case (root, taskId) =>
       val pollInterval = 30.seconds
       def loop: F[Issue] =
         GitHub.fetchIssues(root).flatMap { issues =>
-          issues.find(_.number == taskId) match
+          issues.find(_.number === taskId) match
             case Some(issue) if issue.state.toLowerCase == "closed" =>
               issue.pure[F]
             case None =>
@@ -690,7 +690,7 @@ object Main extends IOApp:
   private def awaitUserAnswer[F[_]: Sync]
       : Kleisli[F, (os.Path, Issue), Option[String]] =
     Kleisli.apply { case (root, task) =>
-      def loop(deadlineMillis: Long): F[Option[String]] =
+      def loop(deadlineMillis: DeadlineMillis): F[Option[String]] =
         for
           answer <- GitHub.userAnswer(progress)(root, task)
           result <-
@@ -698,25 +698,25 @@ object Main extends IOApp:
               case some @ Some(_) => some.pure[F]
               case None =>
                 Sync[F].blocking(System.currentTimeMillis()).flatMap { now =>
-                  if now >= deadlineMillis then
+                  if now >= deadlineMillis.value then
                     progress(
-                      s"No user answer received for task #${task.number} within ${UserInputWaitMillis / 60000} minutes."
+                      s"No user answer received for task #${task.number} within ${UserInputWaitMillis.value / 60000} minutes."
                     ).as(None)
                   else
                     progress(
                       s"Waiting for a user answer on task #${task.number}..."
                     ) *>
-                      Sync[F].blocking(Thread.sleep(UserInputPollMillis)) *>
+                      Sync[F].blocking(Thread.sleep(UserInputPollMillis.value)) *>
                       loop(deadlineMillis)
                 }
         yield result
 
       for
         _ <- progress(
-          s"Awaiting user answer on task #${task.number} for up to ${UserInputWaitMillis / 60000} minutes..."
+          s"Awaiting user answer on task #${task.number} for up to ${UserInputWaitMillis.value / 60000} minutes..."
         )
         started <- Sync[F].blocking(System.currentTimeMillis())
-        answer <- loop(started + UserInputWaitMillis)
+        answer <- loop(DeadlineMillis(started) + UserInputWaitMillis)
       yield answer
     }
 
@@ -1207,7 +1207,7 @@ object Main extends IOApp:
       worktreePath = context.root / ".worktrees" / s"$taskName-$taskId",
       branchName = BranchName(s"task-$taskId"),
       baseBranch =
-        GitHub.parentIds(task).headOption.map(parentId => s"task-$parentId")
+        GitHub.parentIds(task).headOption.map(parentId => BranchName(s"task-$parentId"))
     )
 
   private def taskSlug(title: Title): Option[String] =
@@ -1693,9 +1693,9 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       F: Sync[F]
   ): Kleisli[F, PublishRequest, Boolean] =
     Kleisli.apply { request =>
-      val baseBranch = request.baseBranch.getOrElse("master")
+      val baseBranch = request.baseBranch.getOrElse(BranchName("master"))
       for
-        autoMerged <- Git[F].mergeBaseBranch(request.worktreePath, baseBranch)
+        autoMerged <- Git[F].mergeBaseBranch(request.worktreePath, baseBranch.value)
         resolved <-
           if autoMerged then
             progress(
@@ -1708,7 +1708,7 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
               )
               _ <- AgentExecutor[F].run(
                 request.runner,
-                mergeConflictRepairPrompt(request.task, baseBranch),
+                mergeConflictRepairPrompt(request.task, baseBranch.value),
                 request.worktreePath,
                 RepairAllowedTools
               )
@@ -1779,7 +1779,7 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
 
   private def askRetryWithRepair[F[_]](using
       F: Sync[F]
-  ): Kleisli[F, Int, Boolean] =
+  ): Kleisli[F, TaskNumber, Boolean] =
     Kleisli.apply { taskNumber =>
       F.blocking {
         print(
@@ -1879,20 +1879,17 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       case (a, Right(b))  => Right((a, b))
     }
 
-  private def parseTaskNumber(args: List[String]): Option[Int] =
-    args
-      .collectFirst {
-        case value if value.startsWith("--task=") =>
-          value.stripPrefix("--task=")
-        case value if value.startsWith("--issue=") =>
-          value.stripPrefix("--issue=")
-      }
-      .orElse {
-        args.sliding(2).collectFirst { case List("--task" | "--issue", value) =>
-          value
-        }
-      }
-      .flatMap(_.trim.stripPrefix("#").toIntOption)
+  private def parseTaskNumber(args: List[String]): Option[TaskNumber] =
+    args.collectFirst {
+  case value if value.startsWith("--task=") =>
+    value.stripPrefix("--task=")
+  case value if value.startsWith("--issue=") =>
+    value.stripPrefix("--issue=")
+}.orElse {
+  args.sliding(2).collectFirst {
+    case List("--task" | "--issue", value) => value
+  }
+}.flatMap(_.trim.stripPrefix("#").toIntOption).map(TaskNumber(_))
 
   private def parseRecursiveFlag(args: List[String]): Recursive =
     Recursive(args.contains("--recursive"))

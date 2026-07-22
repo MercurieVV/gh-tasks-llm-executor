@@ -29,4 +29,3 @@
 //> using test.dependency org.typelevel::shapeless3-deriving:3.6.0
 
 //> using test.resourceDirs app/test/resources
-

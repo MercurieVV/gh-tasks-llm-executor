@@ -127,7 +127,7 @@ trait TaskMetadataStore[F[_]]:
   def read(root: os.Path, task: Issue): F[TaskMetadata]
   def write(
       root: os.Path,
-      taskId: Int,
+      taskId: TaskNumber,
       metadata: TaskMetadata,
       progress: String => F[Unit]
   ): F[Unit]
@@ -150,7 +150,7 @@ object TaskMetadataStore:
 
       def write(
           root: os.Path,
-          taskId: Int,
+          taskId: TaskNumber,
           metadata: TaskMetadata,
           progress: String => F[Unit]
       ): F[Unit] =
