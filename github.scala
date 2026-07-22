@@ -6,6 +6,31 @@ import scala.concurrent.duration.*
 import scala.util.Try
 import cats.data.Kleisli
 
+opaque type Status = String
+object Status:
+  def apply(value: String): Status = value
+  extension (self: Status) def value: String = self
+
+opaque type Message = String
+object Message:
+  def apply(value: String): Message = value
+  extension (self: Message) def value: String = self
+
+opaque type Message2 = String
+object Message2:
+  def apply(value: String): Message2 = value
+  extension (self: Message2) def value: String = self
+
+opaque type Message3 = String
+object Message3:
+  def apply(value: String): Message3 = value
+  extension (self: Message3) def value: String = self
+
+opaque type PullRequestCheckPollMillis = Long
+object PullRequestCheckPollMillis:
+  def apply(value: Long): PullRequestCheckPollMillis = value
+  extension (self: PullRequestCheckPollMillis) def value: Long = self
+
 opaque type BaseRefName = String
 object BaseRefName:
   def apply(value: String): BaseRefName = value
@@ -47,7 +72,7 @@ object GitHub:
       )
 
   private val PullRequestCheckTimeoutMillis = 30.minutes.toMillis
-  private val PullRequestCheckPollMillis = 30.seconds.toMillis
+  private val PullRequestCheckPollMillisV = PullRequestCheckPollMillis(30.seconds.toMillis)
   private val PullRequestNoChecksGraceMillis = 3.minutes.toMillis
 
   def fetchIssues[F[_]: Sync]: Kleisli[F, os.Path, List[Issue]] =
@@ -134,7 +159,7 @@ object GitHub:
             effort = fields.get("effort")
             version <- fields.get("version").orElse(fields.get("model version"))
           yield TaskRunner(
-            agent = agent,
+            agent = Agent(agent),
             model = Some(model),
             effort = effort,
             version = Some(version)
@@ -158,7 +183,7 @@ object GitHub:
           if agent.nonEmpty && model.nonEmpty =>
         Some(
           TaskRunner(
-            agent,
+            Agent(agent),
             Some(model),
             Option(effort).filter(_.nonEmpty),
             Option(version).filter(_.nonEmpty)
@@ -168,7 +193,7 @@ object GitHub:
           if agent.nonEmpty && model.nonEmpty =>
         Some(
           TaskRunner(
-            agent,
+            Agent(agent),
             Some(model),
             None,
             Option(version).filter(_.nonEmpty)
@@ -354,7 +379,7 @@ object GitHub:
             pending match
               case Some(message) =>
                 progress(message) *>
-                  F.blocking(Thread.sleep(PullRequestCheckPollMillis)) *>
+                  F.blocking(Thread.sleep(PullRequestCheckPollMillisV.value)) *>
                   loop(deadlineMillis)
               case None if pullRequests.nonEmpty =>
                 progress(
@@ -860,7 +885,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       case true =>
         for
           pullRequest <- ensurePullRequest(progress)((root, branchName, None, parentId, Title(s"Integrate subtasks for #$parentId"), Some(s"Integrate subtasks for #$parentId"), Some(s"Merges completed subtasks of #$parentId into the default branch.\n\nCloses #$parentId")))
-          _ <- awaitPullRequestChecks(progress)((root, pullRequest.number.toString, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillis))
+          _ <- awaitPullRequestChecks(progress)((root, pullRequest.number.toString, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillisV))
           _ <- progress("Merging integration Pull Request...")
           mergeResult <- call(root, "gh", "pr", "merge", pullRequest.number.toString, "--merge").as(true).handleErrorWith { error =>
             val msg = error.getMessage.toLowerCase
@@ -892,7 +917,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
             if mergeResult then
               for
                 merged <- mergedPullRequest((root, pullRequest.number))
-                _ <- awaitBranchChecks(progress)((root, merged.baseRefName, merged.mergeCommit, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillis))
+                _ <- awaitBranchChecks(progress)((root, merged.baseRefName, merged.mergeCommit, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillisV))
                 _ <- setIssueStatus(progress)((root, parentId, "completed"))
                 _ <- closeIssue((root, parentId))
               yield ()
@@ -919,7 +944,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
   private def mergeAndVerify[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, PullRequest), Unit] =
   Kleisli.apply { case (root, pullRequest) =>
     for
-      _ <- awaitPullRequestChecks(progress)((root, pullRequest.number.toString, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillis))
+      _ <- awaitPullRequestChecks(progress)((root, pullRequest.number.toString, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillisV))
       _ <- progress("Merging Pull Request...")
       _ <- call(
         root,
@@ -932,7 +957,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       merged <- mergedPullRequest((root, pullRequest.number))
       _ <-
         if merged.baseRefName.value === "master" || merged.baseRefName.value === "main" then
-          awaitBranchChecks(progress)((root, merged.baseRefName, merged.mergeCommit, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillis))
+          awaitBranchChecks(progress)((root, merged.baseRefName, merged.mergeCommit, PullRequestCheckTimeoutMillis, PullRequestCheckPollMillisV))
         else
           progress(
             s"Skipping branch checks for non-default base branch ${merged.baseRefName.value}."
@@ -1027,8 +1052,8 @@ This parent task will not be implemented directly. Run child tasks first; when a
       yield PullRequest(number, state)
     }
 
-  private def awaitPullRequestChecks[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, String, Long, Long), Unit] =
-  Kleisli.apply { case (root, branchName, timeoutMillis, pollMillis) =>
+  private def awaitPullRequestChecks[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, String, Long, PullRequestCheckPollMillis), Unit] =
+  (Kleisli.apply { case (root, branchName, timeoutMillis, pollMillis) =>
     def loop(deadlineMillis: Long, noChecksSince: Option[Long]): F[Unit] =
       for
         now <- F.blocking(System.currentTimeMillis())
@@ -1043,7 +1068,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
             pullRequestCheckStatus((root, branchName)).flatMap {
               case PullRequestChecksPending(message) =>
                 progress(message) *>
-                  F.blocking(Thread.sleep(pollMillis)) *>
+                  F.blocking(Thread.sleep(pollMillis.value)) *>
                   loop(deadlineMillis, None)
               case PullRequestChecksUnavailable(message) =>
                 pullRequestMergeConflict((root, branchName)).flatMap {
@@ -1061,7 +1086,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
                       )
                     else
                       progress(message) *>
-                        F.blocking(Thread.sleep(pollMillis)) *>
+                        F.blocking(Thread.sleep(pollMillis.value)) *>
                         loop(deadlineMillis, Some(firstSeen))
                 }
               case PullRequestChecksPassed(message) =>
@@ -1078,7 +1103,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       started <- F.blocking(System.currentTimeMillis())
       _ <- loop(started + timeoutMillis, None)
     yield ()
-  }
+  })
 
   private def pullRequestMergeConflict[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, String), Boolean] =
   Kleisli.apply { case (root, branchName) =>
@@ -1207,8 +1232,8 @@ This parent task will not be implemented directly. Run child tasks first; when a
       yield MergedPullRequest(BaseRefName(baseRefName), MergeCommit(mergeCommit))
     }
 
-  private def awaitBranchChecks[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, BaseRefName, MergeCommit, Long, Long), Unit] =
-  Kleisli.apply { case (root, branchName, commitSha, timeoutMillis, pollMillis) =>
+  private def awaitBranchChecks[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (os.Path, BaseRefName, MergeCommit, Long, PullRequestCheckPollMillis), Unit] =
+  (Kleisli.apply { case (root, branchName, commitSha, timeoutMillis, pollMillis) =>
     def loop(deadlineMillis: Long): F[Unit] =
       for
         now <- F.blocking(System.currentTimeMillis())
@@ -1222,13 +1247,13 @@ This parent task will not be implemented directly. Run child tasks first; when a
           else
             branchCheckStatus((root, branchName, commitSha)).flatMap {
               case BranchChecksPending(message) =>
-                progress(message) *>
-                  F.blocking(Thread.sleep(pollMillis)) *>
+                progress(message.value) *>
+                  F.blocking(Thread.sleep(pollMillis.value)) *>
                   loop(deadlineMillis)
               case BranchChecksPassed(message) =>
-                progress(message)
+                progress(message.value)
               case BranchChecksFailed(message) =>
-                F.raiseError(new RuntimeException(message))
+                F.raiseError(new RuntimeException(message.value))
             }
       yield ()
 
@@ -1239,17 +1264,17 @@ This parent task will not be implemented directly. Run child tasks first; when a
       started <- F.blocking(System.currentTimeMillis())
       _ <- loop(started + timeoutMillis)
     yield ()
-  }
+  })
 
   private sealed trait BranchCheckStatus
 
-  private final case class BranchChecksPending(message: String)
+  private final case class BranchChecksPending(message: Message3)
       extends BranchCheckStatus
 
-  private final case class BranchChecksPassed(message: String)
+  private final case class BranchChecksPassed(message: Message2)
       extends BranchCheckStatus
 
-  private final case class BranchChecksFailed(message: String)
+  private final case class BranchChecksFailed(message: Message)
       extends BranchCheckStatus
 
   private def branchCheckStatus[F[_]](using F: Sync[F]): Kleisli[F, (os.Path, BaseRefName, MergeCommit), BranchCheckStatus] =
@@ -1273,32 +1298,32 @@ This parent task will not be implemented directly. Run child tasks first; when a
       val pending = runs.filterNot(_.passed)
       if output.trim.isEmpty || runs.isEmpty then
         BranchChecksPending(
-          s"No CI runs found yet for $branchName at $commitSha."
+          Message3(s"No CI runs found yet for $branchName at $commitSha.")
         )
       else if failed.nonEmpty then
         BranchChecksFailed(
-          s"CI failed on $branchName at $commitSha: ${formatRuns(failed)}"
+          Message(s"CI failed on $branchName at $commitSha: ${formatRuns(failed)}")
         )
       else if pending.nonEmpty then
         BranchChecksPending(
-          s"CI pending on $branchName at $commitSha: ${formatRuns(pending)}"
+          Message3(s"CI pending on $branchName at $commitSha: ${formatRuns(pending)}")
         )
-      else BranchChecksPassed(s"CI passed on $branchName at $commitSha.")
+      else BranchChecksPassed(Message2(s"CI passed on $branchName at $commitSha."))
     }
   }
 
   private final case class WorkflowRun(
       name: String,
-      status: String,
+      status: Status,
       conclusion: String,
       url: String
   ):
     def passed: Boolean =
-      status === "COMPLETED" &&
+      status.value === "COMPLETED" &&
         Set("SUCCESS", "SKIPPED", "NEUTRAL").contains(conclusion)
 
     def failed: Boolean =
-      status === "COMPLETED" &&
+      status.value === "COMPLETED" &&
         Set(
           "FAILURE",
           "CANCELLED",
@@ -1318,7 +1343,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
           }
         yield WorkflowRun(
           name = name,
-          status = status,
+          status = Status(status),
           conclusion = fields
             .get("conclusion")
             .collect { case ujson.Str(value) => value.trim.toUpperCase }

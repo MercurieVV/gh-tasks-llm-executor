@@ -11,7 +11,7 @@ class AgentInventoryConfigDrivenSuite extends munit.FunSuite:
     "codex-gpt-5-codex-low" -> 0.045,
     "aider-deepseek-deepseek-chat" -> 0.01,
     "aider-deepseek-deepseek-reasoner" -> 0.029
-  )
+  ).map{ case (str, d) => Id(str) -> d}
 
   private val tolerance = 0.000001
 
@@ -34,7 +34,7 @@ class AgentInventoryConfigDrivenSuite extends munit.FunSuite:
   test("the pinned 20k/4k budget and effort multipliers are reflected in cost"):
     def cost(effort: String): Double =
       AgentTool(
-        id = effort,
+        id = Id(effort),
         agent = "test",
         model = Some("model"),
         effort = Some(effort),
@@ -57,7 +57,7 @@ class AgentInventoryConfigDrivenSuite extends munit.FunSuite:
 
   test("missing raw prices remain unknown and do not alter #12 selection"):
     val unknown = AgentTool(
-      id = "unpriced",
+      id = Id("unpriced"),
       agent = "new-agent",
       model = Some("new-model"),
       effort = None,

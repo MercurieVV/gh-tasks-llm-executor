@@ -16,7 +16,6 @@ import scala.annotation.tailrec
 import scala.concurrent.duration.*
 import scala.util.Try
 import ArrowLogging.*
-import Main.progress
 import cats.syntax.arrow.*
 
 opaque type Body = String
@@ -34,7 +33,7 @@ object Main extends IOApp:
   type -->[F[_], A, B] = Kleisli[F, A, B]
   type Flow[F[_]] = [A, B] =>> Kleisli[F, A, B]
   private val evaluatorRunner: TaskRunner =
-    TaskRunner("claude", Some("opus"), None, None)
+    TaskRunner(Agent("claude"), Some("opus"), None, None)
   private val UserInputWaitMillis =
     envLong("GH_TASKS_USER_INPUT_WAIT_MINUTES", 120).minutes.toMillis
   private val UserInputPollMillis =
@@ -204,7 +203,10 @@ object Main extends IOApp:
         // resume that PR (verify checks, merge) instead of re-implementing.
         eligibleWithResumeFlag <- eligible.traverse { task =>
           GitHub
-            .hasOpenPullRequestForBranch(context.root, BranchName(s"task-${task.number}"))
+            .hasOpenPullRequestForBranch(
+              context.root,
+              BranchName(s"task-${task.number}")
+            )
             .flatTap { hasOpenPr =>
               if !hasOpenPr then ().pure[F]
               else
@@ -1223,7 +1225,7 @@ object Main extends IOApp:
       runner: TaskRunner,
       dependencyConclusion: Option[String],
       replayContext: Option[String]
-  ): String =
+  ): Prompt =
     val dependencyConclusionStr = dependencyConclusion
       .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
       .getOrElse("")
@@ -1240,7 +1242,7 @@ Replay rules:
 - If the previous implementation was already merged, create the minimal follow-up fix in this task branch.
 """).getOrElse("")
 
-    s"""Task ID: #${task.number}
+    Prompt(s"""Task ID: #${task.number}
 Title: ${task.title}
 Agent: ${runner.agent}
 Model: ${runner.model.getOrElse("")}
@@ -1283,7 +1285,7 @@ Final answer contract:
 - Include a proposed commit title.
 - Include a proposed pull request body when useful.
 - Include a one-line "Conclusion:" summary for tasks that depend on this one (what changed, what's now available to build on).
-"""
+""")
 
   // Scoped tool permission for the evaluator run only: "split" verdicts
   // require it to actually create child issues, which a non-interactive
@@ -1329,7 +1331,7 @@ Final answer contract:
       dependencyConclusion: Option[String],
       agentInventory: AgentInventory,
       userAnswer: Option[String] = None
-  ): String =
+  ): Prompt =
     val dependencyConclusionStr = dependencyConclusion
       .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
       .getOrElse("")
@@ -1343,7 +1345,7 @@ Final answer contract:
       else if strongDescription(task.body) then "strong"
       else "weak"
 
-    s"""Evaluate and prepare this GitHub task before implementation.
+    Prompt(s"""Evaluate and prepare this GitHub task before implementation.
 
 Task ID: #${task.number}
 Title: ${task.title}
@@ -1412,7 +1414,7 @@ Phase -> capability-tier routing (select concrete runners from the available loc
 - implement       -> narrow, well-specified code change      -> medium (task-dependent); cheap ONLY when genuinely trivial + fully specified
 - test            -> narrow verification                     -> low-medium; cheapest capable
 Match each phase's ranked "preferred llms/models/efforts/versions" to this table: primary = cheapest runner that still fits the phase's required capability, fallbacks = progressively stronger runners for escalation. Prefer runners whose jobTypes/strengths advertise the phase name.
-"""
+""")
 
   private def parseTaskEvaluation(
       output: String,
@@ -1423,11 +1425,13 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
     Try {
       val json = ujson.read(stripped)
       TaskEvaluation(
-        body = Body(json.obj
-          .get("body")
-          .collect { case ujson.Str(value) => value }
-          .filter(_.trim.nonEmpty)
-          .getOrElse(fallbackBody.value)),
+        body = Body(
+          json.obj
+            .get("body")
+            .collect { case ujson.Str(value) => value }
+            .filter(_.trim.nonEmpty)
+            .getOrElse(fallbackBody.value)
+        ),
         questions = json.obj
           .get("questions")
           .collect { case ujson.Str(value) => value }
@@ -1734,7 +1738,7 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
   private def mergeConflictRepairPrompt(
       task: Issue,
       baseBranch: String
-  ): String =
+  ): Prompt = Prompt(
     s"""This branch has a `git merge` in progress against `$baseBranch` that produced conflict
        |markers (`<<<<<<<` / `=======` / `>>>>>>>`). Resolve every conflict in this worktree so
        |the merge can complete cleanly, preserving the intended behavior of both sides, without
@@ -1742,7 +1746,7 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
        |`git push` yourself.
        |
        |Task: #${task.number} ${task.title}
-       |""".stripMargin
+       |""".stripMargin)
 
   // `git push` runs the repo's prePush hook (tests/lint/format). A failure
   // there is usually fixable in-worktree (e.g. a broken test), so before
@@ -1842,15 +1846,15 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       yield ()
     }
 
-  private def repairPrompt(task: Issue, pushError: Throwable): String =
-    s"""`git push` failed for task #${task.number} (${task.title}), most likely because the
+  private def repairPrompt(task: Issue, pushError: Throwable): Prompt =
+    Prompt(s"""`git push` failed for task #${task.number} (${task.title}), most likely because the
        |repo's prePush hook (tests/lint/format) rejected the current commit. Fix the underlying
        |issue in this worktree so the prePush hook passes, without changing the task's intended
        |behavior. Do not run git push yourself.
        |
        |Failure output:
        |${pushError.getMessage}
-       |""".stripMargin
+       |""".stripMargin)
 
   private def publishLocal[F[_]: Sync]: -->[F, LocalPublication, Unit] =
     Kleisli { local =>

@@ -2,6 +2,11 @@ import arrowstep.core.ProgramSays
 import cats.arrow.ArrowChoice
 import cats.syntax.all.*
 
+opaque type Agent = String
+object Agent:
+  def apply(value: String): Agent = value
+  extension (self: Agent) def value: String = self
+
 opaque type Recursive = Boolean
 object Recursive:
   def apply(value: Boolean): Recursive = value
@@ -21,7 +26,7 @@ final case class RunContext(
 )
 
 final case class TaskRunner(
-    agent: String,
+    agent: Agent,
     model: Option[String],
     effort: Option[String],
     version: Option[String]
@@ -33,17 +38,17 @@ final case class TaskRunner(
     s"agent: $agent$modelPart$effortPart$versionPart"
 
   def command(
-      prompt: String,
+      prompt: Prompt,
       allowedTools: Seq[String] = Nil,
       jsonSchema: Option[String] = None
   ): Seq[String] =
-    agent match
+    agent.value match
       case "claude" =>
-        Seq(agent) ++ model.toList.flatMap(value => Seq("--model", value)) ++
+        Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
           (if allowedTools.isEmpty then Nil
            else Seq("--allowedTools") ++ allowedTools) ++
           jsonSchema.toList.flatMap(schema => Seq("--json-schema", schema)) ++
-          Seq("-p", prompt)
+          Seq("-p", prompt.value)
       case "codex" =>
         val mappedModel = (model, effort) match
           case (Some("gpt-5") | Some("gpt-5-codex"), Some("medium")) =>
@@ -53,18 +58,18 @@ final case class TaskRunner(
           case (Some("gpt-5") | Some("gpt-5-codex"), Some("low")) =>
             Some("gpt-5.6-luna")
           case _ => model
-        Seq(agent, "exec") ++
+        Seq(agent.value, "exec") ++
           mappedModel.toList.flatMap(value => Seq("--model", value)) ++
           effort.toList.flatMap(value =>
             Seq("--config", s"model_reasoning_effort=$value")
           ) ++
-          Seq(prompt)
+          Seq(prompt.value)
       case "aider" =>
-        Seq(agent) ++ model.toList.flatMap(value => Seq("--model", value)) ++
-          Seq("--yes-always", "--no-auto-commits", "--message", prompt)
+        Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
+          Seq("--yes-always", "--no-auto-commits", "--message", prompt.value)
       case _ =>
-        Seq(agent) ++ model.toList.flatMap(value => Seq("-m", value)) ++
-          Seq("-p", prompt)
+        Seq(agent.value) ++ model.toList.flatMap(value => Seq("-m", value)) ++
+          Seq("-p", prompt.value)
 
 final case class RunnableTask(
     context: RunContext,

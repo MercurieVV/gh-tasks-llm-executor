@@ -11,6 +11,11 @@ import scala.collection.mutable.StringBuilder
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
+opaque type Prompt = String
+object Prompt:
+  def apply(value: String): Prompt = value
+  extension (self: Prompt) def value: String = self
+
 final class AgentExecutor[F[_]](using F: Sync[F]):
 
   private val TotalTimeoutMillis = 45.minutes.toMillis
@@ -20,7 +25,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
 
   def run(
       runner: TaskRunner,
-      prompt: String,
+      prompt: Prompt,
       cwd: os.Path,
       allowedTools: Seq[String] = Nil,
       jsonSchema: Option[String] = None
@@ -29,7 +34,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
 
   private def runAttempt(
       runner: TaskRunner,
-      prompt: String,
+      prompt: Prompt,
       cwd: os.Path,
       allowedTools: Seq[String],
       jsonSchema: Option[String],
@@ -121,7 +126,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
 
   private def runMonitored(
       runner: TaskRunner,
-      prompt: String,
+      prompt: Prompt,
       cwd: os.Path,
       allowedTools: Seq[String],
       jsonSchema: Option[String]
@@ -131,7 +136,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     val output = StringBuilder()
     val command = runner.command(prompt, allowedTools, jsonSchema)
     TaskLogger.unsafeTrace(
-      s"agent command cwd=$cwd args=${commandForLog(command, prompt)} promptChars=${prompt.length}"
+      s"agent command cwd=$cwd args=${commandForLog(command, prompt)} promptChars=${prompt.value.length}"
     )
     val process = ProcessBuilder(command*)
       .directory(cwd.toIO)
@@ -141,7 +146,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       os.RelPath(s"agent-${process.pid()}-${fileSafe(runner.agent)}")
     TaskLogger.unsafeWriteArtifact(
       runLogDir / "prompt.txt",
-      prompt + System.lineSeparator()
+      prompt.value + System.lineSeparator()
     )
     TaskLogger.unsafeTrace(
       s"agent process started pid=${process.pid()} alive=${process.isAlive} logDir=$runLogDir"
@@ -226,7 +231,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
             output.append(line).append(System.lineSeparator())
           }
           lastActivity.set(System.currentTimeMillis())
-          TaskLogger.unsafeAgentOutput(name, line)
+          TaskLogger.unsafeAgentOutput(name, RawLine(line))
           TaskLogger.unsafeAppendArtifact(
             artifactPath,
             s"${Instant.now()} $line${System.lineSeparator()}"
@@ -245,11 +250,11 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       }
       .getOrElse("")
 
-  private def commandForLog(command: Seq[String], prompt: String): String =
+  private def commandForLog(command: Seq[String], prompt: Prompt): String =
     command.zipWithIndex
       .map { case (part, index) =>
         val value =
-          if part === prompt || index > 0 && command(index - 1) === "-p" then
+          if part === prompt.value || index > 0 && command(index - 1) === "-p" then
             s"<prompt:${part.length} chars>"
           else quote(part)
         value
@@ -294,8 +299,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       handle.descendants().forEach(_.destroyForcibly())
       process.destroyForcibly()
 
-  private def fileSafe(value: String): String =
-    value.map {
+  private def fileSafe(value: Agent): String =
+    value.value.map {
       case char if char.isLetterOrDigit => char
       case '-'                          => '-'
       case '_'                          => '_'

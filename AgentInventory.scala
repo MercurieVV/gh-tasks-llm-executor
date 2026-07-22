@@ -1,8 +1,13 @@
 import cats.effect.kernel.Sync
 import cats.data.Kleisli
 
+opaque type Id = String
+object Id:
+  def apply(value: String): Id = value
+  extension (self: Id) def value: String = self
+
 final case class AgentTool(
-    id: String,
+    id: Id,
     agent: String,
     model: Option[String],
     effort: Option[String],
@@ -26,10 +31,10 @@ final case class AgentTool(
       math.round(raw * 1000.0) / 1000.0
 
   def runner: TaskRunner =
-    TaskRunner(agent = agent, model = model, effort = effort, version = version)
+    TaskRunner(agent = Agent(agent), model = model, effort = effort, version = version)
 
   def matches(runner: TaskRunner): Boolean =
-    agent.equalsIgnoreCase(runner.agent) &&
+    agent.equalsIgnoreCase(runner.agent.value) &&
       optionMatches(model, runner.model) &&
       optionMatches(effort, runner.effort) &&
       versionMatches(version, runner.version)
@@ -124,7 +129,7 @@ object AgentInventory:
   private val Fallback = AgentInventory(
     List(
       AgentTool(
-        id = "claude-opus",
+        id = Id("claude-opus"),
         agent = "claude",
         model = Some("opus"),
         effort = None,
@@ -161,7 +166,7 @@ object AgentInventory:
       case ujson.Obj(fields) =>
         for id <- stringField(fields, "id")
         yield AgentTool(
-          id = id,
+          id = Id(id),
           agent = stringField(fields, "agent").getOrElse(id),
           model = stringField(fields, "model"),
           effort = stringField(fields, "effort"),

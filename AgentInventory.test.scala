@@ -4,7 +4,7 @@ import munit.CatsEffectSuite
 class AgentInventorySuite extends CatsEffectSuite:
   test("derives task costs from configured raw prices and effort") {
     AgentInventory.loadF[IO](os.pwd).map { inventory =>
-      val costs = inventory.tools.map(tool => tool.id -> tool.cost).toMap
+      val costs = inventory.tools.map(tool => tool.id.value -> tool.cost).toMap
 
       assertEquals(costs("claude-opus"), Some(0.60))
       assertEquals(costs("claude-sonnet"), Some(0.12))
@@ -19,7 +19,7 @@ class AgentInventorySuite extends CatsEffectSuite:
 
   test("treats missing or zero raw price fields as cost unknown") {
     val unknown = AgentTool(
-      id = "unknown",
+      id = Id("unknown"),
       agent = "unknown",
       model = Some("unknown"),
       effort = None,
@@ -39,7 +39,7 @@ class AgentInventorySuite extends CatsEffectSuite:
 
   test("matches bare task-metadata version against full probe version string") {
     val codexTool = AgentTool(
-      id = "codex-gpt-5-codex-medium",
+      id = Id("codex-gpt-5-codex-medium"),
       agent = "codex",
       model = Some("gpt-5-codex"),
       effort = Some("medium"),
@@ -51,7 +51,7 @@ class AgentInventorySuite extends CatsEffectSuite:
       priority = 111
     )
     val claudeTool = AgentTool(
-      id = "claude-sonnet",
+      id = Id("claude-sonnet"),
       agent = "claude",
       model = Some("sonnet"),
       effort = None,
@@ -66,7 +66,7 @@ class AgentInventorySuite extends CatsEffectSuite:
     assert(
       codexTool.matches(
         TaskRunner(
-          agent = "codex",
+          agent = Agent("codex"),
           model = Some("gpt-5-codex"),
           effort = Some("medium"),
           version = Some("0.144.4")
@@ -76,7 +76,7 @@ class AgentInventorySuite extends CatsEffectSuite:
     assert(
       claudeTool.matches(
         TaskRunner(
-          agent = "claude",
+          agent = Agent("claude"),
           model = Some("sonnet"),
           effort = None,
           version = Some("2.1.210")
@@ -86,7 +86,7 @@ class AgentInventorySuite extends CatsEffectSuite:
     assert(
       !codexTool.matches(
         TaskRunner(
-          agent = "codex",
+          agent = Agent("codex"),
           model = Some("gpt-5-codex"),
           effort = Some("medium"),
           version = Some("0.144.3")
