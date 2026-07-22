@@ -111,7 +111,7 @@ object TaskMetadata:
 
   // Renders a merged TaskMetadata back into the combined text the rest of the
   // pipeline reads as if it were the issue body (see effectiveIssue).
-  def render(metadata: TaskMetadata): String =
+  def render(metadata: TaskMetadata): Body =
     val metaLines = List(
       Some("Task metadata:"),
       metadata.evaluation.map(v => s"Evaluation: $v"),
@@ -119,9 +119,9 @@ object TaskMetadata:
       metadata.phase.map(v => s"Phase: $v")
     ).flatten ++ metadata.parentLines ++ metadata.dependencyLines ++ metadata.runnerLines
     val metaBlock = metaLines.mkString("\n")
-    metadata.enrichedDescription.fold(metaBlock)(prose =>
+    Body(metadata.enrichedDescription.fold(metaBlock)(prose =>
       s"$prose\n\n$metaBlock"
-    )
+    ))
 
 trait TaskMetadataStore[F[_]]:
   def read(root: os.Path, task: Issue): F[TaskMetadata]
@@ -143,8 +143,8 @@ object TaskMetadataStore:
     new TaskMetadataStore[F]:
       def read(root: os.Path, task: Issue): F[TaskMetadata] =
         GitHub.metadataCommentBodies(root, task.number).map { commentBodies =>
-          val legacyLayer = TaskMetadata.parse(task.body)
-          (legacyLayer :: commentBodies.map(TaskMetadata.parse))
+          val legacyLayer = TaskMetadata.parse(task.body.value)
+          (legacyLayer :: commentBodies.map(_.value).map(TaskMetadata.parse))
             .foldLeft(Monoid[TaskMetadata].empty)(Monoid[TaskMetadata].combine)
         }
 

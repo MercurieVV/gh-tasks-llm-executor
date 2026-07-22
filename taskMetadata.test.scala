@@ -31,7 +31,7 @@ class TaskMetadataPhaseSuite extends munit.FunSuite:
       phase = Some("source-of-truth"),
       enrichedDescription = Some("Do the thing.")
     )
-    val reparsed = TaskMetadata.parse(TaskMetadata.render(original))
+    val reparsed = TaskMetadata.parse(TaskMetadata.render(original).value)
     assertEquals(reparsed.phase, Some("source-of-truth"))
     assertEquals(reparsed.evaluation, Some("ready"))
     assertEquals(reparsed.execution, Some("implement"))

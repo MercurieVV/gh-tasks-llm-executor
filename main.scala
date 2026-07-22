@@ -19,6 +19,16 @@ import ArrowLogging.*
 import Main.progress
 import cats.syntax.arrow.*
 
+opaque type Body = String
+object Body:
+  def apply(value: String): Body = value
+  extension (self: Body) def value: String = self
+
+opaque type Output = String
+object Output:
+  def apply(value: String): Output = value
+  extension (self: Output) def value: String = self
+
 object Main extends IOApp:
 
   type -->[F[_], A, B] = Kleisli[F, A, B]
@@ -119,7 +129,7 @@ object Main extends IOApp:
             // If a specific task is targeted, do not filter out by dependencies/children.
             // We want to run it and traverse its tree recursively!
             true.pure[F]
-          else if context.recursive then
+          else if context.recursive.value then
             // --recursive walks each root's dependency tree to closure, so an
             // unresolved dependency is not a reason to exclude a root candidate
             // (unlike above, still exclude issues that are themselves still a
@@ -194,7 +204,7 @@ object Main extends IOApp:
         // resume that PR (verify checks, merge) instead of re-implementing.
         eligibleWithResumeFlag <- eligible.traverse { task =>
           GitHub
-            .hasOpenPullRequestForBranch(context.root, s"task-${task.number}")
+            .hasOpenPullRequestForBranch(context.root, BranchName(s"task-${task.number}"))
             .flatTap { hasOpenPr =>
               if !hasOpenPr then ().pure[F]
               else
@@ -258,7 +268,7 @@ object Main extends IOApp:
         openIssuesRef <- Ref[F].of(openIssuesMap)
         recursiveFlow = executeRecursive[F](context, openIssuesRef)
         summaries <- candidates.traverse { candidate =>
-          if context.recursive then
+          if context.recursive.value then
             runRootUntilClosed[F](
               (context, openIssuesRef, recursiveFlow, candidate.issue.number)
             )
@@ -417,7 +427,7 @@ object Main extends IOApp:
             case Some(issue) if issue.state.toLowerCase == "closed" =>
               issue.pure[F]
             case None =>
-              Issue(taskId, s"Task #$taskId", "", "closed").pure[F]
+              Issue(taskId, Title(s"Task #$taskId"), Body(""), "closed").pure[F]
             case _ =>
               Sync[F].blocking(Thread.sleep(pollInterval.toMillis)) *> loop
         }
@@ -600,13 +610,13 @@ object Main extends IOApp:
                 )
             }
           else evaluation.pure[F]
-        cleanBody = stripMarkdownFence(verifiedEvaluation.body).trim
+        cleanBody = stripMarkdownFence(verifiedEvaluation.body.value).trim
         // Evaluation/Execution are always taken from verifiedEvaluation, not
         // from whatever text happens to be embedded in cleanBody: for the
         // split-verification fallback above, cleanBody is the task's old
         // (pre-fallback) body, and trusting its stale "Execution: split"
         // would silently re-persist the wrong status.
-        priorMetadata = TaskMetadata.parse(run.task.body)
+        priorMetadata = TaskMetadata.parse(run.task.body.value)
         newMetadata = TaskMetadata
           .parse(cleanBody)
           .copy(
@@ -627,7 +637,7 @@ object Main extends IOApp:
         // new "Task metadata:" comment instead, folded back in on the next
         // read by TaskMetadataStore (see effectiveIssue).
         _ <-
-          if updatedTask.body.trim =!= run.task.body.trim then
+          if updatedTask.body.value.trim =!= run.task.body.value.trim then
             TaskMetadataStore
               .commentBased[F]
               .write(
@@ -852,7 +862,7 @@ object Main extends IOApp:
             )
           )
           .whenA(looksBlocked(output))
-      yield TaskWithOutput(run, output)
+      yield TaskWithOutput(run, Output(output))
     }
 
   // Exit code 0 only means the process returned; a stuck agent that gave up
@@ -1023,7 +1033,7 @@ object Main extends IOApp:
             run.context.root,
             run.branchName
           )
-        yield TaskWithOutput(run, output = "")
+        yield TaskWithOutput(run, output = Output(""))
       } >>> closeTask[F] >>> Kleisli[F, TaskRun, RunSummary] { completedRun =>
         for _ <- Git[F].cleanupWorktree(
             completedRun.context.root,
@@ -1106,7 +1116,7 @@ object Main extends IOApp:
       case RunContext(root, agentInventory, taskNumber, recursive) =>
         s"RunContext(root=$root,task=${taskNumber.fold("auto")(_.toString)},recursive=$recursive,availableAgents=${agentInventory.availableTools.size})"
       case Issue(number, title, body, state, _) =>
-        s"Issue(#$number,title=${quote(title)},state=$state,bodyChars=${body.length})"
+        s"Issue(#$number,title=${quote(title.value)},state=$state,bodyChars=${body.value.length})"
       case TaskRunner(agent, model, effort, version) =>
         s"TaskRunner(agent=$agent,model=${model.getOrElse("")},effort=${effort
             .getOrElse("")},version=${version.getOrElse("")})"
@@ -1122,13 +1132,13 @@ object Main extends IOApp:
       case TaskWithPrompt(run, parentConclusion, replayContext) =>
         s"TaskWithPrompt(issue=#${run.task.number},hasDependencyConclusion=${parentConclusion.nonEmpty},hasReplayContext=${replayContext.nonEmpty})"
       case TaskWithOutput(run, output) =>
-        s"TaskWithOutput(issue=#${run.task.number},outputChars=${output.length})"
+        s"TaskWithOutput(issue=#${run.task.number},outputChars=${output.value.length})"
       case NeedsUserInput(run, questions) =>
         s"NeedsUserInput(issue=#${run.task.number},questionChars=${questions.length})"
       case SplitTask(run) =>
         s"SplitTask(issue=#${run.task.number})"
       case TaskEvaluation(body, questions, execution) =>
-        s"TaskEvaluation(execution=$execution,bodyChars=${body.length},hasQuestions=${questions
+        s"TaskEvaluation(execution=$execution,bodyChars=${body.value.length},hasQuestions=${questions
             .exists(_.trim.nonEmpty)})"
       case ExistingBranch(run) =>
         s"ExistingBranch(issue=#${run.run.task.number},branch=${run.run.branchName})"
@@ -1193,13 +1203,13 @@ object Main extends IOApp:
       task = task,
       runner = runner,
       worktreePath = context.root / ".worktrees" / s"$taskName-$taskId",
-      branchName = s"task-$taskId",
+      branchName = BranchName(s"task-$taskId"),
       baseBranch =
         GitHub.parentIds(task).headOption.map(parentId => s"task-$parentId")
     )
 
-  private def taskSlug(title: String): Option[String] =
-    val slug = title.toLowerCase
+  private def taskSlug(title: Title): Option[String] =
+    val slug = title.value.toLowerCase
       .map(char => if char.isLetterOrDigit then char else '-')
       .mkString
       .replaceAll("-+", "-")
@@ -1329,7 +1339,7 @@ Final answer contract:
       )
       .getOrElse("")
     val descriptionState =
-      if task.body.trim.isEmpty then "missing"
+      if task.body.value.trim.isEmpty then "missing"
       else if strongDescription(task.body) then "strong"
       else "weak"
 
@@ -1406,18 +1416,18 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
 
   private def parseTaskEvaluation(
       output: String,
-      fallbackBody: String
+      fallbackBody: Body
   ): TaskEvaluation =
     val stripped =
       extractJsonObject(output).getOrElse(stripMarkdownFence(output)).trim
     Try {
       val json = ujson.read(stripped)
       TaskEvaluation(
-        body = json.obj
+        body = Body(json.obj
           .get("body")
           .collect { case ujson.Str(value) => value }
           .filter(_.trim.nonEmpty)
-          .getOrElse(fallbackBody),
+          .getOrElse(fallbackBody.value)),
         questions = json.obj
           .get("questions")
           .collect { case ujson.Str(value) => value }
@@ -1481,15 +1491,15 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       // not a genuine block, fall through to a real evaluation.
       case _ => None
 
-  private def evaluationStatus(body: String): Option[String] =
+  private def evaluationStatus(body: Body): Option[String] =
     metadataValue(body, "evaluation")
 
-  private def executionStatus(body: String): Option[String] =
+  private def executionStatus(body: Body): Option[String] =
     metadataValue(body, "execution").map(normalizeExecution)
 
-  private def metadataValue(body: String, key: String): Option[String] =
+  private def metadataValue(body: Body, key: String): Option[String] =
     val prefix = s"$key:"
-    body.linesIterator
+    body.value.linesIterator
       .map(_.trim.toLowerCase)
       .collectFirst {
         case line if line.startsWith(prefix) =>
@@ -1502,15 +1512,15 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       case "split"               => "split"
       case _                     => "needs-input"
 
-  private def strongDescription(body: String): Boolean =
-    val lower = body.toLowerCase
+  private def strongDescription(body: Body): Boolean =
+    val lower = body.value.toLowerCase
     val hasStructure =
       List("context", "goal", "scope", "acceptance").count(lower.contains) >= 2
-    val hasEnoughDetail = body.trim.length >= 500
+    val hasEnoughDetail = body.value.trim.length >= 500
     hasStructure && hasEnoughDetail && hasRunnerMetadata(body)
 
-  private def hasRunnerMetadata(body: String): Boolean =
-    val lower = body.toLowerCase
+  private def hasRunnerMetadata(body: Body): Boolean =
+    val lower = body.value.toLowerCase
     lower.contains("preferred llms/models/versions") ||
     lower.contains("preferred llms/models/efforts/versions") ||
     lower.contains("agent/model/version") ||
@@ -1522,18 +1532,18 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       trimmed.linesIterator.toList.drop(1).dropRight(1).mkString("\n")
     else trimmed
 
-  private def extractAgentFinalization(output: String): AgentFinalization =
+  private def extractAgentFinalization(output: Output): AgentFinalization =
     AgentFinalization(
       commitTitle = extractPrefixedLine(output, "Proposed commit title"),
       pullRequestBody = extractSection(output, "Proposed pull request body")
     )
 
   private def extractPrefixedLine(
-      output: String,
+      output: Output,
       label: String
   ): Option[String] =
     val prefix = s"$label:"
-    output.linesIterator
+    output.value.linesIterator
       .map(_.trim)
       .collectFirst {
         case line if line.toLowerCase.startsWith(prefix.toLowerCase) =>
@@ -1541,9 +1551,9 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       }
       .filter(_.nonEmpty)
 
-  private def extractSection(output: String, label: String): Option[String] =
+  private def extractSection(output: Output, label: String): Option[String] =
     val prefix = s"$label:"
-    val lines = output.linesIterator.toList
+    val lines = output.value.linesIterator.toList
     val start =
       lines.indexWhere(_.trim.toLowerCase.startsWith(prefix.toLowerCase))
     Option
@@ -1740,7 +1750,7 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
   // and retry — looping as long as the user keeps accepting the retry.
   private def pushWithRepair[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
-  ): Kleisli[F, (os.Path, String, Issue, TaskRunner), Unit] =
+  ): Kleisli[F, (os.Path, BranchName, Issue, TaskRunner), Unit] =
     Kleisli.apply { case input @ (worktreePath, branchName, task, runner) =>
       Git[F]
         .push(worktreePath, branchName)
@@ -1880,8 +1890,8 @@ Match each phase's ranked "preferred llms/models/efforts/versions" to this table
       }
       .flatMap(_.trim.stripPrefix("#").toIntOption)
 
-  private def parseRecursiveFlag(args: List[String]): Boolean =
-    args.contains("--recursive")
+  private def parseRecursiveFlag(args: List[String]): Recursive =
+    Recursive(args.contains("--recursive"))
 
   private def removeScriptArgs(args: List[String]): List[String] =
     @tailrec

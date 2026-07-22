@@ -148,7 +148,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     )
     val stdout =
       streamReader(
-        "stdout",
+        Stream("stdout"),
         process.getInputStream,
         output,
         lastActivity,
@@ -156,7 +156,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       )
     val stderr =
       streamReader(
-        "stderr",
+        Stream("stderr"),
         process.getErrorStream,
         output,
         lastActivity,
@@ -211,7 +211,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       case None         => AgentResult(process.exitValue(), output.toString)
 
   private def streamReader(
-      name: String,
+      name: Stream,
       stream: InputStream,
       output: StringBuilder,
       lastActivity: AtomicLong,

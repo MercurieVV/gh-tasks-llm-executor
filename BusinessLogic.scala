@@ -2,17 +2,22 @@ import arrowstep.core.ProgramSays
 import cats.arrow.ArrowChoice
 import cats.syntax.all.*
 
+opaque type Recursive = Boolean
+object Recursive:
+  def apply(value: Boolean): Recursive = value
+  extension (self: Recursive) def value: Boolean = self
+
 final case class AppInput(
     root: os.Path,
     taskNumber: Option[Int],
-    recursive: Boolean = false
+    recursive: Recursive = Recursive(false)
 )
 
 final case class RunContext(
     root: os.Path,
     agentInventory: AgentInventory,
     taskNumber: Option[Int],
-    recursive: Boolean = false
+    recursive: Recursive = Recursive(false)
 )
 
 final case class TaskRunner(
@@ -83,7 +88,7 @@ final case class TaskRun(
     task: Issue,
     runner: TaskRunner,
     worktreePath: os.Path,
-    branchName: String,
+    branchName: BranchName,
     // Base to branch off of / merge into. A subtask of a split task
     // (see GitHub.parentIds) integrates into its parent's shared branch
     // instead of the default branch, so sibling subtasks land together in
@@ -98,14 +103,14 @@ final case class TaskWithPrompt(
     replayContext: Option[String]
 )
 
-final case class TaskWithOutput(run: TaskRun, output: String)
+final case class TaskWithOutput(run: TaskRun, output: Output)
 
 final case class NeedsUserInput(run: TaskRun, questions: String)
 
 final case class SplitTask(run: TaskRun)
 
 final case class TaskEvaluation(
-    body: String,
+    body: Body,
     questions: Option[String],
     execution: String
 )
@@ -126,7 +131,7 @@ final case class AgentFinalization(
 final case class PublishRequest(
     root: os.Path,
     worktreePath: os.Path,
-    branchName: String,
+    branchName: BranchName,
     baseBranch: Option[String],
     task: Issue,
     finalization: AgentFinalization,
@@ -155,7 +160,7 @@ final case class RunSummary(
           ujson.Obj.from(
             Seq(
               "number" -> ujson.Num(issue.number),
-              "title" -> ujson.Str(issue.title),
+              "title" -> ujson.Str(issue.title.value),
               "state" -> ujson.Str(issue.state)
             )
           )
