@@ -1,6 +1,5 @@
 import arrowstep.core.*
 import arrowstep.runtime.AgentMain
-import cats.Monoid
 import cats.data.Kleisli
 import cats.effect.ExitCode
 import cats.effect.IO
@@ -48,9 +47,7 @@ object Main extends IOApp:
   private val UserInputSoundEnabled =
     sys.env
       .get("GH_TASKS_USER_INPUT_SOUND")
-      .forall(value =>
-        !Set("0", "false", "no", "off").contains(value.toLowerCase)
-      )
+      .forall(value => !Set("0", "false", "no", "off").contains(value.toLowerCase))
 
   def run(args: List[String]): IO[ExitCode] =
     val taskNumber = parseTaskNumber(args)
@@ -80,8 +77,7 @@ object Main extends IOApp:
         routeEmptySelection = routeEmptySelection[F],
         noTaskSummary = noTaskSummary[F],
         executeSelectedCandidates = executeSelectedCandidates[F],
-        toProgramSays =
-          Kleisli(summary => ProgramSays.Done(summary.toJson).pure[F])
+        toProgramSays = Kleisli(summary => ProgramSays.Done(summary.toJson).pure[F])
       ),
       taskArrows = TaskArrows[Flow[F]](
         routeResumeOrRun = routeResumeOrRun[F],
@@ -104,12 +100,13 @@ object Main extends IOApp:
         publishRemote = publishRemote[F],
         publishLocal = publishLocal[F]
       ),
-      preparedTaskArrows = PreparedTaskArrows[Flow[F]](
+      executeTaskArrows = ExecuteTaskArrows[Flow[F]](
         runAgent = runAgent[F],
         runProjectValidation = runProjectValidation[F],
         recordAgentOutput = recordAgentOutput[F],
-        verifyReplayCi = verifyReplayCi[F],
-        closeTaskIssue = closeTaskIssue[F]
+        verifyRelatedPullRequestCi = verifyRelatedPullRequestCi[F],
+        closeTaskIssue = closeTaskIssue[F],
+        checkParentsForCompletion = checkParentsForCompletion[F]
       )
     ).withArrowLogging(arrowLogger[F])
 
@@ -127,9 +124,7 @@ object Main extends IOApp:
         rawIssues <- GitHub.fetchIssues(context.root)
         issues <- rawIssues.traverse(effectiveIssue[F](context.root, _))
         openIssueNumbers = issues.map(_.number).toSet
-        candidatesByNumber = issues.filter(task =>
-          context.taskNumber.forall(_ === task.number)
-        )
+        candidatesByNumber = issues.filter(task => context.taskNumber.forall(_ === task.number))
         filteredByDeps <- candidatesByNumber.filterA { task =>
           if context.taskNumber.isDefined then
             // If a specific task is targeted, do not filter out by dependencies/children.
@@ -144,9 +139,7 @@ object Main extends IOApp:
             val openChildren = GitHub.hasOpenChildren(task, issues)
             Option
               .when(openChildren)("has open child tasks")
-              .traverse_(why =>
-                TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
-              )
+              .traverse_(why => TaskLogger.trace(s"selectTask excluding #${task.number}: $why"))
               .as(!openChildren)
           else
             val unresolvedDeps =
@@ -160,22 +153,16 @@ object Main extends IOApp:
               else if openChildren then Some("has open child tasks")
               else None
             reason
-              .traverse_(why =>
-                TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
-              )
+              .traverse_(why => TaskLogger.trace(s"selectTask excluding #${task.number}: $why"))
               .as(!excluded)
         }
         notAlreadyClaimed <- filteredByDeps.filterA { task =>
-          val claimed = task.labels.exists(label =>
-            label === "status: in progress" || label === "in progress"
-          )
+          val claimed = task.labels.exists(label => label === "status: in progress" || label === "in progress")
           Option
             .when(claimed)(
               "already labeled in progress (claimed by another run)"
             )
-            .traverse_(why =>
-              TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
-            )
+            .traverse_(why => TaskLogger.trace(s"selectTask excluding #${task.number}: $why"))
             .as(!claimed)
         }
         notAlreadyCompleted <- notAlreadyClaimed.filterA { task =>
@@ -232,9 +219,7 @@ object Main extends IOApp:
             .when(skipDirectReplay)(
               "already split into open child tasks; skipping direct replay"
             )
-            .traverse_(why =>
-              TaskLogger.trace(s"selectTask excluding #${task.number}: $why")
-            )
+            .traverse_(why => TaskLogger.trace(s"selectTask excluding #${task.number}: $why"))
             .as(!skipDirectReplay)
         }
         // A branch/PR from an earlier run may still be open (e.g. it was
@@ -263,15 +248,13 @@ object Main extends IOApp:
             context.agentInventory
               .selectRunner(GitHub.taskRunners(task))
               .getOrElse(evaluatorRunner),
-            resumePullRequest = hasOpenPr
+            resumePullRequest = ResumePullRequest(hasOpenPr)
           )
         }
         _ <- progress(
           context.taskNumber.fold(
             s"Found ${candidates.size} runnable open tasks with preferred runner metadata."
-          )(number =>
-            s"Found ${candidates.size} runnable open tasks matching #$number."
-          )
+          )(number => s"Found ${candidates.size} runnable open tasks matching #$number.")
         )
       yield TaskSelection(context, candidates)
     }
@@ -289,8 +272,7 @@ object Main extends IOApp:
       .read(root, issue)
       .map(merged => issue.copy(body = TaskMetadata.render(merged)))
 
-  private def routeEmptySelection[F[_]: Sync]
-      : -->[F, TaskSelection, Either[NoTask, TaskSelection]] =
+  private def routeEmptySelection[F[_]: Sync]: -->[F, TaskSelection, Either[NoTask, TaskSelection]] =
     Kleisli.fromFunction { selection =>
       Either.cond(
         !(selection.candidates.isEmpty),
@@ -299,8 +281,7 @@ object Main extends IOApp:
       )
     }
 
-  private def executeSelectedCandidates[F[_]: Sync]
-      : -->[F, TaskSelection, RunSummary] =
+  private def executeSelectedCandidates[F[_]: Sync]: -->[F, TaskSelection, RunSummary] =
     Kleisli { selection =>
       val context = selection.context
       val candidates = selection.candidates
@@ -322,9 +303,10 @@ object Main extends IOApp:
                   recursiveFlow.run(latestIssue)
                 case None =>
                   RunSummary(
-                    status = "completed",
-                    message =
-                      s"Task #${candidate.issue.number} is already completed.",
+                    status = Status("completed"),
+                    message = Message5(
+                      s"Task #${candidate.issue.number} is already completed."
+                    ),
                     task = Some(candidate.issue)
                   ).pure[F]
               }
@@ -332,8 +314,8 @@ object Main extends IOApp:
         }
       yield summaries.lastOption.getOrElse(
         RunSummary(
-          status = "completed",
-          message = "All candidates completed.",
+          status = Status("completed"),
+          message = Message5("All candidates completed."),
           task = None
         )
       )
@@ -365,15 +347,15 @@ object Main extends IOApp:
           result <- freshMap.get(rootNumber) match
             case None =>
               RunSummary(
-                status = "completed",
-                message = s"Task #$rootNumber is already completed.",
+                status = Status("completed"),
+                message = Message5(s"Task #$rootNumber is already completed."),
                 task = None
               ).pure[F]
             case Some(rootIssue) =>
               for
                 summary <- recursiveFlow.run(rootIssue)
                 next <-
-                  if summary.status === "needs-input" then summary.pure[F]
+                  if summary.status.value === "needs-input" then summary.pure[F]
                   else if previous.contains(summary) then
                     progress(
                       s"Task #$rootNumber made no further progress under --recursive; stopping."
@@ -399,14 +381,13 @@ object Main extends IOApp:
       defer = self => Kleisli(issue => self.run(issue))
     ).executeRecursive
 
-  private def checkIfCompleted[F[_]: Sync]
-      : -->[F, Issue, Either[RunSummary, Issue]] =
+  private def checkIfCompleted[F[_]: Sync]: -->[F, Issue, Either[RunSummary, Issue]] =
     Kleisli { issue =>
-      if issue.state.toLowerCase == "closed" then
+      if issue.state.value.toLowerCase == "closed" then
         Left(
           RunSummary(
-            status = "completed",
-            message = s"Task #${issue.number} is already completed.",
+            status = Status("completed"),
+            message = Message5(s"Task #${issue.number} is already completed."),
             task = Some(issue)
           )
         ).pure[F]
@@ -436,7 +417,7 @@ object Main extends IOApp:
             case (Left(failedSummary), _) => Left(failedSummary).pure[F]
             case (Right(_), depIssue) =>
               executeRecursive.run(depIssue).map { summary =>
-                Either.cond(summary.status == "completed", (), summary)
+                Either.cond(summary.status.value == "completed", (), summary)
               }
           }
       yield dependencyResult match
@@ -444,9 +425,10 @@ object Main extends IOApp:
         case Right(()) if openChildren.nonEmpty =>
           Left(
             RunSummary(
-              status = "split",
-              message =
-                s"Task #${issue.number} is already split; processed open child tasks before parent replay.",
+              status = Status("split"),
+              message = Message5(
+                s"Task #${issue.number} is already split; processed open child tasks before parent replay."
+              ),
               task = Some(issue)
             )
           )
@@ -471,33 +453,32 @@ object Main extends IOApp:
           progress(
             s"Task #${issue.number} is claimed by another process. Waiting for completion..."
           ) *>
-            pollGitHubForCompletion[F]((context.root, issue.number)).map {
-              finalIssue =>
-                RunSummary(
-                  status = "completed",
-                  message =
-                    s"Task #${issue.number} was completed by another process.",
-                  task = Some(finalIssue)
-                )
+            pollGitHubForCompletion[F]((context.root, issue.number)).map { finalIssue =>
+              RunSummary(
+                status = Status("completed"),
+                message = Message5(
+                  s"Task #${issue.number} was completed by another process."
+                ),
+                task = Some(finalIssue)
+              )
             }
         }
     }
 
-  private def pollGitHubForCompletion[F[_]: Sync]
-      : Kleisli[F, (os.Path, TaskNumber), Issue] =
+  private def pollGitHubForCompletion[F[_]: Sync]: Kleisli[F, (os.Path, TaskNumber), Issue] =
     Kleisli.apply { case (root, taskId) =>
       val pollInterval = 30.seconds
       def loop: F[Issue] =
         GitHub.fetchIssues(root).flatMap { issues =>
           issues.find(_.number === taskId) match
-            case Some(issue) if issue.state.toLowerCase == "closed" =>
+            case Some(issue) if issue.state.value.toLowerCase == "closed" =>
               issue.pure[F]
             case None =>
               Issue(
                 taskId,
                 IssueTitle(s"Task #$taskId"),
                 IssueBody(""),
-                "closed"
+                State("closed")
               ).pure[F]
             case _ =>
               Sync[F].blocking(Thread.sleep(pollInterval.toMillis)) *> loop
@@ -513,15 +494,18 @@ object Main extends IOApp:
       )(number =>
         s"No runnable open task found for #$number. It may be closed, blocked by dependencies or open child tasks, marked needs-input, or already claimed by another process."
       )
-      RunSummary(status = "no-task", message = message, task = None).pure[F]
+      RunSummary(
+        status = Status("no-task"),
+        message = Message5(message),
+        task = None
+      ).pure[F]
     }
 
-  private def routeResumeOrRun[F[_]: Sync]
-      : -->[F, TaskCandidate, Either[ClaimedTask, ClaimedTask]] =
+  private def routeResumeOrRun[F[_]: Sync]: -->[F, TaskCandidate, Either[ClaimedTask, ClaimedTask]] =
     Kleisli { task =>
       val run = taskRun(task.context, task.issue, task.runner)
       val shouldResume =
-        if task.resumePullRequest then
+        if task.resumePullRequest.value then
           GitHub
             .hasOpenPullRequestForBranch(task.context.root, run.branchName)
             .flatTap { stillHasOpenPr =>
@@ -533,17 +517,14 @@ object Main extends IOApp:
             }
         else false.pure[F]
 
-      shouldResume.map(resumePullRequest =>
-        Either.cond(resumePullRequest, run, run)
-      )
+      shouldResume.map(resumePullRequest => Either.cond(resumePullRequest, run, run))
     }
 
-  private def completedTaskSummary[F[_]: Sync]
-      : -->[F, ClaimedTask, RunSummary] =
+  private def completedTaskSummary[F[_]: Sync]: -->[F, ClaimedTask, RunSummary] =
     Kleisli { run =>
       RunSummary(
-        status = "completed",
-        message = s"Task #${run.task.number} completed successfully.",
+        status = Status("completed"),
+        message = Message5(s"Task #${run.task.number} completed successfully."),
         task = Some(run.task)
       ).pure[F]
     }
@@ -557,9 +538,9 @@ object Main extends IOApp:
           .run(acquiredTask)
           .onError { case _ =>
             git.preserveUnpushedCommits(
-              acquiredTask.run.worktreePath,
-              acquiredTask.run.branchName,
-              acquiredTask.run.baseBranch
+              acquiredTask.claimedTask.worktreePath,
+              acquiredTask.claimedTask.branchName,
+              acquiredTask.claimedTask.baseBranch
             )
           }
       }
@@ -574,9 +555,10 @@ object Main extends IOApp:
       )
       .map(input =>
         RunSummary(
-          status = "needs-input",
-          message =
-            s"Task #${input.run.task.number} needs user input before execution.",
+          status = Status("needs-input"),
+          message = Message5(
+            s"Task #${input.run.task.number} needs user input before execution."
+          ),
           task = Some(input.run.task)
         )
       )
@@ -584,9 +566,10 @@ object Main extends IOApp:
   private def splitTaskSummary[F[_]: Sync]: -->[F, SplitTask, RunSummary] =
     Kleisli { split =>
       val summary = RunSummary(
-        status = "split",
-        message =
-          s"Task #${split.run.task.number} was evaluated for splitting and will not be implemented directly.",
+        status = Status("split"),
+        message = Message5(
+          s"Task #${split.run.task.number} was evaluated for splitting and will not be implemented directly."
+        ),
         task = Some(split.run.task)
       )
       if split.replayed then summary.pure[F]
@@ -600,15 +583,13 @@ object Main extends IOApp:
     }
 
   private def announceTask[F[_]: Sync]: -->[F, ClaimedTask, ClaimedTask] =
-    TaskLogger.progress(run =>
-      s"Selected next task: #${run.task.number} - ${run.task.title}"
-    )
+    TaskLogger.progress(run => s"Selected next task: #${run.task.number} - ${run.task.title}")
 
   private def markTaskInProgress[
       F[_]: Sync
   ]: -->[F, PreparedTask, PreparedTask] =
     Kleisli { task =>
-      val run = task.run
+      val run = task.claimedTask
       GitHub
         .setIssueStatus(progress)(
           run.context.root,
@@ -629,148 +610,14 @@ object Main extends IOApp:
       PreparedTask(run, dependencyConclusion, replayContext)
     })
 
-  private def evaluateTask[
-      F[_]: Sync
-  ]: -->[F, PreparedTask, Either[
-    NeedsUserInput,
-    Either[SplitTask, PreparedTask]
-  ]] =
-    Kleisli { task =>
-      val run = task.run
-      def runEvaluator(userAnswer: Option[String]): F[TaskEvaluation] =
-        progress(
-          s"Evaluating task #${run.task.number} with ${evaluatorRunner.display}..."
-        ) >> AgentExecutor[F]
-          .run(
-            evaluatorRunner,
-            evaluateTaskPrompt(
-              run.task,
-              task.parentConclusion,
-              run.context.agentInventory,
-              userAnswer
-            ),
-            run.context.root,
-            EvaluatorAllowedTools,
-            Some(EvaluationJsonSchema)
-          )
-          .map(parseTaskEvaluation(_, run.task.body))
+  def evaluationTaskArrows[F[_]: Sync] = EvaluationArrows[F](
+    progress = progress,
+    evaluatorRunner = evaluatorRunner,
+    waitForUserInput = waitForUserInput[F]
+  )
 
-      def createMissingSplitSubtasks(evaluation: TaskEvaluation): F[Unit] =
-        progress(
-          s"Creating missing split subtasks for already-evaluated task #${run.task.number} with ${evaluatorRunner.display}..."
-        ) >>
-          AgentExecutor[F]
-            .run(
-              evaluatorRunner,
-              splitTaskPrompt(
-                run.task.copy(body = evaluation.body),
-                task.parentConclusion,
-                run.context.agentInventory
-              ),
-              run.context.root,
-              EvaluatorAllowedTools
-            )
-            .void
-
-      def ensureSplitExists(evaluation: TaskEvaluation): F[TaskEvaluation] =
-        if evaluation.execution === "split" then
-          GitHub.fetchIssues(run.context.root).flatMap { allIssues =>
-            if GitHub.hasOpenChildren(run.task, allIssues) then
-              evaluation.pure[F]
-            else
-              // The task has already been evaluated. Do not call the
-              // evaluator again; complete the side effect the split verdict
-              // required, then verify it produced linked child issues.
-              GitHub
-                .commentSplitMissingWarning(progress)(
-                  run.context.root,
-                  run.task
-                ) *>
-                progress(
-                  s"Split expected for task #${run.task.number}, but no child issues exist; creating missing split subtasks without re-evaluating..."
-                ) *>
-                createMissingSplitSubtasks(evaluation) *>
-                GitHub.fetchIssues(run.context.root).flatMap { updatedIssues =>
-                  if GitHub.hasOpenChildren(run.task, updatedIssues) then
-                    evaluation.pure[F]
-                  else
-                    Sync[F].raiseError(
-                      RuntimeException(
-                        s"Task #${run.task.number} is already evaluated as split, but missing split-subtask creation produced no linked child issues."
-                      )
-                    )
-                }
-          }
-        else evaluation.pure[F]
-
-      for
-        userAnswer <- GitHub.userAnswer(progress)(run.context.root, run.task)
-        hasRealQuestion <- GitHub.hasQuestionComment(run.context.root, run.task)
-        replayedEvaluation = existingEvaluation(run.task, hasRealQuestion)
-          .filter(_ => userAnswer.isEmpty)
-        evaluation <-
-          replayedEvaluation match
-            case Some(cached) =>
-              progress(
-                s"Reusing existing evaluation for #${run.task.number}."
-              ).as(cached)
-            case None => runEvaluator(userAnswer)
-        verifiedEvaluation <- ensureSplitExists(evaluation)
-        cleanBody = stripMarkdownFence(verifiedEvaluation.body.value).trim
-        // Evaluation/Execution are always taken from verifiedEvaluation, not
-        // from whatever text happens to be embedded in cleanBody: for the
-        // split-verification fallback above, cleanBody is the task's old
-        // (pre-fallback) body, and trusting its stale "Execution: split"
-        // would silently re-persist the wrong status.
-        priorMetadata = TaskMetadata.parse(run.task.body.value)
-        newMetadata = TaskMetadata
-          .parse(cleanBody)
-          .copy(
-            evaluation = Some(
-              if verifiedEvaluation.questions.exists(_.trim.nonEmpty) then
-                "needs-input"
-              else "ready"
-            ),
-            execution = Some(normalizeExecution(verifiedEvaluation.execution))
-          )
-        finalMetadata = Monoid[TaskMetadata].combine(priorMetadata, newMetadata)
-        updatedTask = run.task.copy(body = TaskMetadata.render(finalMetadata))
-        updatedRunner = run.context.agentInventory
-          .selectRunner(GitHub.taskRunners(updatedTask))
-          .getOrElse(run.runner)
-        updatedRun = run.copy(task = updatedTask, runner = updatedRunner)
-        // Never rewrite the issue body: persist the evaluator's decision as a
-        // new "Task metadata:" comment instead, folded back in on the next
-        // read by TaskMetadataStore (see effectiveIssue).
-        _ <-
-          if updatedTask.body.value.trim =!= run.task.body.value.trim then
-            TaskMetadataStore
-              .commentBased[F](progress)
-              .write(
-                run.context.root,
-                run.task.number,
-                newMetadata
-              )
-          else Sync[F].unit
-        result <- {
-          verifiedEvaluation.questions.filter(_.trim.nonEmpty) match
-            case Some(questions) =>
-              waitForUserInput[F]((task.copy(run = updatedRun), questions.trim))
-            case None if verifiedEvaluation.execution === "split" =>
-              Right(
-                Left(
-                  SplitTask(
-                    updatedRun,
-                    replayed =
-                      replayedEvaluation.exists(_.execution === "split")
-                  )
-                )
-              ).pure[F]
-            case None =>
-              Right(Right(task.copy(run = updatedRun))).pure[F]
-        }
-      yield result
-    }
+  private def evaluateTask[F[_]: Sync]: -->[F, PreparedTask, Either[NeedsUserInput, Either[SplitTask, PreparedTask]]] =
+    evaluationTaskArrows.evaluateTask
 
   private def waitForUserInput[F[_]: Sync]: Kleisli[
     F,
@@ -778,7 +625,7 @@ object Main extends IOApp:
     Either[NeedsUserInput, Either[SplitTask, PreparedTask]]
   ] =
     Kleisli.apply { case (task, questions) =>
-      val run = task.run
+      val run = task.claimedTask
       for
         _ <- GitHub.commentNeedsUserInput(progress)(
           run.context.root,
@@ -794,12 +641,11 @@ object Main extends IOApp:
                 s"Continuing task #${run.task.number} after receiving user input..."
               ) *> evaluateTask[F].run(task)
             case None =>
-              Left(NeedsUserInput(run, questions)).pure[F]
+              Left(NeedsUserInput(run, Questions(questions))).pure[F]
       yield result
     }
 
-  private def awaitUserAnswer[F[_]: Sync]
-      : Kleisli[F, (os.Path, Issue), Option[String]] =
+  private def awaitUserAnswer[F[_]: Sync]: Kleisli[F, (os.Path, Issue), Option[String]] =
     Kleisli.apply { case (root, task) =>
       def loop(deadlineMillis: DeadlineMillis): F[Option[String]] =
         for
@@ -855,7 +701,7 @@ object Main extends IOApp:
   private def worktreeResource[F[_]: Sync](
       task: PreparedTask
   ): Resource[F, PreparedTask] =
-    val run = task.run
+    val run = task.claimedTask
     Resource.makeCase {
       for
         _ <- TaskLogger.trace[F](
@@ -872,7 +718,7 @@ object Main extends IOApp:
         )
       yield task
     } { (acquiredTask, exitCase) =>
-      val acquiredRun = acquiredTask.run
+      val acquiredRun = acquiredTask.claimedTask
       exitCase match
         case Resource.ExitCase.Succeeded =>
           TaskLogger.trace[F](
@@ -927,29 +773,27 @@ object Main extends IOApp:
   private def raiseK[F[_]: Sync, A]: -->[F, Throwable, A] =
     Kleisli(Sync[F].raiseError)
 
-  private def retryWithFallback[F[_]: Sync]
-      : -->[F, (PreparedTask, Throwable), ExecutedTask] =
+  private def retryWithFallback[F[_]: Sync]: -->[F, (PreparedTask, Throwable), ExecutedTask] =
     Kleisli
       .fromFunction[F, (PreparedTask, Throwable)] { case (task, error) =>
-        task.run.context.agentInventory
-          .nextStrongerImplementor(task.run.runner) match
+        task.claimedTask.context.agentInventory
+          .nextStrongerImplementor(task.claimedTask.runner) match
           case Some(fallbackRunner) =>
             val fallbackTask =
-              task.copy(run = task.run.copy(runner = fallbackRunner))
+              task.copy(claimedTask = task.claimedTask.copy(runner = fallbackRunner))
             val msg =
-              s"Runner ${task.run.runner.display} failed after retries: ${error.getMessage}. Retrying task #${task.run.task.number} with stronger fallback ${fallbackRunner.display}..."
+              s"Runner ${task.claimedTask.runner.display} failed after retries: ${error.getMessage}. Retrying task #${task.claimedTask.task.number} with stronger fallback ${fallbackRunner.display}..."
             Right((msg, fallbackTask))
           case None =>
             val msg =
-              s"Runner ${task.run.runner.display} failed after retries and no stronger fallback runner is available."
+              s"Runner ${task.claimedTask.runner.display} failed after retries and no stronger fallback runner is available."
             Left((msg, error))
       } >>> ((progressK[F, Throwable] >>> raiseK[F, ExecutedTask])
       ||| (progressK[F, PreparedTask] >>> runTaskWithRunner[F]))
 
-  private def runTaskWithRunner[F[_]: Sync]
-      : -->[F, PreparedTask, ExecutedTask] =
+  private def runTaskWithRunner[F[_]: Sync]: -->[F, PreparedTask, ExecutedTask] =
     Kleisli { task =>
-      val run = task.run
+      val run = task.claimedTask
       val prompt =
         taskPrompt(
           run.task,
@@ -970,11 +814,11 @@ object Main extends IOApp:
         _ <- Sync[F]
           .raiseError(
             RuntimeException(
-              s"Agent ${run.runner.display} reported it could not proceed (permission/tool wall). Output: ${output.trim}"
+              s"Agent ${run.runner.display} reported it could not proceed (permission/tool wall). Output: ${output.value.trim}"
             )
           )
           .whenA(looksBlocked(output))
-      yield ExecutedTask(run, AgentOutput(output))
+      yield ExecutedTask(run, output)
     }
 
   // Exit code 0 only means the process returned; a stuck agent that gave up
@@ -991,26 +835,20 @@ object Main extends IOApp:
     "permission denied and cannot continue"
   )
 
-  private def looksBlocked(output: String): Boolean =
-    val lower = output.toLowerCase
+  private def looksBlocked(output: Output): Boolean =
+    val lower = output.value.toLowerCase
     BlockedSignals.exists(lower.contains)
 
-  private def recordAgentOutput[F[_]: Sync]
-      : -->[F, ExecutedTask, ExecutedTask] =
-    Kleisli { task =>
-      task.pure[F]
-    }
+  private def recordAgentOutput[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
+    Kleisli.ask[F, ExecutedTask]
 
-  private def runProjectValidation[F[_]: Sync]
-      : -->[F, ExecutedTask, ExecutedTask] =
-    Kleisli { task =>
-      git[F]
-        .runProjectValidation(task.run.worktreePath)
-        .as(task)
-    }
+  private def runProjectValidation[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
+    Kleisli.ask <* (
+      Kleisli.fromFunction { (t: ExecutedTask) => t.run.worktreePath } >>>
+        git[F].runProjectValidation
+    )
 
-  private def classifyAgentResultForPublication[F[_]: Sync]
-      : -->[F, ExecutedTask, Either[ChangedTask, UnchangedTask]] =
+  private def classifyAgentResultForPublication[F[_]: Sync]: -->[F, ExecutedTask, Either[ChangedTask, UnchangedTask]] =
     (Kleisli.ask[F, ExecutedTask] &&& Kleisli { (task: ExecutedTask) =>
       git[F].filesChanged(task.run.worktreePath)
     } &&& Kleisli { (task: ExecutedTask) =>
@@ -1052,14 +890,13 @@ object Main extends IOApp:
       ).pure[F]
     }
 
-    val handleError = Kleisli[F, (ChangedTask, Throwable), ExecutedTask] {
-      case (changed, error) =>
-        val run = changed.run.run
-        GitHub.commentTaskFailure(progress)(
-          run.context.root,
-          run.task,
-          error.getMessage
-        ) *> Sync[F].raiseError(error)
+    val handleError = Kleisli[F, (ChangedTask, Throwable), ExecutedTask] { case (changed, error) =>
+      val run = changed.run.run
+      GitHub.commentTaskFailure(progress)(
+        run.context.root,
+        run.task,
+        error.getMessage
+      ) *> Sync[F].raiseError(error)
     }
 
     val publicationArrows = PublicationArrows[Flow[F]](
@@ -1083,10 +920,10 @@ object Main extends IOApp:
   ]: -->[F, UnchangedTask, ExecutedTask] =
     TaskLogger.progress[F, UnchangedTask](_ => "No files changed.").map(_.run)
 
-  private def verifyReplayCi[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
+  private def verifyRelatedPullRequestCi[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli { task =>
       GitHub
-        .verifyTaskReplayCi(progress)(
+        .verifyRelatedPullRequestCiForTask(progress)(
           task.run.context.root,
           task.run.task,
           task.run.branchName
@@ -1120,20 +957,25 @@ object Main extends IOApp:
           "completed"
         )
         _ <- GitHub.closeIssue(run.context.root, run.task.number)
-        _ <- GitHub.checkParentsForCompletion(progress)(
+        _ <- progress("Task execution finished successfully.")
+      yield run
+    }
+
+  private def checkParentsForCompletion[F[_]: Sync]: -->[F, ClaimedTask, ClaimedTask] =
+    Kleisli { run =>
+      GitHub
+        .checkParentsForCompletion(progress)(
           run.context.root,
           run.task
         )
-        _ <- progress("Task execution finished successfully.")
-      yield run
+        .as(run)
     }
 
   // Completes a task whose implementer already ran in a prior, interrupted
   // invocation and left an open Pull Request behind: verify/merge that PR,
   // then close the task the same way a fresh run's closeTaskIssue would, and
   // sweep up any leftover local worktree/branch (usually already gone).
-  private def resumeExistingPullRequest[F[_]: Sync]
-      : -->[F, ClaimedTask, RunSummary] =
+  private def resumeExistingPullRequest[F[_]: Sync]: -->[F, ClaimedTask, RunSummary] =
     val resumeAndClose: -->[F, ClaimedTask, RunSummary] =
       Kleisli[F, ClaimedTask, ExecutedTask] { run =>
         for
@@ -1145,19 +987,23 @@ object Main extends IOApp:
             run.branchName
           )
         yield ExecutedTask(run, output = AgentOutput(""))
-      } >>> closeTaskIssue[F] >>> Kleisli[F, ClaimedTask, RunSummary] {
-        completedRun =>
-          for _ <- git[F].cleanupWorktree(
-              completedRun.context.root,
-              completedRun.worktreePath,
-              completedRun.branchName
-            )
-          yield RunSummary(
-            status = "completed",
-            message =
-              s"Task #${completedRun.task.number} completed successfully (resumed existing Pull Request).",
-            task = Some(completedRun.task)
+      } >>> closeTaskIssue[F] >>> checkParentsForCompletion[F] >>> Kleisli[
+        F,
+        ClaimedTask,
+        RunSummary
+      ] { completedRun =>
+        for _ <- git[F].cleanupWorktree(
+            completedRun.context.root,
+            completedRun.worktreePath,
+            completedRun.branchName
           )
+        yield RunSummary(
+          status = Status("completed"),
+          message = Message5(
+            s"Task #${completedRun.task.number} completed successfully (resumed existing Pull Request)."
+          ),
+          task = Some(completedRun.task)
+        )
       }
 
     val partition: -->[F, (ClaimedTask, Throwable), Either[
@@ -1166,7 +1012,7 @@ object Main extends IOApp:
     ]] =
       Kleisli.fromFunction {
         case (run, _: GitHub.NoOpenPullRequestToResumeException) => Left(run)
-        case (run, error) => Right((run, error))
+        case (run, error)                                        => Right((run, error))
       }
 
     val localExecutePreparedTask: -->[F, PreparedTask, RunSummary] =
@@ -1187,13 +1033,12 @@ object Main extends IOApp:
         s"No open Pull Request remains for ${run.branchName}; creating a new run instead of resuming."
       ) >>> localTaskExecution
 
-    val handleOtherError = Kleisli[F, (ClaimedTask, Throwable), RunSummary] {
-      case (run, error) =>
-        GitHub.commentTaskFailure(progress)(
-          run.context.root,
-          run.task,
-          error.getMessage
-        ) *> Sync[F].raiseError(error)
+    val handleOtherError = Kleisli[F, (ClaimedTask, Throwable), RunSummary] { case (run, error) =>
+      GitHub.commentTaskFailure(progress)(
+        run.context.root,
+        run.task,
+        error.getMessage
+      ) *> Sync[F].raiseError(error)
     }
 
     val handleError = partition >>> (handleNoPr ||| handleOtherError)
@@ -1209,9 +1054,7 @@ object Main extends IOApp:
     val logEnter =
       TaskLogger.trace[F, A](input => s"enter $name input=${summarize(input)}")
     val logExit =
-      TaskLogger.trace[F, B](output =>
-        s"exit $name output=${summarize(output)}"
-      )
+      TaskLogger.trace[F, B](output => s"exit $name output=${summarize(output)}")
     val logError = TaskLogger.trace[F, Throwable](error =>
       s"fail $name error=${error.getClass.getSimpleName}: ${error.getMessage}"
     ) >>> Kleisli(Sync[F].raiseError[B])
@@ -1249,16 +1092,16 @@ object Main extends IOApp:
       case ExecutedTask(run, output) =>
         s"ExecutedTask(issue=#${run.task.number},outputChars=${output.value.length})"
       case NeedsUserInput(run, questions) =>
-        s"NeedsUserInput(issue=#${run.task.number},questionChars=${questions.length})"
+        s"NeedsUserInput(issue=#${run.task.number},questionChars=${questions.value.length})"
       case SplitTask(run, _) =>
         s"SplitTask(issue=#${run.task.number})"
       case TaskEvaluation(body, questions, execution) =>
         s"TaskEvaluation(execution=$execution,bodyChars=${body.value.length},hasQuestions=${questions
             .exists(_.trim.nonEmpty)})"
       case ExistingBranch(run) =>
-        s"ExistingBranch(issue=#${run.run.task.number},branch=${run.run.branchName})"
+        s"ExistingBranch(issue=#${run.claimedTask.task.number},branch=${run.claimedTask.branchName})"
       case NewBranch(run) =>
-        s"NewBranch(issue=#${run.run.task.number},branch=${run.run.branchName})"
+        s"NewBranch(issue=#${run.claimedTask.task.number},branch=${run.claimedTask.branchName})"
       case ChangedTask(run) =>
         s"ChangedTask(issue=#${run.run.task.number})"
       case UnchangedTask(run) =>
@@ -1283,7 +1126,7 @@ object Main extends IOApp:
       case RunSummary(status, message, task) =>
         s"RunSummary(status=$status,task=${task
             .map(_.number)
-            .fold("none")(number => s"#$number")},message=${quote(message)})"
+            .fold("none")(number => s"#$number")},message=${quote(message.value)})"
       case Left(value) =>
         s"Left(${summarize(value)})"
       case Right(value) =>
@@ -1402,29 +1245,6 @@ Final answer contract:
 - Include a one-line "Conclusion:" summary for tasks that depend on this one (what changed, what's now available to build on).
 """)
 
-  // Scoped tool permission for the evaluator run only: "split" verdicts
-  // require it to actually create child issues, which a non-interactive
-  // `claude -p` run otherwise can't do — there's no TTY to approve the Bash
-  // call, so it stalls out asking for confirmation instead of producing the
-  // required JSON. `gh issue edit` is deliberately NOT granted: that would
-  // let the evaluator rewrite an issue body directly, bypassing the
-  // comment-only TaskMetadata architecture (see taskMetadata.scala) the same
-  // way the old updateIssueBody call used to. Linking a new subtask back to
-  // its parent should go through `gh issue comment` instead.
-  private val EvaluatorAllowedTools = Seq(
-    "Bash(gh issue create:*)",
-    "Bash(gh issue comment:*)"
-  )
-
-  // Forces the claude CLI's final response to conform to this shape (via
-  // --json-schema) instead of relying on the prompt's "Return only JSON"
-  // instruction and hoping the model complies. This is what parseTaskEvaluation
-  // expects; matching it here should turn most JSON-parse failures into
-  // guaranteed-valid output instead. Only "claude" consumes jsonSchema
-  // (TaskRunner.command) — a no-op for other evaluator runners.
-  private val EvaluationJsonSchema =
-    """{"type":"object","properties":{"status":{"type":"string","enum":["ready","split","questions"]},"body":{"type":"string"},"questions":{"type":"string"}},"required":["status","body"]}"""
-
   // Implementer runs unattended (`-p`, stdin closed) with zero tool grants
   // previously: no --allowedTools meant every Edit/Write/Bash call hit the
   // permission wall with nobody to approve it, so the agent gave up, printed
@@ -1440,215 +1260,6 @@ Final answer contract:
     "Grep",
     "Bash"
   )
-
-  private def evaluateTaskPrompt(
-      task: Issue,
-      dependencyConclusion: Option[String],
-      agentInventory: AgentInventory,
-      userAnswer: Option[String] = None
-  ): AgentPrompt =
-    val dependencyConclusionStr = dependencyConclusion
-      .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
-      .getOrElse("")
-    val userAnswerStr = userAnswer
-      .map(answer =>
-        s"\nUser's answer to previous clarifying questions:\n$answer\n\nIncorporate this answer. Only set status to \"questions\" again if the answer still leaves essential information missing.\n"
-      )
-      .getOrElse("")
-    val descriptionState =
-      if task.body.value.trim.isEmpty then "missing"
-      else if strongDescription(task.body) then "strong"
-      else "weak"
-
-    AgentPrompt(s"""Evaluate and prepare this GitHub task before implementation.
-
-Task ID: #${task.number}
-Title: ${task.title}
-Description state: $descriptionState
-
-Available local implementor tools:
-${agentInventory.promptBlock}
-
-Current Task Description:
-${task.body}
-$dependencyConclusionStr$userAnswerStr
-Return only JSON, with this shape:
-{
-  "status": "ready" | "split" | "questions",
-  "body": "updated GitHub issue body",
-  "questions": "questions for the user, only when status is questions"
-}
-
-Rules:
-- If the task is simple enough for implementation, write this metadata into the body:
-  Task metadata:
-  Evaluation: ready
-  Execution: implement
-- If the task should be split, create subtasks and write this metadata into the parent body:
-  Task metadata:
-  Evaluation: ready
-  Execution: split
-- If questions are needed, write this metadata into the body:
-  Task metadata:
-  Evaluation: needs-input
-  Execution: needs-input
-- Use Claude/Opus-level judgment to evaluate task clarity, scope, and split-readiness.
-- If the description is missing or weak, create a clear, structured, detailed GitHub issue body.
-- Keep the task narrow and implementation-oriented.
-- Preserve existing parent/dependency references.
-- Preserve existing preferred runner metadata, or add it if missing.
-- Prefer the new metadata key "preferred llms/models/efforts/versions" when adding or replacing runner metadata.
-- Choose implementor runners only from the available local implementor tools above.
-  - Match the chosen runner to the job type, scope, and risk: small mechanical tasks can use cheaper/weaker tools, while broad Scala refactors, failing CI repair, and ambiguous debugging should use stronger tools.
-  - Prefer the cheapest listed runner whose strengths satisfy the task's phase capability floor; only use a pricier runner when no cheaper runner is capable, and use priority only to break near-ties in cost.
-  - Write preferred runners as a ranked list. Each item must be exactly agent/model/effort/version; leave effort or version empty when the tool has no value, for example claude/sonnet//1.0.0.
-- Include Context, Goal, Scope, Acceptance Criteria, and Notes/Risks when useful.
-- Evaluate whether the task should be split before implementation. Record the evaluation in the body.
-- If splitting is needed, create GitHub subtasks before returning. Each subtask must have parent, dependencies if needed, acceptance criteria, narrow scope, and preferred llms/models/efforts/versions.
-- Prefer a target scope that a weaker model such as Haiku could implement without another split.
-- If the task's existing preferred runner metadata pins claude/opus (or any top-tier model) for the whole task, treat that as a signal to split: opus-level judgment is only needed for plan/source-of-truth-shaped work, so carve those parts out and route implement/test leaves to cheaper runners instead of leaving the whole task on opus.
-- If important information is missing and cannot be inferred, set status to "questions" and put concrete user questions in "questions".
-- If questions are needed, still provide the best improved body possible in "body".
-- Do not implement code changes.
-
-Phase-typed decomposition:
-- After deciding a task should split, also decide which PHASES it needs from {plan, source-of-truth, implement, test}. Only emit a phase when it adds value. Phase decomposition COMPOSES WITH scope split: a scope-piece may itself carry a "Phase:" tag, and a phase subtask may be scoped narrower.
-- Bias toward FEWER phases. A trivial, fully-specified task -> a single "implement" subtask (or no split at all, status "ready"). Never force 4-phase overhead; over-splitting tiny tasks wastes evaluation tokens and adds issue noise.
-- When you do phase-split, emit one subtask per chosen phase, dependency-ordered plan -> source-of-truth -> implement -> test. Give each subtask a "Phase:" tag inside its Task metadata block, e.g.:
-  Task metadata:
-  Evaluation: ready
-  Execution: implement
-  Phase: implement
-- For "source-of-truth": pick, per concrete task, what the authoritative reference is (a spec / definition-of-done, a pinned existing artifact + versions, or the test oracle) and state it EXPLICITLY in that subtask's acceptance criteria so later phases conform to it.
-- Actively narrow "implement" and "test" leaves toward the cheapest tier: split further while a leaf is too big or ambiguous for a weak model such as Haiku. When a leaf resists narrowing (irreducible complexity, cross-cutting reasoning, high risk), STOP and route it to the cheapest runner that actually fits. Set a real capability floor per leaf; never down-tier below that floor for price alone. Under-powering a leaf is the primary failure mode: a too-weak model produces wrong code, forcing repair/replay and a net token LOSS.
-- Token savings depend on plan/source-of-truth producing acceptance criteria tight enough for the cheaper implement/test model to succeed. Cross-phase context handoff rides through the issue bodies + dependency conclusion, so plan/source-of-truth subtasks must write their conclusions back into the issue body explicitly.
-
-Phase -> capability-tier routing (select concrete runners from the available local implementor tools above by cost vs. fit across ALL vendors; never hardcode a vendor):
-- plan            -> strong reasoning / decomposition        -> high tier
-- source-of-truth -> judgment on authority / spec            -> high-medium tier
-- implement       -> narrow, well-specified code change      -> medium (task-dependent); cheap ONLY when genuinely trivial + fully specified
-- test            -> narrow verification                     -> low-medium; cheapest capable
-Match each phase's ranked "preferred llms/models/efforts/versions" to this table: primary = cheapest runner that still fits the phase's required capability, fallbacks = progressively stronger runners for escalation. Prefer runners whose jobTypes/strengths advertise the phase name.
-""")
-
-  private def splitTaskPrompt(
-      task: Issue,
-      dependencyConclusion: Option[String],
-      agentInventory: AgentInventory
-  ): AgentPrompt =
-    val dependencyConclusionStr = dependencyConclusion
-      .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
-      .getOrElse("")
-
-    AgentPrompt(
-      s"""Create missing GitHub subtasks for an already-evaluated split task.
-
-Task ID: #${task.number}
-Title: ${task.title}
-
-Available local implementor tools:
-${agentInventory.promptBlock}
-
-Already-evaluated task body:
-${task.body}
-$dependencyConclusionStr
-Rules:
-- Do not evaluate this task again.
-- Do not decide whether it should be implemented directly.
-- The task is already classified as:
-  Task metadata:
-  Evaluation: ready
-  Execution: split
-- Create the missing child issues now.
-- Each child issue body must include this exact parent link line:
-  Parent: #${task.number}
-- Each child issue must include dependencies if needed, acceptance criteria, narrow scope, and preferred llms/models/efforts/versions.
-- Preserve the phase-typed split design when the evaluated task body describes one.
-- Prefer a target scope that a weaker model such as Haiku could implement without another split.
-- Use only GitHub issue creation/comment commands for the split side effects.
-- Do not implement code changes.
-- Return a short plain-text summary listing the child issue numbers you created.
-"""
-    )
-
-  private def parseTaskEvaluation(
-      output: String,
-      fallbackBody: IssueBody
-  ): TaskEvaluation =
-    val stripped =
-      extractJsonObject(output).getOrElse(stripMarkdownFence(output)).trim
-    Try {
-      val json = ujson.read(stripped)
-      TaskEvaluation(
-        body = IssueBody(
-          json.obj
-            .get("body")
-            .collect { case ujson.Str(value) => value }
-            .filter(_.trim.nonEmpty)
-            .getOrElse(fallbackBody.value)
-        ),
-        questions = json.obj
-          .get("questions")
-          .collect { case ujson.Str(value) => value }
-          .filter(_.trim.nonEmpty),
-        execution = json.obj
-          .get("status")
-          .collect { case ujson.Str(value) => normalizeExecution(value) }
-          .getOrElse("needs-input")
-      )
-    }.getOrElse {
-      // Evaluator output wasn't valid JSON: don't corrupt the issue body with
-      // raw output, and don't silently fall through to "ready" either. Post
-      // an explicit, real reason so this is a genuine, explainable block.
-      val preview = stripped.take(500)
-      TaskEvaluation(
-        body = fallbackBody,
-        questions = Some(
-          s"""Evaluator output could not be parsed as JSON, so task evaluation failed.
-             |
-             |Raw output (truncated):
-             |$preview
-             |
-             |Reply here once this can be re-run, or fix the underlying evaluator issue.""".stripMargin
-        ),
-        execution = "needs-input"
-      )
-    }
-
-  private def extractJsonObject(value: String): Option[String] =
-    val jsonFence = "(?s)```json\\s*(\\{.*?\\})\\s*```".r
-    val anyFence = "(?s)```\\s*(\\{.*?\\})\\s*```".r
-    jsonFence
-      .findFirstMatchIn(value)
-      .orElse(anyFence.findFirstMatchIn(value))
-      .map(_.group(1))
-      .orElse {
-        val start = value.indexOf('{')
-        val end = value.lastIndexOf('}')
-        Option.when(start >= 0 && end > start)(value.substring(start, end + 1))
-      }
-
-  private def existingEvaluation(
-      task: Issue,
-      hasRealQuestion: Boolean
-  ): Option[TaskEvaluation] =
-    (evaluationStatus(task.body), executionStatus(task.body)) match
-      case (Some("ready"), Some("implement")) =>
-        Some(TaskEvaluation(task.body, None, execution = "implement"))
-      case (Some("ready"), Some("split")) =>
-        Some(TaskEvaluation(task.body, None, execution = "split"))
-      case (Some("needs-input"), _) | (_, Some("needs-input"))
-          if hasRealQuestion =>
-        TaskEvaluation(
-          task.body,
-          Some(
-            "Task is already marked as needing user input. See the \"Questions before execution:\" comment on this issue for details."
-          ),
-          execution = "needs-input"
-        ).some
-      // needs-input metadata but no question was ever actually posted:
-      // not a genuine block, fall through to a real evaluation.
-      case _ => None
 
   private def evaluationStatus(body: IssueBody): Option[String] =
     metadataValue(body, "evaluation")
@@ -1670,26 +1281,6 @@ Rules:
       case "ready" | "implement" => "implement"
       case "split"               => "split"
       case _                     => "needs-input"
-
-  private def strongDescription(body: IssueBody): Boolean =
-    val lower = body.value.toLowerCase
-    val hasStructure =
-      List("context", "goal", "scope", "acceptance").count(lower.contains) >= 2
-    val hasEnoughDetail = body.value.trim.length >= 500
-    hasStructure && hasEnoughDetail && hasRunnerMetadata(body)
-
-  private def hasRunnerMetadata(body: IssueBody): Boolean =
-    val lower = body.value.toLowerCase
-    lower.contains("preferred llms/models/versions") ||
-    lower.contains("preferred llms/models/efforts/versions") ||
-    lower.contains("agent/model/version") ||
-    lower.contains("agent/model/effort/version")
-
-  private def stripMarkdownFence(value: String): String =
-    val trimmed = value.trim
-    if trimmed.startsWith("```") && trimmed.endsWith("```") then
-      trimmed.linesIterator.toList.drop(1).dropRight(1).mkString("\n")
-    else trimmed
 
   private def extractAgentFinalization(output: AgentOutput): AgentFinalization =
     AgentFinalization(
@@ -1738,11 +1329,10 @@ Rules:
     normalized.startsWith("proposed commit title:") ||
     normalized.startsWith("proposed pull request body:")
 
-  private def classifyPublicationSource[F[_]: Sync]
-      : -->[F, PublishRequest, Either[
-        ChangedPublication,
-        ExistingPublication
-      ]] =
+  private def classifyPublicationSource[F[_]: Sync]: -->[F, PublishRequest, Either[
+    ChangedPublication,
+    ExistingPublication
+  ]] =
     Kleisli { request =>
       git[F]
         .filesChanged(request.worktreePath)
@@ -1755,27 +1345,22 @@ Rules:
         )
     }
 
-  private def prepareChangedPublication[F[_]: Sync]
-      : -->[F, ChangedPublication, PublishRequest] =
-    TaskLogger.progress[F, ChangedPublication](_ =>
-      "Files changed. Committing and merging changes..."
-    ) >>> Kleisli { changed =>
-      val request = changed.request
-      git[F]
-        .commitAll(
-          request.worktreePath,
-          request.task,
-          request.finalization.commitTitle
-        )
-        .as(request)
+  private def prepareChangedPublication[F[_]: Sync]: -->[F, ChangedPublication, PublishRequest] =
+    TaskLogger.progress[F, ChangedPublication](_ => "Files changed. Committing and merging changes...") >>> Kleisli {
+      changed =>
+        val request = changed.request
+        git[F]
+          .commitAll(
+            request.worktreePath,
+            request.task,
+            request.finalization.commitTitle
+          )
+          .as(request)
     }
 
-  private def prepareExistingPublication[F[_]: Sync]
-      : -->[F, ExistingPublication, PublishRequest] =
+  private def prepareExistingPublication[F[_]: Sync]: -->[F, ExistingPublication, PublishRequest] =
     TaskLogger
-      .progress[F, ExistingPublication](_ =>
-        "No file changes, publishing existing local commits..."
-      )
+      .progress[F, ExistingPublication](_ => "No file changes, publishing existing local commits...")
       .map(_.request)
 
   private def choosePublicationTransport[F[_]: Sync]
@@ -1835,8 +1420,7 @@ Rules:
               )
               resolved <- resolveMergeConflict(progress)(request)
               _ <-
-                if resolved then
-                  createAndMergePrWithConflictRepair(progress)(request)
+                if resolved then createAndMergePrWithConflictRepair(progress)(request)
                 else F.raiseError(error)
             yield ()
           else F.raiseError(error)
@@ -1966,9 +1550,7 @@ Rules:
   // hang the process forever.
   private def readLineWithTimeout(timeout: FiniteDuration): Option[String] =
     val result = new java.util.concurrent.atomic.AtomicReference[String](null)
-    val reader = new Thread(() =>
-      result.set(Option(scala.io.StdIn.readLine()).getOrElse(""))
-    )
+    val reader = new Thread(() => result.set(Option(scala.io.StdIn.readLine()).getOrElse("")))
     reader.setDaemon(true)
     reader.start()
     reader.join(timeout.toMillis)
@@ -2070,16 +1652,14 @@ Rules:
     ): List[String] =
       remaining match
         case Nil => clean.reverse
-        case ("--executor" | "--llm" | "--agent" | "--model" | "--task" |
-            "--issue") :: _ :: tail =>
+        case ("--executor" | "--llm" | "--agent" | "--model" | "--task" | "--issue") :: _ :: tail =>
           loop(tail, clean)
         case flag :: Nil
             if flag === "--executor" || flag === "--llm" ||
               flag === "--agent" || flag === "--model" ||
               flag === "--task" || flag === "--issue" =>
           loop(Nil, clean)
-        case flag :: tail
-            if flag.startsWith("--task=") || flag.startsWith("--issue=") =>
+        case flag :: tail if flag.startsWith("--task=") || flag.startsWith("--issue=") =>
           loop(tail, clean)
         case "--recursive" :: tail =>
           loop(tail, clean)

@@ -42,8 +42,7 @@ object TaskMetadata:
         dependencyLines =
           if newer.dependencyLines.nonEmpty then newer.dependencyLines
           else older.dependencyLines,
-        enrichedDescription =
-          newer.enrichedDescription.orElse(older.enrichedDescription)
+        enrichedDescription = newer.enrichedDescription.orElse(older.enrichedDescription)
       )
 
   private val DepKeywords =
@@ -120,9 +119,7 @@ object TaskMetadata:
     ).flatten ++ metadata.parentLines ++ metadata.dependencyLines ++ metadata.runnerLines
     val metaBlock = metaLines.mkString("\n")
     IssueBody(
-      metadata.enrichedDescription.fold(metaBlock)(prose =>
-        s"$prose\n\n$metaBlock"
-      )
+      metadata.enrichedDescription.fold(metaBlock)(prose => s"$prose\n\n$metaBlock")
     )
 
 trait TaskMetadataStore[F[_]]:

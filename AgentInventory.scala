@@ -1,24 +1,33 @@
 import cats.data.Kleisli
 import cats.effect.kernel.Sync
 
+opaque type Agent = String
+object Agent:
+  def apply(value: String): Agent = value
+  extension (self: Agent) def value: String = self
+
+opaque type Available = Boolean
+object Available:
+  def apply(value: Boolean): Available = value
+  extension (self: Available) def value: Boolean = self
+
 /** Stable id of an agent runner entry in agent-runners.json. */
 opaque type AgentToolId = String
 object AgentToolId:
   def apply(value: String): AgentToolId = value.asInstanceOf[AgentToolId]
-  extension (opaqueValue: AgentToolId)
-    def value: String = opaqueValue.asInstanceOf[String]
+  extension (opaqueValue: AgentToolId) def value: String = opaqueValue.asInstanceOf[String]
   given cats.Eq[AgentToolId] = cats.Eq.by(_.value)
 
 final case class AgentTool(
     id: AgentToolId,
-    agent: String,
+    agent: Agent,
     model: Option[String],
     effort: Option[String],
     version: Option[String],
     roles: List[String],
     jobTypes: List[String],
     strengths: List[String],
-    available: Boolean,
+    available: Available,
     priority: Int,
     inputUsdPerMTok: Option[Double] = None,
     outputUsdPerMTok: Option[Double] = None,
@@ -35,14 +44,14 @@ final case class AgentTool(
 
   def runner: TaskRunner =
     TaskRunner(
-      agent = AgentBinary(agent),
+      agent = AgentBinary(agent.value),
       model = model,
       effort = effort,
       version = version
     )
 
   def matches(runner: TaskRunner): Boolean =
-    agent.equalsIgnoreCase(runner.agent.value) &&
+    agent.value.equalsIgnoreCase(runner.agent.value) &&
       optionMatches(model, runner.model) &&
       optionMatches(effort, runner.effort) &&
       versionMatches(version, runner.version)
@@ -93,7 +102,7 @@ final case class AgentTool(
 
 final case class AgentInventory(tools: List[AgentTool]):
   lazy val availableTools: List[AgentTool] =
-    tools.filter(_.available).sortBy(_.priority)
+    tools.filter(_.available.value).sortBy(_.priority)
 
   def defaultImplementor: Option[TaskRunner] =
     availableTools
@@ -126,9 +135,7 @@ final case class AgentInventory(tools: List[AgentTool]):
     else lines.mkString("\n")
 
   private def availableImplementors: List[AgentTool] =
-    availableTools.filter(tool =>
-      tool.roles.exists(_.equalsIgnoreCase("implementor"))
-    )
+    availableTools.filter(tool => tool.roles.exists(_.equalsIgnoreCase("implementor")))
 
 object AgentInventory:
   private val RelativeConfigPath =
@@ -138,15 +145,14 @@ object AgentInventory:
     List(
       AgentTool(
         id = AgentToolId("claude-opus"),
-        agent = "claude",
+        agent = Agent("claude"),
         model = Some("opus"),
         effort = None,
         version = None,
         roles = List("evaluator", "implementor"),
         jobTypes = List("scala", "planning", "debugging", "docs"),
-        strengths =
-          List("complex-reasoning", "broad-refactors", "failure-analysis"),
-        available = true,
+        strengths = List("complex-reasoning", "broad-refactors", "failure-analysis"),
+        available = Available(true),
         priority = 100
       )
     )
@@ -175,14 +181,14 @@ object AgentInventory:
         for id <- stringField(fields, "id")
         yield AgentTool(
           id = AgentToolId(id),
-          agent = stringField(fields, "agent").getOrElse(id),
+          agent = Agent(stringField(fields, "agent").getOrElse(id)),
           model = stringField(fields, "model"),
           effort = stringField(fields, "effort"),
           version = stringField(fields, "version"),
           roles = stringListField(fields, "roles"),
           jobTypes = stringListField(fields, "jobTypes"),
           strengths = stringListField(fields, "strengths"),
-          available = boolField(fields, "available").getOrElse(false),
+          available = Available(boolField(fields, "available").getOrElse(false)),
           priority = intField(fields, "priority").getOrElse(1000),
           inputUsdPerMTok = positiveNumberField(fields, "inputUsdPerMTok"),
           outputUsdPerMTok = positiveNumberField(fields, "outputUsdPerMTok"),

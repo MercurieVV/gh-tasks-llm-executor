@@ -2,6 +2,31 @@ import arrowstep.core.ProgramSays
 import cats.arrow.ArrowChoice
 import cats.syntax.all.*
 
+opaque type Questions = String
+object Questions:
+  def apply(value: String): Questions = value
+  extension (self: Questions) def value: String = self
+
+opaque type Status = String
+object Status:
+  def apply(value: String): Status = value
+  extension (self: Status) def value: String = self
+
+opaque type Message5 = String
+object Message5:
+  def apply(value: String): Message5 = value
+  extension (self: Message5) def value: String = self
+
+opaque type ResumePullRequest = Boolean
+object ResumePullRequest:
+  def apply(value: Boolean): ResumePullRequest = value
+  extension (self: ResumePullRequest) def value: Boolean = self
+
+opaque type Execution = String
+object Execution:
+  def apply(value: String): Execution = value
+  extension (self: Execution) def value: String = self
+
 /** CLI agent binary name, distinct from a runner's model and effort options. */
 opaque type AgentBinary = String
 object AgentBinary:
@@ -12,12 +37,10 @@ object AgentBinary:
 opaque type BranchName = String
 object BranchName:
   def apply(value: String): BranchName = value.asInstanceOf[BranchName]
-  extension (opaqueValue: BranchName)
-    def value: String = opaqueValue.asInstanceOf[String]
+  extension (opaqueValue: BranchName) def value: String = opaqueValue.asInstanceOf[String]
   given cats.Eq[BranchName] = cats.Eq.by(_.value)
 
-/** Whether dependency tasks should be claimed and executed before the task
-  * itself.
+/** Whether dependency tasks should be claimed and executed before the task itself.
   */
 opaque type Recursive = Boolean
 object Recursive:
@@ -28,8 +51,7 @@ object Recursive:
 opaque type TaskNumber = Int
 object TaskNumber:
   def apply(value: Int): TaskNumber = value.asInstanceOf[TaskNumber]
-  extension (opaqueValue: TaskNumber)
-    def value: Int = opaqueValue.asInstanceOf[Int]
+  extension (opaqueValue: TaskNumber) def value: Int = opaqueValue.asInstanceOf[Int]
   given cats.Eq[TaskNumber] = cats.Eq.by(_.value)
 
 /** Raw command-line input before configuration and runner inventory are loaded.
@@ -48,8 +70,7 @@ final case class RunContext(
     recursive: Recursive = Recursive(false)
 )
 
-/** Concrete agent invocation choice, including optional model, effort, and
-  * version.
+/** Concrete agent invocation choice, including optional model, effort, and version.
   */
 final case class TaskRunner(
     agent: AgentBinary,
@@ -70,9 +91,7 @@ final case class TaskRunner(
   ): Seq[String] =
     agent.value match
       case "claude" =>
-        Seq(agent.value) ++ model.toList.flatMap(value =>
-          Seq("--model", value)
-        ) ++
+        Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
           (if allowedTools.isEmpty then Nil
            else Seq("--allowedTools") ++ allowedTools) ++
           jsonSchema.toList.flatMap(schema => Seq("--json-schema", schema)) ++
@@ -88,14 +107,10 @@ final case class TaskRunner(
           case _ => model
         Seq(agent.value, "exec") ++
           mappedModel.toList.flatMap(value => Seq("--model", value)) ++
-          effort.toList.flatMap(value =>
-            Seq("--config", s"model_reasoning_effort=$value")
-          ) ++
+          effort.toList.flatMap(value => Seq("--config", s"model_reasoning_effort=$value")) ++
           Seq(prompt.value)
       case "aider" =>
-        Seq(agent.value) ++ model.toList.flatMap(value =>
-          Seq("--model", value)
-        ) ++
+        Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
           Seq("--yes-always", "--no-auto-commits", "--message", prompt.value)
       case _ =>
         Seq(agent.value) ++ model.toList.flatMap(value => Seq("-m", value)) ++
@@ -109,7 +124,7 @@ final case class TaskCandidate(
     // An open Pull Request for this task's branch already exists (from a
     // prior run that was interrupted before merging): resume by verifying
     // and merging it instead of re-running the implementer.
-    resumePullRequest: Boolean = false
+    resumePullRequest: ResumePullRequest = ResumePullRequest(false)
 )
 
 /** Non-empty or potentially empty set of runnable task candidates. */
@@ -139,21 +154,19 @@ final case class ClaimedTask(
 /** Prepared task after prompt/context collection, before the agent is executed.
   */
 final case class PreparedTask(
-    run: ClaimedTask,
-    parentConclusion: Option[String],
-    replayContext: Option[String]
+                               claimedTask: ClaimedTask,
+                               parentConclusion: Option[String],
+                               replayContext: Option[String]
 )
 
-/** Task after agent execution has produced terminal output to inspect and
-  * publish.
+/** Task after agent execution has produced terminal output to inspect and publish.
   */
 final case class ExecutedTask(run: ClaimedTask, output: AgentOutput)
 
 /** Evaluation result for a task that cannot continue without a human answer. */
-final case class NeedsUserInput(run: ClaimedTask, questions: String)
+final case class NeedsUserInput(run: ClaimedTask, questions: Questions)
 
-/** Evaluation result for a task that should be decomposed into smaller
-  * subtasks.
+/** Evaluation result for a task that should be decomposed into smaller subtasks.
   */
 final case class SplitTask(run: ClaimedTask, replayed: Boolean = false)
 
@@ -161,7 +174,7 @@ final case class SplitTask(run: ClaimedTask, replayed: Boolean = false)
 final case class TaskEvaluation(
     body: IssueBody,
     questions: Option[String],
-    execution: String
+    execution: Execution
 )
 
 /** Existing branch path for a prepared task that should reuse prior local work.
@@ -201,8 +214,7 @@ final case class ChangedPublication(request: PublishRequest)
 /** Publication path for an already prepared branch or pull request. */
 final case class ExistingPublication(request: PublishRequest)
 
-/** Publication transport that pushes, opens, or merges through the GitHub
-  * remote.
+/** Publication transport that pushes, opens, or merges through the GitHub remote.
   */
 final case class RemotePublication(request: PublishRequest)
 
@@ -211,29 +223,28 @@ final case class LocalPublication(request: PublishRequest)
 
 /** Final machine-readable result emitted by the program. */
 final case class RunSummary(
-    status: String,
-    message: String,
+    status: Status,
+    message: Message5,
     task: Option[Issue]
 ):
   def toJson: ujson.Value =
     ujson.Obj.from(
       Seq(
-        "status" -> ujson.Str(status),
-        "message" -> ujson.Str(message),
+        "status" -> ujson.Str(status.value),
+        "message" -> ujson.Str(message.value),
         "task" -> task.fold[ujson.Value](ujson.Null) { issue =>
           ujson.Obj.from(
             Seq(
               "number" -> ujson.Num(issue.number.value),
               "title" -> ujson.Str(issue.title.value),
-              "state" -> ujson.Str(issue.state)
+              "state" -> ujson.Str(issue.state.value)
             )
           )
         }
       )
     )
 
-/** Top-level arrows that turn application input into a user-visible run
-  * summary.
+/** Top-level arrows that turn application input into a user-visible run summary.
   */
 final case class ProgramArrows[-->[_, _]](
     resolveContext: AppInput --> RunContext,
@@ -258,8 +269,7 @@ final case class TaskArrows[-->[_, _]](
     resumeExistingPullRequest: ClaimedTask --> RunSummary,
     announceTask: ClaimedTask --> ClaimedTask,
     fetchTaskContext: ClaimedTask --> PreparedTask,
-    evaluateTask: PreparedTask -->
-      Either[NeedsUserInput, Either[SplitTask, PreparedTask]],
+    evaluateTask: PreparedTask --> Either[NeedsUserInput, Either[SplitTask, PreparedTask]],
     needsUserInputSummary: NeedsUserInput --> RunSummary,
     splitTaskSummary: SplitTask --> RunSummary,
     markTaskInProgress: PreparedTask --> PreparedTask,
@@ -295,8 +305,7 @@ final case class ChangeArrows[-->[_, _]](
     classifyAgentResultForPublication >>>
       (publishChangedTask ||| reportUnchangedTask)
 
-/** Arrows that prepare changed or existing work and publish it locally or
-  * remotely.
+/** Arrows that prepare changed or existing work and publish it locally or remotely.
   */
 final case class PublicationArrows[-->[_, _]](
     classifyPublicationSource: PublishRequest -->
@@ -324,19 +333,19 @@ final case class PublicationArrows[-->[_, _]](
       (publishRemote ||| publishLocal)
 
 /** Arrows for the already prepared task execution pipeline. */
-final case class PreparedTaskArrows[-->[_, _]](
+final case class ExecuteTaskArrows[-->[_, _]](
     runAgent: PreparedTask --> ExecutedTask,
     runProjectValidation: ExecutedTask --> ExecutedTask,
     recordAgentOutput: ExecutedTask --> ExecutedTask,
-    verifyReplayCi: ExecutedTask --> ExecutedTask,
-    closeTaskIssue: ExecutedTask --> ClaimedTask
+    verifyRelatedPullRequestCi: ExecutedTask --> ExecutedTask,
+    closeTaskIssue: ExecutedTask --> ClaimedTask,
+    checkParentsForCompletion: ClaimedTask --> ClaimedTask
 )
 
 /** Arrows for dependency-first recursive execution of GitHub task trees. */
 final case class RecursiveArrows[-->[_, _]](
     checkIfCompleted: Issue --> Either[RunSummary, Issue],
-    runDependencies: (Issue --> RunSummary) => (Issue -->
-      Either[RunSummary, Issue]),
+    runDependencies: (Issue --> RunSummary) => (Issue --> Either[RunSummary, Issue]),
     claimAndRun: Issue --> RunSummary,
     defer: (=> Issue --> RunSummary) => (Issue --> RunSummary)
 ):
@@ -348,24 +357,23 @@ final case class RecursiveArrows[-->[_, _]](
       ) >>> (summon[ArrowChoice[-->]].id[RunSummary] ||| claimAndRun)))
     self
 
-/** Complete business workflow assembled from independently testable arrow
-  * groups.
+/** Complete business workflow assembled from independently testable arrow groups.
   */
 final case class BusinessLogic[-->[_, _]](
     programArrows: ProgramArrows[-->],
     taskArrows: TaskArrows[-->],
     changeArrows: ChangeArrows[-->],
     publicationArrows: PublicationArrows[-->],
-    preparedTaskArrows: PreparedTaskArrows[-->]
+    executeTaskArrows: ExecuteTaskArrows[-->]
 ):
-  def executePreparedTaskInWorktree(using ArrowChoice[-->]): PreparedTask -->
-    ClaimedTask =
-    preparedTaskArrows.runAgent >>>
-      preparedTaskArrows.runProjectValidation >>>
-      preparedTaskArrows.recordAgentOutput >>>
+  def executePreparedTaskInWorktree(using ArrowChoice[-->]): PreparedTask --> ClaimedTask =
+    executeTaskArrows.runAgent >>>
+      executeTaskArrows.runProjectValidation >>>
+      executeTaskArrows.recordAgentOutput >>>
       changeArrows.commitIfChanged >>>
-      preparedTaskArrows.verifyReplayCi >>>
-      preparedTaskArrows.closeTaskIssue
+      executeTaskArrows.verifyRelatedPullRequestCi >>>
+      executeTaskArrows.closeTaskIssue >>>
+      executeTaskArrows.checkParentsForCompletion
 
 object BusinessLogic:
   given Functor2K[BusinessLogic] = Functor2K.derived

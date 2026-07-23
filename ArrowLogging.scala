@@ -55,9 +55,7 @@ object Functor2K:
         value: T[F]
     )(f: [A, B] => F[A, B] => G[A, B]): T[G] =
       inst.map(value)(
-        [field[_[_, _]]] =>
-          (fieldFunctor: Functor2K[field], fieldValue: field[F]) =>
-            fieldFunctor.mapK(fieldValue)(f)
+        [field[_[_, _]]] => (fieldFunctor: Functor2K[field], fieldValue: field[F]) => fieldFunctor.mapK(fieldValue)(f)
       )
 
   inline def derived[T[_[_, _]]](using

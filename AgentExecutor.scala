@@ -11,6 +11,8 @@ import scala.collection.mutable.StringBuilder
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
+type Output = AgentOutput
+
 /** Full prompt text passed to an external agent process. */
 opaque type AgentPrompt = String
 object AgentPrompt:
@@ -30,7 +32,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       cwd: os.Path,
       allowedTools: Seq[String] = Nil,
       jsonSchema: Option[String] = None
-  ): F[String] =
+  ): F[Output] =
     runAttempt(runner, prompt, cwd, allowedTools, jsonSchema, attempt = 1)
 
   private def runAttempt(
@@ -40,7 +42,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       allowedTools: Seq[String],
       jsonSchema: Option[String],
       attempt: Int
-  ): F[String] =
+  ): F[Output] =
     for
       _ <- TaskLogger.llm(
         s"Starting agent execution with ${runner.display} in $cwd"
@@ -50,7 +52,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       )
       output = result.output
       _ <-
-        if output.nonEmpty then TaskLogger.llm(output.trim)
+        if output.value.nonEmpty then TaskLogger.llm(output.value.trim)
         else TaskLogger.llm("Agent produced no output.")
       _ <- TaskLogger.llm(
         s"Agent execution finished with exit code ${result.exitCode}."
@@ -58,7 +60,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       value <-
         if result.exitCode === 0 then output.pure[F]
         else if attempt < MaxTransientAttempts && isTransientAgentFailure(
-            output
+            output.value
           )
         then
           TaskLogger.llm(
@@ -74,15 +76,13 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
               attempt + 1
             )
         else
-          val reason = terminationReason(output)
-          reason.traverse_(r =>
-            TaskLogger.llm(s"!!! Termination reason: $r")
-          ) *>
+          val reason = terminationReason(output.value)
+          reason.traverse_(r => TaskLogger.llm(s"!!! Termination reason: $r")) *>
             RuntimeException(
               reason.fold(
                 s"${runner.agent} exited with ${result.exitCode}"
               )(r => s"${runner.agent} exited with ${result.exitCode}: $r")
-            ).raiseError[F, String]
+            ).raiseError[F, Output]
     yield value
 
   private val TerminationReasonPatterns: List[String] = List(
@@ -103,9 +103,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     val lower = output.toLowerCase
     TerminationReasonPatterns
       .find(lower.contains)
-      .flatMap(pattern =>
-        output.linesIterator.find(_.toLowerCase.contains(pattern))
-      )
+      .flatMap(pattern => output.linesIterator.find(_.toLowerCase.contains(pattern)))
       .map(_.trim)
 
   private def isTransientAgentFailure(output: String): Boolean =
@@ -125,7 +123,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       "response above may be incomplete"
     ).exists(lower.contains)
 
-  private final case class AgentResult(exitCode: Int, output: String)
+  private final case class AgentResult(exitCode: Int, output: Output)
 
   private def runMonitored(
       runner: TaskRunner,
@@ -216,7 +214,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
 
     timedOut match
       case Some(reason) => throw RuntimeException(reason)
-      case None         => AgentResult(process.exitValue(), output.toString)
+      case None         => AgentResult(process.exitValue(), AgentOutput(output.toString))
 
   private def streamReader(
       name: AgentOutputStream,
