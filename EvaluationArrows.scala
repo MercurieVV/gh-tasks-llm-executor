@@ -1,6 +1,7 @@
 import cats.arrow.Arrow
 import cats.Monoid
 import cats.data.Kleisli
+import cats.data.OptionT
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 import cats.syntax.arrow.*
@@ -9,7 +10,7 @@ import scala.util.Try
 
 final case class EvaluationArrows[-->[_, _]](
     fetchMaybeUserAnswer: PreparedTask --> Option[EvaluationArrows.UserInput],
-    evaluateOrGetCached: (PreparedTask, Option[EvaluationArrows.UserInput]) --> EvaluationArrows.EvaluatedTask,
+    evaluateOrGetCached: EvaluationArrows.EvaluationInput --> EvaluationArrows.EvaluatedTask,
     verifySplitExists: EvaluationArrows.EvaluatedTask --> TaskEvaluation,
     persistAndRouteEvaluation: EvaluationArrows.VerifiedEvaluation --> EvaluationArrows.Result
 ):
@@ -19,40 +20,47 @@ final case class EvaluationArrows[-->[_, _]](
       (Arrow[-->].id &&& verifySplitExists) >>>
       persistAndRouteEvaluation
 
-object EvaluationArrows:
-  opaque type UserInput = String
-  type EvaluatedTask = (PreparedTask, TaskEvaluation, Boolean)
-  type VerifiedEvaluation = (EvaluatedTask, TaskEvaluation)
-  type Result = Either[NeedsUserInput, Either[SplitTask, PreparedTask]]
+final case class CachedEvaluationArrows[-->[_, _]](
+    evaluate: EvaluationArrows.EvaluationInput --> EvaluationArrows.EvaluatedTask
+)
 
-  // Scoped tool permission for the evaluator run only: "split" verdicts
-  // require it to actually create child issues, which a non-interactive
-  // `claude -p` run otherwise can't do -- there's no TTY to approve the Bash
-  // call, so it stalls out asking for confirmation instead of producing the
-  // required JSON. `gh issue edit` is deliberately NOT granted: that would
-  // let the evaluator rewrite an issue body directly, bypassing the
-  // comment-only TaskMetadata architecture (see taskMetadata.scala) the same
-  // way the old updateIssueBody call used to. Linking a new subtask back to
-  // its parent should go through `gh issue comment` instead.
-  private val EvaluatorAllowedTools = Seq(
-    "Bash(gh issue create:*)",
-    "Bash(gh issue comment:*)"
-  )
+object CachedEvaluationArrows:
+  def apply[F[_]: Sync](
+      progress: String => F[Unit]
+  ): CachedEvaluationArrows[EvaluationArrows.OptionalArrow[F]] =
+    CachedEvaluationArrows(
+      evaluate = Kleisli[[X] =>> OptionT[F, X], EvaluationArrows.EvaluationInput, EvaluationArrows.EvaluatedTask] {
+        case (task, userAnswer) =>
+          val claimedTask = task.claimedTask
+          OptionT(
+            for
+              hasRealQuestion <- GitHub.hasQuestionComment(
+                claimedTask.context.root,
+                claimedTask.task
+              )
+              replayedEvaluation = EvaluationArrows
+                .completedEvaluation(claimedTask.task, hasRealQuestion)
+                .filter(_ => userAnswer.isEmpty)
+              result <- replayedEvaluation.traverse { cachedEvaluation =>
+                progress(
+                  s"Reusing existing evaluation for #${claimedTask.task.number}."
+                ).as((task, cachedEvaluation, cachedEvaluation.execution.value === "split"))
+              }
+            yield result
+          )
+      }
+    )
 
-  // Forces the claude CLI's final response to conform to this shape (via
-  // --json-schema) instead of relying on the prompt's "Return only JSON"
-  // instruction and hoping the model complies. This is what parseTaskEvaluation
-  // expects; matching it here should turn most JSON-parse failures into
-  // guaranteed-valid output instead. Only "claude" consumes jsonSchema
-  // (TaskRunner.command) -- a no-op for other evaluator runners.
-  private val EvaluationJsonSchema =
-    """{"type":"object","properties":{"status":{"type":"string","enum":["ready","split","questions"]},"body":{"type":"string"},"questions":{"type":"string"}},"required":["status","body"]}"""
+final case class AgenticEvaluationArrows[EvalArrow[_, _], VerifyArrow[_, _]](
+    evaluate: EvalArrow[EvaluationArrows.EvaluationInput, EvaluationArrows.EvaluatedTask],
+    verifySplitExists: VerifyArrow[EvaluationArrows.EvaluatedTask, TaskEvaluation]
+)
 
+object AgenticEvaluationArrows:
   def apply[F[_]: Sync](
       progress: String => F[Unit],
-      evaluatorRunner: TaskRunner,
-      waitForUserInput: Kleisli[F, (PreparedTask, String), Result]
-  ): EvaluationArrows[[A, B] =>> Kleisli[F, A, B]] =
+      evaluatorRunner: TaskRunner
+  ): AgenticEvaluationArrows[EvaluationArrows.OptionalArrow[F], [A, B] =>> Kleisli[F, A, B]] =
     def runEvaluator(task: PreparedTask, userAnswer: Option[String]): F[TaskEvaluation] =
       val claimedTask = task.claimedTask
       progress(
@@ -60,17 +68,17 @@ object EvaluationArrows:
       ) >> AgentExecutor[F]
         .run(
           evaluatorRunner,
-          evaluateTaskPrompt(
+          EvaluationArrows.evaluateTaskPrompt(
             claimedTask.task,
             task.parentConclusion,
             claimedTask.context.agentInventory,
             userAnswer
           ),
           claimedTask.context.root,
-          EvaluatorAllowedTools,
-          Some(EvaluationJsonSchema)
+          EvaluationArrows.EvaluatorAllowedTools,
+          Some(EvaluationArrows.EvaluationJsonSchema)
         )
-        .map(parseTaskEvaluation(_, claimedTask.task.body))
+        .map(EvaluationArrows.parseTaskEvaluation(_, claimedTask.task.body))
 
     def createMissingSplitSubtasks(
         task: PreparedTask,
@@ -83,73 +91,128 @@ object EvaluationArrows:
         AgentExecutor[F]
           .run(
             evaluatorRunner,
-            splitTaskPrompt(
+            EvaluationArrows.splitTaskPrompt(
               claimedTask.task.copy(body = evaluation.body),
               task.parentConclusion,
               claimedTask.context.agentInventory
             ),
             claimedTask.context.root,
-            EvaluatorAllowedTools
+            EvaluationArrows.EvaluatorAllowedTools
           )
           .void
 
+    val evaluate: Kleisli[[X] =>> OptionT[F, X], EvaluationArrows.EvaluationInput, EvaluationArrows.EvaluatedTask] =
+      Kleisli { case (task, userAnswer) =>
+        OptionT.liftF(runEvaluator(task, userAnswer.map(_.value)).map(evaluation => (task, evaluation, false)))
+      }
+
+    val verifySplitExists: Kleisli[[X] =>> OptionT[F, X], EvaluationArrows.EvaluatedTask, TaskEvaluation] =
+      Kleisli { case (task, evaluation, _) =>
+        OptionT.liftF {
+          val claimedTask = task.claimedTask
+          if evaluation.execution.value === "split" then
+            GitHub.fetchIssues(claimedTask.context.root).flatMap { allIssues =>
+              if GitHub.hasOpenChildren(claimedTask.task, allIssues) then evaluation.pure[F]
+              else
+                // The task has already been evaluated. Do not call the
+                // evaluator again; complete the side effect the split verdict
+                // required, then verify it produced linked child issues.
+                GitHub
+                  .commentSplitMissingWarning(progress)(
+                    claimedTask.context.root,
+                    claimedTask.task
+                  ) *>
+                  progress(
+                    s"Split expected for task #${claimedTask.task.number}, but no child issues exist; creating missing split subtasks without re-evaluating..."
+                  ) *>
+                  createMissingSplitSubtasks(task, evaluation) *>
+                  GitHub.fetchIssues(claimedTask.context.root).flatMap { updatedIssues =>
+                    if GitHub.hasOpenChildren(claimedTask.task, updatedIssues) then evaluation.pure[F]
+                    else
+                      Sync[F].raiseError(
+                        RuntimeException(
+                          s"Task #${claimedTask.task.number} is already evaluated as split, but missing split-subtask creation produced no linked child issues."
+                        )
+                      )
+                  }
+            }
+          else evaluation.pure[F]
+        }
+      }
+
+    AgenticEvaluationArrows(
+      evaluate = evaluate,
+      verifySplitExists = Kleisli[F, EvaluationArrows.EvaluatedTask, TaskEvaluation] { evaluatedTask =>
+        verifySplitExists
+          .run(evaluatedTask)
+          .getOrElseF(
+            Sync[F].raiseError(
+              RuntimeException("Agentic split verification did not produce a result.")
+            )
+          )
+      }
+    )
+
+object EvaluationArrows:
+  opaque type UserInput = String
+  object UserInput:
+    extension (self: UserInput) def value: String = self
+
+  type EvaluationInput = (PreparedTask, Option[UserInput])
+  type EvaluatedTask = (PreparedTask, TaskEvaluation, Boolean)
+  type VerifiedEvaluation = (EvaluatedTask, TaskEvaluation)
+  type Result = Either[NeedsUserInput, Either[SplitTask, PreparedTask]]
+  type OptionalArrow[F[_]] = [A, B] =>> Kleisli[[X] =>> OptionT[F, X], A, B]
+  // Scoped tool permission for the evaluator run only: "split" verdicts
+  // require it to actually create child issues, which a non-interactive
+  // `claude -p` run otherwise can't do -- there's no TTY to approve the Bash
+  // call, so it stalls out asking for confirmation instead of producing the
+  // required JSON. `gh issue edit` is deliberately NOT granted: that would
+  // let the evaluator rewrite an issue body directly, bypassing the
+  // comment-only TaskMetadata architecture (see taskMetadata.scala) the same
+  // way the old updateIssueBody call used to. Linking a new subtask back to
+  // its parent should go through `gh issue comment` instead.
+  val EvaluatorAllowedTools = Seq(
+    "Bash(gh issue create:*)",
+    "Bash(gh issue comment:*)"
+  )
+
+  // Forces the claude CLI's final response to conform to this shape (via
+  // --json-schema) instead of relying on the prompt's "Return only JSON"
+  // instruction and hoping the model complies. This is what parseTaskEvaluation
+  // expects; matching it here should turn most JSON-parse failures into
+  // guaranteed-valid output instead. Only "claude" consumes jsonSchema
+  // (TaskRunner.command) -- a no-op for other evaluator runners.
+  val EvaluationJsonSchema =
+    """{"type":"object","properties":{"status":{"type":"string","enum":["ready","split","questions"]},"body":{"type":"string"},"questions":{"type":"string"}},"required":["status","body"]}"""
+
+  def apply[F[_]: Sync](
+      progress: String => F[Unit],
+      evaluatorRunner: TaskRunner,
+      waitForUserInput: Kleisli[F, (PreparedTask, String), Result]
+  ): EvaluationArrows[[A, B] =>> Kleisli[F, A, B]] =
     val fetchMaybeUserAnswer: Kleisli[F, PreparedTask, Option[UserInput]] =
       Kleisli { task =>
         val claimedTask = task.claimedTask
-        for
-          userAnswer <- GitHub.userAnswer(progress)(claimedTask.context.root, claimedTask.task)
-          hasRealQuestion <- GitHub.hasQuestionComment(
-            claimedTask.context.root,
-            claimedTask.task
-          )
-        yield userAnswer
+        GitHub.userAnswer(progress)(claimedTask.context.root, claimedTask.task)
       }
 
-    val evaluateOrGetCached: Kleisli[F, (PreparedTask, Option[UserInput]), EvaluatedTask] =
-      Kleisli { case (task, userAnswer) =>
-        val claimedTask = task.claimedTask
-        val replayedEvaluation = completedEvaluation(claimedTask.task, userAnswer.isDefined)
-          .filter(_ => userAnswer.isEmpty)
-        for evaluation <- replayedEvaluation
-            .map(cachedEvaluation =>
-              progress(
-                s"Reusing existing evaluation for #${claimedTask.task.number}."
-              ).as(cachedEvaluation)
+    val cachedEvaluation = CachedEvaluationArrows[F](progress)
+    val agenticEvaluation = AgenticEvaluationArrows[F](
+      progress = progress,
+      evaluatorRunner = evaluatorRunner
+    )
+    val evaluateOrGetCached: Kleisli[F, EvaluationInput, EvaluatedTask] =
+      val evaluate =
+        cachedEvaluation.evaluate <+> agenticEvaluation.evaluate
+      Kleisli { input =>
+        evaluate
+          .run(input)
+          .getOrElseF(
+            Sync[F].raiseError(
+              RuntimeException("Cached and agentic task evaluation both missed.")
             )
-            .getOrElse(runEvaluator(task, userAnswer))
-        yield (task, evaluation, replayedEvaluation.exists(_.execution.value === "split"))
-      }
-
-    val verifySplitExists: Kleisli[F, EvaluatedTask, TaskEvaluation] =
-      Kleisli { case (task, evaluation, _) =>
-        val claimedTask = task.claimedTask
-        if evaluation.execution.value === "split" then
-          GitHub.fetchIssues(claimedTask.context.root).flatMap { allIssues =>
-            if GitHub.hasOpenChildren(claimedTask.task, allIssues) then evaluation.pure[F]
-            else
-              // The task has already been evaluated. Do not call the
-              // evaluator again; complete the side effect the split verdict
-              // required, then verify it produced linked child issues.
-              GitHub
-                .commentSplitMissingWarning(progress)(
-                  claimedTask.context.root,
-                  claimedTask.task
-                ) *>
-                progress(
-                  s"Split expected for task #${claimedTask.task.number}, but no child issues exist; creating missing split subtasks without re-evaluating..."
-                ) *>
-                createMissingSplitSubtasks(task, evaluation) *>
-                GitHub.fetchIssues(claimedTask.context.root).flatMap { updatedIssues =>
-                  if GitHub.hasOpenChildren(claimedTask.task, updatedIssues) then evaluation.pure[F]
-                  else
-                    Sync[F].raiseError(
-                      RuntimeException(
-                        s"Task #${claimedTask.task.number} is already evaluated as split, but missing split-subtask creation produced no linked child issues."
-                      )
-                    )
-                }
-          }
-        else evaluation.pure[F]
+          )
       }
 
     val persistAndRouteEvaluation: Kleisli[F, VerifiedEvaluation, Result] =
@@ -213,11 +276,11 @@ object EvaluationArrows:
     EvaluationArrows(
       fetchMaybeUserAnswer = fetchMaybeUserAnswer,
       evaluateOrGetCached = evaluateOrGetCached,
-      verifySplitExists = verifySplitExists,
+      verifySplitExists = agenticEvaluation.verifySplitExists,
       persistAndRouteEvaluation = persistAndRouteEvaluation
     )
 
-  private def evaluateTaskPrompt(
+  def evaluateTaskPrompt(
       task: Issue,
       dependencyConclusion: Option[String],
       agentInventory: AgentInventory,
@@ -307,7 +370,7 @@ Phase -> capability-tier routing (select concrete runners from the available loc
 Match each phase's ranked "preferred llms/models/efforts/versions" to this table: primary = cheapest runner that still fits the phase's required capability, fallbacks = progressively stronger runners for escalation. Prefer runners whose jobTypes/strengths advertise the phase name.
 """)
 
-  private def splitTaskPrompt(
+  def splitTaskPrompt(
       task: Issue,
       dependencyConclusion: Option[String],
       agentInventory: AgentInventory
@@ -347,7 +410,7 @@ Rules:
 """
     )
 
-  private def parseTaskEvaluation(
+  def parseTaskEvaluation(
       output: AgentOutput,
       fallbackBody: IssueBody
   ): TaskEvaluation =
@@ -408,7 +471,7 @@ Rules:
         Option.when(start >= 0 && end > start)(value.substring(start, end + 1))
       }
 
-  private def completedEvaluation(
+  def completedEvaluation(
       task: Issue,
       hasRealQuestion: Boolean
   ): Option[TaskEvaluation] =
