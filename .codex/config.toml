@@ -27,3 +27,18 @@ approval_mode = "approve"
 
 [mcp_servers.scala-semantic.tools.refresh_workspace]
 approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.find_symbol]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.method_signature]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.find_usages]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.method_call_hierarchy]
+approval_mode = "approve"
+
+[mcp_servers.scala-semantic.tools.source_around_position]
+approval_mode = "approve"

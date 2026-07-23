@@ -73,8 +73,8 @@ def readModelPrices(path: os.Path): Map[(String, String), ModelPrice] =
           source <- value.obj.get("source").collect { case ujson.Str(name) =>
             name
           }
-          asOfDate <- value.obj.get("asOfDate").collect {
-            case ujson.Str(date) => date
+          asOfDate <- value.obj.get("asOfDate").collect { case ujson.Str(date) =>
+            date
           }
         yield priceKey(agent, model) ->
           ModelPrice(input, output, source, asOfDate)
@@ -95,12 +95,8 @@ def tool(
     probe: Probe,
     price: Option[ModelPrice]
 ): ujson.Obj =
-  val inputUsdPerMTok = price.fold[ujson.Value](ujson.Null)(value =>
-    ujson.Num(value.inputUsdPerMTok)
-  )
-  val outputUsdPerMTok = price.fold[ujson.Value](ujson.Null)(value =>
-    ujson.Num(value.outputUsdPerMTok)
-  )
+  val inputUsdPerMTok = price.fold[ujson.Value](ujson.Null)(value => ujson.Num(value.inputUsdPerMTok))
+  val outputUsdPerMTok = price.fold[ujson.Value](ujson.Null)(value => ujson.Num(value.outputUsdPerMTok))
   val source =
     price.fold[ujson.Value](ujson.Null)(value => ujson.Str(value.source))
   val asOfDate =
@@ -240,8 +236,7 @@ def tool(
             "source-of-truth",
             "implement"
           )
-        else if effort == "medium" then
-          List("scala-code", "focused-fixes", "tests", "implement", "test")
+        else if effort == "medium" then List("scala-code", "focused-fixes", "tests", "implement", "test")
         else List("small-edits", "mechanical-changes", "implement", "test"),
       available = codex.available,
       priority = 100 + modelIndex * 10 + effortIndex,

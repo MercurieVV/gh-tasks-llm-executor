@@ -4,8 +4,8 @@
 
 /** Replaces the committed price catalog with a human-reviewed JSON file.
   *
-  * Fetching and reviewing upstream vendor pricing is deliberately outside this
-  * helper: discovery must remain deterministic and offline.
+  * Fetching and reviewing upstream vendor pricing is deliberately outside this helper: discovery must remain
+  * deterministic and offline.
   */
 @main def refreshModelPrices(sourceFile: String): Unit =
   val source = os.Path(sourceFile, os.pwd)
@@ -15,9 +15,8 @@
     prices.obj.get("prices").collect { case ujson.Arr(entries) =>
       entries.forall {
         case ujson.Obj(fields) =>
-          List("agent", "model", "source", "asOfDate").forall(key =>
-            fields.get(key).collect { case ujson.Str(_) => true }.contains(true)
-          ) &&
+          List("agent", "model", "source", "asOfDate")
+            .forall(key => fields.get(key).collect { case ujson.Str(_) => true }.contains(true)) &&
           List("inputUsdPerMTok", "outputUsdPerMTok").forall(key =>
             fields
               .get(key)
