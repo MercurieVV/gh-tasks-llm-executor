@@ -22,10 +22,23 @@ object ResumePullRequest:
   def apply(value: Boolean): ResumePullRequest = value
   extension (self: ResumePullRequest) def value: Boolean = self
 
-opaque type Execution = String
+/** Evaluator's execution verdict: what should happen to a task next. */
+enum Execution:
+  case Implement, Split, NeedsInput
+
+  /** Canonical string persisted in issue "Execution:" metadata. */
+  def wireValue: String = this match
+    case Execution.Implement  => "implement"
+    case Execution.Split      => "split"
+    case Execution.NeedsInput => "needs-input"
+
 object Execution:
-  def apply(value: String): Execution = value
-  extension (self: Execution) def value: String = self
+  /** Parse loose evaluator/metadata text; unknown -> NeedsInput (safe block). */
+  def fromString(value: String): Execution =
+    value.trim.toLowerCase match
+      case "ready" | "implement" => Execution.Implement
+      case "split"               => Execution.Split
+      case _                     => Execution.NeedsInput
 
 /** CLI agent binary name, distinct from a runner's model and effort options. */
 opaque type AgentBinary = String
@@ -337,6 +350,10 @@ final case class ExecuteTaskArrows[-->[_, _]](
     runAgent: PreparedTask --> ExecutedTask,
     runProjectValidation: ExecutedTask --> ExecutedTask,
     recordAgentOutput: ExecutedTask --> ExecutedTask,
+    // Persist the durable "implemented" mark once the agent's output has been
+    // committed and published, before CI verification and issue close. A crash
+    // in that later window then resumes without re-invoking the implementer.
+    markTaskImplemented: ExecutedTask --> ExecutedTask,
     verifyRelatedPullRequestCi: ExecutedTask --> ExecutedTask,
     closeTaskIssue: ExecutedTask --> ClaimedTask,
     checkParentsForCompletion: ClaimedTask --> ClaimedTask
@@ -371,6 +388,7 @@ final case class BusinessLogic[-->[_, _]](
       executeTaskArrows.runProjectValidation >>>
       executeTaskArrows.recordAgentOutput >>>
       changeArrows.commitIfChanged >>>
+      executeTaskArrows.markTaskImplemented >>>
       executeTaskArrows.verifyRelatedPullRequestCi >>>
       executeTaskArrows.closeTaskIssue >>>
       executeTaskArrows.checkParentsForCompletion
