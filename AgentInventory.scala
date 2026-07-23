@@ -1,17 +1,13 @@
-import cats.effect.kernel.Sync
 import cats.data.Kleisli
+import cats.effect.kernel.Sync
 
-opaque type Id = String
-object Id:
-  def apply(value: String): Id = value
-  extension (self: Id) def value: String = self
-
+/** Stable id of an agent runner entry in agent-runners.json. */
 opaque type AgentToolId = String
 object AgentToolId:
   def apply(value: String): AgentToolId = value.asInstanceOf[AgentToolId]
-  extension (opaqueValue: AgentToolId) def value: String = opaqueValue.asInstanceOf[String]
+  extension (opaqueValue: AgentToolId)
+    def value: String = opaqueValue.asInstanceOf[String]
   given cats.Eq[AgentToolId] = cats.Eq.by(_.value)
-
 
 final case class AgentTool(
     id: AgentToolId,
@@ -38,7 +34,12 @@ final case class AgentTool(
       math.round(raw * 1000.0) / 1000.0
 
   def runner: TaskRunner =
-    TaskRunner(agent = Agent(agent), model = model, effort = effort, version = version)
+    TaskRunner(
+      agent = AgentBinary(agent),
+      model = model,
+      effort = effort,
+      version = version
+    )
 
   def matches(runner: TaskRunner): Boolean =
     agent.equalsIgnoreCase(runner.agent.value) &&
@@ -152,9 +153,9 @@ object AgentInventory:
   )
 
   def loadF[F[_]: Sync]: Kleisli[F, os.Path, AgentInventory] =
-  Kleisli.apply { root =>
-    Sync[F].blocking(load(root))
-  }
+    Kleisli.apply { root =>
+      Sync[F].blocking(load(root))
+    }
 
   def load(root: os.Path): AgentInventory =
     val path = root / RelativeConfigPath

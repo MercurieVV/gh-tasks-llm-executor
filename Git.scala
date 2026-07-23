@@ -2,30 +2,29 @@ import cats.data.Kleisli
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
-final class Git[F[_]](using F: Sync[F]):
+final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
 
   def acquireWorktree: Kleisli[
     F,
-    (os.Path, os.Path, BranchName, Option[BranchName], String => F[Unit]),
+    (os.Path, os.Path, BranchName, Option[BranchName]),
     Unit
   ] =
     Kleisli.apply {
-      case input @ (root, worktreePath, branchName, baseBranch, progress) =>
+      case input @ (root, worktreePath, branchName, baseBranch) =>
         F.blocking(os.exists(worktreePath)).flatMap {
           case true =>
             progress(
               s"Leftover worktree detected at $worktreePath. Cleaning up..."
             ) *> (releaseWorktree.local[
-              (os.Path, os.Path, BranchName, Option[BranchName], String => F[Unit])
+              (os.Path, os.Path, BranchName, Option[BranchName])
             ] {
               case (
                     root: os.Path,
                     worktreePath: os.Path,
                     branchName: BranchName,
-                    _: Option[BranchName],
-                    progress: (String => F[Unit])
+                    _: Option[BranchName]
                   ) =>
-                (root, worktreePath, branchName, progress)
+                (root, worktreePath, branchName)
             } *> acquireWorktree).run(input)
           case false =>
             call(
@@ -129,8 +128,8 @@ final class Git[F[_]](using F: Sync[F]):
     }
 
   def releaseWorktree
-      : Kleisli[F, (os.Path, os.Path, BranchName, String => F[Unit]), Unit] =
-    Kleisli.apply { case (root, worktreePath, branchName, progress) =>
+      : Kleisli[F, (os.Path, os.Path, BranchName), Unit] =
+    Kleisli.apply { case (root, worktreePath, branchName) =>
       for
         _ <- progress(s"Returning to project root at $root")
         _ <- call(root, "git", "status", "--short").void
@@ -170,8 +169,8 @@ final class Git[F[_]](using F: Sync[F]):
   // ref is additionally pushed to origin, when a remote exists, as an offsite
   // backup.
   def preserveUnpushedCommits
-      : Kleisli[F, (os.Path, BranchName, Option[BranchName], String => F[Unit]), Unit] =
-    Kleisli.apply { case (worktreePath, branchName, baseBranch, progress) =>
+      : Kleisli[F, (os.Path, BranchName, Option[BranchName]), Unit] =
+    Kleisli.apply { case (worktreePath, branchName, baseBranch) =>
       hasPublishableCommits((worktreePath, branchName, baseBranch)).flatMap {
         case false =>
           F.unit
@@ -258,8 +257,8 @@ final class Git[F[_]](using F: Sync[F]):
       }
     }
 
-  def runProjectValidation: Kleisli[F, (os.Path, String => F[Unit]), Unit] =
-    Kleisli.apply { case (worktreePath, progress) =>
+  def runProjectValidation: Kleisli[F, (os.Path), Unit] =
+    Kleisli.apply { case (worktreePath) =>
       validationHook(worktreePath).flatMap {
         case None =>
           progress(
@@ -357,11 +356,11 @@ final class Git[F[_]](using F: Sync[F]):
 
   def mergeLocally: Kleisli[
     F,
-    (os.Path, os.Path, BranchName, Option[BranchName], String => F[Unit]),
+    (os.Path, os.Path, BranchName, Option[BranchName]),
     Unit
   ] =
     Kleisli.apply {
-      case (root, worktreePath, branchName, baseBranch, progress) =>
+      case (root, worktreePath, branchName, baseBranch) =>
         for
           currentBranch <- F.blocking(
             os.proc("git", "branch", "--show-current")
@@ -430,8 +429,8 @@ final class Git[F[_]](using F: Sync[F]):
   }
 
   def cleanupWorktree
-      : Kleisli[F, (os.Path, os.Path, BranchName, String => F[Unit]), Unit] =
-    Kleisli.apply { case (root, worktreePath, branchName, progress) =>
+      : Kleisli[F, (os.Path, os.Path, BranchName), Unit] =
+    Kleisli.apply { case (root, worktreePath, branchName) =>
       F.blocking(os.exists(worktreePath)).flatMap {
         case false =>
           F.unit
@@ -483,4 +482,4 @@ final class Git[F[_]](using F: Sync[F]):
     if value.length <= 160 then value else value.take(160) + "...[truncated]"
 
 object Git:
-  def apply[F[_]: Sync]: Git[F] = new Git[F]
+  def apply[F[_]: Sync](progress: String => F[Unit]): Git[F] = new Git[F](progress)

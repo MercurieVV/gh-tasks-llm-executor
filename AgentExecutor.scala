@@ -11,10 +11,11 @@ import scala.collection.mutable.StringBuilder
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
-opaque type Prompt = String
-object Prompt:
-  def apply(value: String): Prompt = value
-  extension (self: Prompt) def value: String = self
+/** Full prompt text passed to an external agent process. */
+opaque type AgentPrompt = String
+object AgentPrompt:
+  def apply(value: String): AgentPrompt = value
+  extension (self: AgentPrompt) def value: String = self
 
 final class AgentExecutor[F[_]](using F: Sync[F]):
 
@@ -25,7 +26,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
 
   def run(
       runner: TaskRunner,
-      prompt: Prompt,
+      prompt: AgentPrompt,
       cwd: os.Path,
       allowedTools: Seq[String] = Nil,
       jsonSchema: Option[String] = None
@@ -34,7 +35,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
 
   private def runAttempt(
       runner: TaskRunner,
-      prompt: Prompt,
+      prompt: AgentPrompt,
       cwd: os.Path,
       allowedTools: Seq[String],
       jsonSchema: Option[String],
@@ -119,14 +120,16 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       "service unavailable",
       "internal server error",
       "bad gateway",
-      "gateway timeout"
+      "gateway timeout",
+      "connection closed mid-response",
+      "response above may be incomplete"
     ).exists(lower.contains)
 
   private final case class AgentResult(exitCode: Int, output: String)
 
   private def runMonitored(
       runner: TaskRunner,
-      prompt: Prompt,
+      prompt: AgentPrompt,
       cwd: os.Path,
       allowedTools: Seq[String],
       jsonSchema: Option[String]
@@ -153,7 +156,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     )
     val stdout =
       streamReader(
-        Stream("stdout"),
+        AgentOutputStream("stdout"),
         process.getInputStream,
         output,
         lastActivity,
@@ -161,7 +164,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       )
     val stderr =
       streamReader(
-        Stream("stderr"),
+        AgentOutputStream("stderr"),
         process.getErrorStream,
         output,
         lastActivity,
@@ -216,7 +219,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       case None         => AgentResult(process.exitValue(), output.toString)
 
   private def streamReader(
-      name: Stream,
+      name: AgentOutputStream,
       stream: InputStream,
       output: StringBuilder,
       lastActivity: AtomicLong,
@@ -231,7 +234,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
             output.append(line).append(System.lineSeparator())
           }
           lastActivity.set(System.currentTimeMillis())
-          TaskLogger.unsafeAgentOutput(name, RawLine(line))
+          TaskLogger.unsafeAgentOutput(name, AgentOutputLine(line))
           TaskLogger.unsafeAppendArtifact(
             artifactPath,
             s"${Instant.now()} $line${System.lineSeparator()}"
@@ -250,12 +253,12 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       }
       .getOrElse("")
 
-  private def commandForLog(command: Seq[String], prompt: Prompt): String =
+  private def commandForLog(command: Seq[String], prompt: AgentPrompt): String =
     command.zipWithIndex
       .map { case (part, index) =>
         val value =
-          if part === prompt.value || index > 0 && command(index - 1) === "-p" then
-            s"<prompt:${part.length} chars>"
+          if part === prompt.value || index > 0 && command(index - 1) === "-p"
+          then s"<prompt:${part.length} chars>"
           else quote(part)
         value
       }
@@ -299,7 +302,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       handle.descendants().forEach(_.destroyForcibly())
       process.destroyForcibly()
 
-  private def fileSafe(value: Agent): String =
+  private def fileSafe(value: AgentBinary): String =
     value.value.map {
       case char if char.isLetterOrDigit => char
       case '-'                          => '-'

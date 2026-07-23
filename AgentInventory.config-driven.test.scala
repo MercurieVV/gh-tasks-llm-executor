@@ -11,7 +11,7 @@ class AgentInventoryConfigDrivenSuite extends munit.FunSuite:
     "codex-gpt-5-codex-low" -> 0.045,
     "aider-deepseek-deepseek-chat" -> 0.01,
     "aider-deepseek-deepseek-reasoner" -> 0.029
-  ).map{ case (str, d) => AgentToolId(str) -> d}
+  ).map { case (str, d) => AgentToolId(str) -> d }
 
   private val tolerance = 0.000001
 

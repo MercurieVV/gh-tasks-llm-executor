@@ -111,7 +111,7 @@ object TaskMetadata:
 
   // Renders a merged TaskMetadata back into the combined text the rest of the
   // pipeline reads as if it were the issue body (see effectiveIssue).
-  def render(metadata: TaskMetadata): Body =
+  def render(metadata: TaskMetadata): IssueBody =
     val metaLines = List(
       Some("Task metadata:"),
       metadata.evaluation.map(v => s"Evaluation: $v"),
@@ -119,17 +119,18 @@ object TaskMetadata:
       metadata.phase.map(v => s"Phase: $v")
     ).flatten ++ metadata.parentLines ++ metadata.dependencyLines ++ metadata.runnerLines
     val metaBlock = metaLines.mkString("\n")
-    Body(metadata.enrichedDescription.fold(metaBlock)(prose =>
-      s"$prose\n\n$metaBlock"
-    ))
+    IssueBody(
+      metadata.enrichedDescription.fold(metaBlock)(prose =>
+        s"$prose\n\n$metaBlock"
+      )
+    )
 
 trait TaskMetadataStore[F[_]]:
   def read(root: os.Path, task: Issue): F[TaskMetadata]
   def write(
       root: os.Path,
       taskId: TaskNumber,
-      metadata: TaskMetadata,
-      progress: String => F[Unit]
+      metadata: TaskMetadata
   ): F[Unit]
 
 object TaskMetadataStore:
@@ -139,7 +140,7 @@ object TaskMetadataStore:
   // task's original body (oldest layer, for backward compatibility with
   // tasks that predate this store) with every metadata comment in
   // chronological order, latest field wins.
-  def commentBased[F[_]](using F: Sync[F]): TaskMetadataStore[F] =
+  def commentBased[F[_]](using F: Sync[F])(progress: String => F[Unit]): TaskMetadataStore[F] =
     new TaskMetadataStore[F]:
       def read(root: os.Path, task: Issue): F[TaskMetadata] =
         GitHub.metadataCommentBodies(root, task.number).map { commentBodies =>
@@ -151,14 +152,12 @@ object TaskMetadataStore:
       def write(
           root: os.Path,
           taskId: TaskNumber,
-          metadata: TaskMetadata,
-          progress: String => F[Unit]
+          metadata: TaskMetadata
       ): F[Unit] =
         if metadata.isEmpty then F.unit
         else
           GitHub.commentTaskMetadata(progress)(
             root,
             taskId,
-            TaskMetadata.render(metadata),
-            
+            TaskMetadata.render(metadata)
           )
