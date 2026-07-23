@@ -46,3 +46,31 @@ class TaskMetadataPhaseSuite extends munit.FunSuite:
       Monoid[TaskMetadata].combine(older, TaskMetadata()).phase,
       Some("plan")
     )
+
+  test("Implemented mark round-trips and is absent by default"):
+    val original = TaskMetadata(
+      evaluation = Some("ready"),
+      execution = Some("implement"),
+      implemented = Some("task/42"),
+      enrichedDescription = Some("Do the thing.")
+    )
+    val reparsed = TaskMetadata.parse(TaskMetadata.render(original).value)
+    assertEquals(reparsed.implemented, Some("task/42"))
+    assertEquals(reparsed.enrichedDescription, Some("Do the thing."))
+    // Backward compatibility: metadata without the mark leaves it empty.
+    val legacy = TaskMetadata.parse(
+      """Task metadata:
+        |Evaluation: ready
+        |Execution: implement""".stripMargin
+    )
+    assertEquals(legacy.implemented, None)
+
+  test("Monoid preserves an earlier Implemented mark when newer omits it"):
+    val older = TaskMetadata(implemented = Some("task/7"))
+    val newer = TaskMetadata(evaluation = Some("ready"))
+    assertEquals(
+      Monoid[TaskMetadata].combine(older, newer).implemented,
+      Some("task/7")
+    )
+    // A non-empty mark keeps write() from treating the metadata as empty.
+    assert(!TaskMetadata(implemented = Some("task/7")).isEmpty)

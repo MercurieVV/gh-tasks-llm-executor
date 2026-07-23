@@ -117,6 +117,13 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       }
     }
 
+  // Public reachability check: does the pushed branch still exist on origin?
+  // acquireWorktree recreates a worktree from origin/<branch> (and `git
+  // branch -D`s any local-only branch), so an origin branch is the durable
+  // proof that already-implemented work survives into the next invocation.
+  def hasOriginBranch: Kleisli[F, (os.Path, BranchName), Boolean] =
+    branchExistsOnOrigin
+
   private def branchExistsOnOrigin: Kleisli[F, (os.Path, BranchName), Boolean] =
     Kleisli.apply { case (root, branchName) =>
       F.blocking {

@@ -10,6 +10,12 @@ final case class TaskMetadata(
     evaluation: Option[String] = None,
     execution: Option[String] = None,
     phase: Option[String] = None,
+    // Durable "implementer already produced committed+pushed output" mark.
+    // Value is the branch the work landed on. Written after commitIfChanged;
+    // read before runAgent to guarantee the implementer LLM is not re-invoked
+    // on work it already finished (see main.runAgent's already-implemented
+    // short-circuit).
+    implemented: Option[String] = None,
     runnerLines: List[String] = Nil,
     parentLines: List[String] = Nil,
     dependencyLines: List[String] = Nil,
@@ -17,8 +23,8 @@ final case class TaskMetadata(
 ):
   def isEmpty: Boolean =
     evaluation.isEmpty && execution.isEmpty && phase.isEmpty &&
-      runnerLines.isEmpty && parentLines.isEmpty && dependencyLines.isEmpty &&
-      enrichedDescription.isEmpty
+      implemented.isEmpty && runnerLines.isEmpty && parentLines.isEmpty &&
+      dependencyLines.isEmpty && enrichedDescription.isEmpty
 
 object TaskMetadata:
 
@@ -33,6 +39,7 @@ object TaskMetadata:
         evaluation = newer.evaluation.orElse(older.evaluation),
         execution = newer.execution.orElse(older.execution),
         phase = newer.phase.orElse(older.phase),
+        implemented = newer.implemented.orElse(older.implemented),
         runnerLines =
           if newer.runnerLines.nonEmpty then newer.runnerLines
           else older.runnerLines,
@@ -86,14 +93,15 @@ object TaskMetadata:
 
     val structuredLines =
       (Set("task metadata:") ++
-        List("evaluation:", "execution:", "phase:") ++
+        List("evaluation:", "execution:", "phase:", "implemented:") ++
         runnerLines ++ parentLines ++ dependencyLines).map(_.trim.toLowerCase)
     val prose = lines
       .filterNot { l =>
         val trimmed = l.trim
         val lower = trimmed.toLowerCase
         structuredLines.contains(lower) || lower.startsWith("evaluation:") ||
-        lower.startsWith("execution:") || lower.startsWith("phase:")
+        lower.startsWith("execution:") || lower.startsWith("phase:") ||
+        lower.startsWith("implemented:")
       }
       .mkString("\n")
       .trim
@@ -102,6 +110,7 @@ object TaskMetadata:
       evaluation = field("evaluation"),
       execution = field("execution"),
       phase = field("phase"),
+      implemented = field("implemented"),
       runnerLines = runnerLines,
       parentLines = parentLines,
       dependencyLines = dependencyLines,
@@ -115,7 +124,8 @@ object TaskMetadata:
       Some("Task metadata:"),
       metadata.evaluation.map(v => s"Evaluation: $v"),
       metadata.execution.map(v => s"Execution: $v"),
-      metadata.phase.map(v => s"Phase: $v")
+      metadata.phase.map(v => s"Phase: $v"),
+      metadata.implemented.map(v => s"Implemented: $v")
     ).flatten ++ metadata.parentLines ++ metadata.dependencyLines ++ metadata.runnerLines
     val metaBlock = metaLines.mkString("\n")
     IssueBody(

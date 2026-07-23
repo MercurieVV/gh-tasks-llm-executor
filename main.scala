@@ -104,6 +104,7 @@ object Main extends IOApp:
         runAgent = runAgent[F],
         runProjectValidation = runProjectValidation[F],
         recordAgentOutput = recordAgentOutput[F],
+        markTaskImplemented = markTaskImplemented[F],
         verifyRelatedPullRequestCi = verifyRelatedPullRequestCi[F],
         closeTaskIssue = closeTaskIssue[F],
         checkParentsForCompletion = checkParentsForCompletion[F]
@@ -187,7 +188,7 @@ object Main extends IOApp:
         eligible <- notAlreadyCompleted.filterA { task =>
           val needsInputMetadata =
             evaluationStatus(task.body).contains("needs-input") ||
-              executionStatus(task.body).contains("needs-input")
+              executionStatus(task.body).contains(Execution.NeedsInput)
           val needsInputCheck =
             if !needsInputMetadata then true.pure[F]
             else
@@ -212,7 +213,7 @@ object Main extends IOApp:
         }
         runnableAfterReplaySkips <- eligible.filterA { task =>
           val alreadySplit =
-            executionStatus(task.body).contains("split") &&
+            executionStatus(task.body).contains(Execution.Split) &&
               GitHub.hasOpenChildren(task, issues)
           val skipDirectReplay = alreadySplit && !context.recursive.value
           Option
@@ -404,7 +405,7 @@ object Main extends IOApp:
         issuesMap <- openIssues.get
         openDeps = depIds.flatMap(issuesMap.get)
         openChildren =
-          if executionStatus(issue.body).contains("split") then
+          if executionStatus(issue.body).contains(Execution.Split) then
             issuesMap.values.toList
               .filter(child => GitHub.parentIds(child).contains(issue.number))
               .sortBy(_.number.value)
@@ -763,9 +764,67 @@ object Main extends IOApp:
       case (a, Left(err))  => Left((a, err))
     }
 
+  // Heavy guarantee: the implementer LLM is never re-invoked on work it
+  // already finished. If a prior run left the durable "implemented" mark AND
+  // that work is still reachable (open PR or surviving origin branch), skip
+  // the agent call entirely and let the downstream publish/close pipeline
+  // finish from the existing commits. The reachability check keeps this safe:
+  // when the mark is stale (local-only branch that acquireWorktree wiped),
+  // there is nothing to resume, so re-running the implementer is correct.
   private def runAgent[F[_]: Sync]: -->[F, PreparedTask, ExecutedTask] =
+    Kleisli { task =>
+      alreadyImplemented[F](task).flatMap {
+        case Some(branch) =>
+          progress(
+            s"Task #${task.claimedTask.task.number} already implemented on branch $branch " +
+              s"(durable mark + reachable work); skipping implementer ${task.claimedTask.runner.display}."
+          ).as(ExecutedTask(task.claimedTask, AgentOutput("")))
+        case None => runImplementer[F].run(task)
+      }
+    }
+
+  private def runImplementer[F[_]: Sync]: -->[F, PreparedTask, ExecutedTask] =
     attemptWithInput(runTaskWithRunner[F]) >>>
       (retryWithFallback[F] ||| Kleisli.ask[F, ExecutedTask])
+
+  private def alreadyImplemented[F[_]: Sync](task: PreparedTask): F[Option[String]] =
+    val run = task.claimedTask
+    TaskMetadataStore
+      .commentBased[F](progress)
+      .read(run.context.root, run.task)
+      .flatMap { metadata =>
+        metadata.implemented match
+          case None => none[String].pure[F]
+          case Some(branch) =>
+            for
+              hasPr <- GitHub.hasOpenPullRequestForBranch(run.context.root, run.branchName)
+              reachable <-
+                if hasPr then true.pure[F]
+                else git[F].hasOriginBranch.run((run.context.root, run.branchName))
+            yield Option.when(reachable)(branch)
+      }
+
+  // Records the durable "implemented" mark once the agent output has been
+  // committed and published. Idempotent: re-runs that resumed via the
+  // already-implemented short-circuit skip re-writing an identical mark.
+  private def markTaskImplemented[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
+    Kleisli { task =>
+      val run = task.run
+      val mark = run.branchName.value
+      val store = TaskMetadataStore.commentBased[F](progress)
+      store.read(run.context.root, run.task).flatMap { existing =>
+        if existing.implemented.contains(mark) then task.pure[F]
+        else
+          progress(s"Marking task #${run.task.number} implemented on branch $mark.") *>
+            store
+              .write(
+                run.context.root,
+                run.task.number,
+                TaskMetadata(implemented = Some(mark))
+              )
+              .as(task)
+      }
+    }
 
   private def progressK[F[_]: Sync, A]: -->[F, (String, A), A] =
     Kleisli { case (msg, a) => progress(msg).as(a) }
@@ -1264,8 +1323,8 @@ Final answer contract:
   private def evaluationStatus(body: IssueBody): Option[String] =
     metadataValue(body, "evaluation")
 
-  private def executionStatus(body: IssueBody): Option[String] =
-    metadataValue(body, "execution").map(normalizeExecution)
+  private def executionStatus(body: IssueBody): Option[Execution] =
+    metadataValue(body, "execution").map(Execution.fromString)
 
   private def metadataValue(body: IssueBody, key: String): Option[String] =
     val prefix = s"$key:"
@@ -1275,12 +1334,6 @@ Final answer contract:
         case line if line.startsWith(prefix) =>
           line.stripPrefix(prefix).trim
       }
-
-  private def normalizeExecution(value: String): String =
-    value.trim.toLowerCase match
-      case "ready" | "implement" => "implement"
-      case "split"               => "split"
-      case _                     => "needs-input"
 
   private def extractAgentFinalization(output: AgentOutput): AgentFinalization =
     AgentFinalization(

@@ -44,7 +44,7 @@ object CachedEvaluationArrows:
               result <- replayedEvaluation.traverse { cachedEvaluation =>
                 progress(
                   s"Reusing existing evaluation for #${claimedTask.task.number}."
-                ).as((task, cachedEvaluation, cachedEvaluation.execution.value === "split"))
+                ).as((task, cachedEvaluation, cachedEvaluation.execution == Execution.Split))
               }
             yield result
           )
@@ -110,7 +110,7 @@ object AgenticEvaluationArrows:
       Kleisli { case (task, evaluation, _) =>
         OptionT.liftF {
           val claimedTask = task.claimedTask
-          if evaluation.execution.value === "split" then
+          if evaluation.execution == Execution.Split then
             GitHub.fetchIssues(claimedTask.context.root).flatMap { allIssues =>
               if GitHub.hasOpenChildren(claimedTask.task, allIssues) then evaluation.pure[F]
               else
@@ -232,7 +232,7 @@ object EvaluationArrows:
               if verifiedEvaluation.questions.exists(_.trim.nonEmpty) then "needs-input"
               else "ready"
             ),
-            execution = Some(normalizeExecution(verifiedEvaluation.execution.value))
+            execution = Some(verifiedEvaluation.execution.wireValue)
           )
         val finalMetadata = Monoid[TaskMetadata].combine(priorMetadata, newMetadata)
         val updatedTask = claimedTask.task.copy(body = TaskMetadata.render(finalMetadata))
@@ -258,7 +258,7 @@ object EvaluationArrows:
             verifiedEvaluation.questions.filter(_.trim.nonEmpty) match
               case Some(questions) =>
                 waitForUserInput((task.copy(claimedTask = updatedRun), questions.trim))
-              case None if verifiedEvaluation.execution.value === "split" =>
+              case None if verifiedEvaluation.execution == Execution.Split =>
                 Right(
                   Left(
                     SplitTask(
@@ -432,12 +432,10 @@ Rules:
           .get("questions")
           .collect { case ujson.Str(value) => value }
           .filter(_.trim.nonEmpty),
-        execution = Execution(
-          json.obj
-            .get("status")
-            .collect { case ujson.Str(value) => normalizeExecution(value) }
-            .getOrElse("needs-input")
-        )
+        execution = json.obj
+          .get("status")
+          .collect { case ujson.Str(value) => Execution.fromString(value) }
+          .getOrElse(Execution.NeedsInput)
       )
     }.getOrElse {
       // Evaluator output wasn't valid JSON: don't corrupt the issue body with
@@ -454,7 +452,7 @@ Rules:
              |
              |Reply here once this can be re-run, or fix the underlying evaluator issue.""".stripMargin
         ),
-        execution = Execution("needs-input")
+        execution = Execution.NeedsInput
       )
     }
 
@@ -476,15 +474,15 @@ Rules:
       hasRealQuestion: Boolean
   ): Option[TaskEvaluation] =
     (evaluationStatus(task.body), executionStatus(task.body)) match
-      case (Some("ready"), Some(status)) =>
-        TaskEvaluation(task.body, None, execution = Execution(status)).some
-      case (Some("needs-input"), _) | (_, Some("needs-input")) if hasRealQuestion =>
+      case (Some("ready"), Some(execution)) =>
+        TaskEvaluation(task.body, None, execution = execution).some
+      case (Some("needs-input"), _) | (_, Some(Execution.NeedsInput)) if hasRealQuestion =>
         TaskEvaluation(
           task.body,
           Some(
             "Task is already marked as needing user input. See the \"Questions before execution:\" comment on this issue for details."
           ),
-          execution = Execution("needs-input")
+          execution = Execution.NeedsInput
         ).some
       // needs-input metadata but no question was ever actually posted:
       // not a genuine block, fall through to a real evaluation.
@@ -493,8 +491,8 @@ Rules:
   private def evaluationStatus(body: IssueBody): Option[String] =
     metadataValue(body, "evaluation")
 
-  private def executionStatus(body: IssueBody): Option[String] =
-    metadataValue(body, "execution").map(normalizeExecution)
+  private def executionStatus(body: IssueBody): Option[Execution] =
+    metadataValue(body, "execution").map(Execution.fromString)
 
   private def metadataValue(body: IssueBody, key: String): Option[String] =
     val prefix = s"$key:"
@@ -504,12 +502,6 @@ Rules:
         case line if line.startsWith(prefix) =>
           line.stripPrefix(prefix).trim
       }
-
-  private def normalizeExecution(value: String): String =
-    value.trim.toLowerCase match
-      case "ready" | "implement" => "implement"
-      case "split"               => "split"
-      case _                     => "needs-input"
 
   private def strongDescription(body: IssueBody): Boolean =
     val lower = body.value.toLowerCase
