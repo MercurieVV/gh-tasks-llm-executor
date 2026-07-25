@@ -417,8 +417,14 @@ object Main extends IOApp:
           ) {
             case (Left(failedSummary), _) => Left(failedSummary).pure[F]
             case (Right(_), depIssue) =>
-              executeRecursive.run(depIssue).map { summary =>
-                Either.cond(summary.status.value == "completed", (), summary)
+              executeRecursive.run(depIssue).flatMap { summary =>
+                val stillOpen = summary.status.value != "completed"
+                openIssues
+                  .update(map =>
+                    if stillOpen then map
+                    else map.removed(depIssue.number)
+                  )
+                  .as(Either.cond(summary.status.value == "completed", (), summary))
               }
           }
       yield dependencyResult match
