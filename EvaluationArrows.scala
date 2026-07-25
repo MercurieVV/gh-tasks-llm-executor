@@ -314,12 +314,20 @@ object EvaluationArrows:
           .selectRunner(GitHub.taskRunners(updatedTask))
           .getOrElse(claimedTask.runner)
         val updatedRun = claimedTask.copy(task = updatedTask, runner = updatedRunner)
+        // Ignore `enrichedDescription` here: the evaluator LLM's prose is
+        // non-deterministic between runs, so a raw text diff on the rendered
+        // body would keep tripping on prose churn alone and re-post an
+        // otherwise-unchanged "Task metadata:" comment every replay (only the
+        // structured fields below are meaningful state to persist).
+        val structuredMetadataChanged =
+          finalMetadata.copy(enrichedDescription = None) !=
+            priorMetadata.copy(enrichedDescription = None)
         for
           // Never rewrite the issue body: persist the evaluator's decision as a
           // new "Task metadata:" comment instead, folded back in on the next
           // read by TaskMetadataStore (see effectiveIssue).
           _ <-
-            if updatedTask.body.value.trim =!= claimedTask.task.body.value.trim then
+            if structuredMetadataChanged then
               TaskMetadataStore
                 .commentBased[F](progress)
                 .write(
