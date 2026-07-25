@@ -1053,8 +1053,14 @@ object Main extends IOApp:
   // Same merge-conflict repair fallback as createAndMergePrWithConflictRepair:
   // resuming a PR still hits GitHub's "cannot trigger checks while conflicted"
   // wall, so retry via resolveMergeConflict before giving up on the resume.
+  // Bounds the CI-check repair loop below: an agent that can't actually fix
+  // the failing check would otherwise retry forever, burning agent runs on
+  // every resume of this task.
+  private val MaxPullRequestChecksRepairAttempts = 2
+
   private def resumeOpenPullRequestWithConflictRepair[F[_]](
-      run: ClaimedTask
+      run: ClaimedTask,
+      checksRepairAttemptsRemaining: Int = MaxPullRequestChecksRepairAttempts
   )(using F: Sync[F]): F[Unit] =
     GitHub
       .resumeOpenPullRequest(progress)(run.context.root, run.branchName)
@@ -1075,11 +1081,41 @@ object Main extends IOApp:
             )
             resolved <- resolveMergeConflict(progress).run(request)
             _ <-
-              if resolved then resumeOpenPullRequestWithConflictRepair(run)
+              if resolved then
+                resumeOpenPullRequestWithConflictRepair(
+                  run,
+                  checksRepairAttemptsRemaining
+                )
               else F.raiseError(error)
+          yield ()
+        else if isPullRequestChecksFailedError(
+            error
+          ) && checksRepairAttemptsRemaining > 0
+        then
+          for
+            _ <- progress(
+              s"Pull Request checks failed for task #${run.task.number}; running repair agent (${run.runner.display}) and retrying (${checksRepairAttemptsRemaining} attempt(s) left)..."
+            )
+            _ <- repairAndCommitWith(progress)(
+              run.worktreePath,
+              run.task,
+              run.runner,
+              prCheckRepairPrompt(run.task, error),
+              s"Repair failing Pull Request check for task #${run.task.number}"
+            )
+            _ <- git[F].push(run.worktreePath, run.branchName)
+            _ <- resumeOpenPullRequestWithConflictRepair(
+              run,
+              checksRepairAttemptsRemaining - 1
+            )
           yield ()
         else F.raiseError(error)
       }
+
+  private def isPullRequestChecksFailedError(error: Throwable): Boolean =
+    Option(error.getMessage).exists(
+      _.contains("Pull Request checks failed for")
+    )
 
   private def resumeExistingPullRequest[F[_]: Sync]: -->[F, ClaimedTask, RunSummary] =
     val resumeAndClose: -->[F, ClaimedTask, RunSummary] =
@@ -1663,30 +1699,38 @@ Final answer contract:
       F: Sync[F]
   ): Kleisli[F, (os.Path, Issue, TaskRunner, Throwable), Unit] =
     Kleisli.apply { case (worktreePath, task, runner, pushError) =>
-      for
-        _ <- progress(
-          s"Running repair agent (${runner.display}) for task #${task.number}..."
-        )
-        _ <- AgentExecutor[F].run(
-          runner,
-          repairPrompt(task, pushError),
-          worktreePath,
-          RepairAllowedTools
-        )
-        changed <- git[F].filesChanged(worktreePath)
-        _ <-
-          if changed then
-            git[F].commitAll(
-              worktreePath,
-              task,
-              Some(s"Repair prePush failure for task #${task.number}")
-            )
-          else
-            progress(
-              s"Repair agent made no file changes for task #${task.number}."
-            )
-      yield ()
+      repairAndCommitWith(progress)(
+        worktreePath,
+        task,
+        runner,
+        repairPrompt(task, pushError),
+        s"Repair prePush failure for task #${task.number}"
+      )
     }
+
+  // Shared by pushWithRepair (prePush hook failures) and
+  // resumeOpenPullRequestWithConflictRepair (post-push CI check failures) —
+  // only the prompt shown to the agent and the eventual commit message differ.
+  private def repairAndCommitWith[F[_]](progress: String => F[Unit])(
+      worktreePath: os.Path,
+      task: Issue,
+      runner: TaskRunner,
+      prompt: AgentPrompt,
+      commitMessage: String
+  )(using F: Sync[F]): F[Unit] =
+    for
+      _ <- progress(
+        s"Running repair agent (${runner.display}) for task #${task.number}..."
+      )
+      _ <- AgentExecutor[F].run(runner, prompt, worktreePath, RepairAllowedTools)
+      changed <- git[F].filesChanged(worktreePath)
+      _ <-
+        if changed then git[F].commitAll(worktreePath, task, Some(commitMessage))
+        else
+          progress(
+            s"Repair agent made no file changes for task #${task.number}."
+          )
+    yield ()
 
   private def repairPrompt(task: Issue, pushError: Throwable): AgentPrompt =
     AgentPrompt(
@@ -1697,6 +1741,17 @@ Final answer contract:
        |
        |Failure output:
        |${pushError.getMessage}
+       |""".stripMargin
+    )
+
+  private def prCheckRepairPrompt(task: Issue, checksError: Throwable): AgentPrompt =
+    AgentPrompt(
+      s"""CI checks failed on the open Pull Request for task #${task.number} (${task.title}).
+       |Fix the underlying issue in this worktree so the checks pass, without changing the
+       |task's intended behavior. Do not run git push yourself.
+       |
+       |Failure output:
+       |${checksError.getMessage}
        |""".stripMargin
     )
 
