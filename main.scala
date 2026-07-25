@@ -291,28 +291,12 @@ object Main extends IOApp:
         openIssuesMap = openIssues.map(i => i.number -> i).toMap
         openIssuesRef <- Ref[F].of(openIssuesMap)
         recursiveFlow = executeRecursive[F](context, openIssuesRef)
-        summaries <- candidates.traverse { candidate =>
-          if context.recursive.value then
-            runRootUntilClosed[F](
-              (context, openIssuesRef, recursiveFlow, candidate.issue.number)
-            )
-          else
-            for
-              currentMap <- openIssuesRef.get
-              summary <- currentMap.get(candidate.issue.number) match {
-                case Some(latestIssue) =>
-                  recursiveFlow.run(latestIssue)
-                case None =>
-                  RunSummary(
-                    status = Status("completed"),
-                    message = Message5(
-                      s"Task #${candidate.issue.number} is already completed."
-                    ),
-                    task = Some(candidate.issue)
-                  ).pure[F]
-              }
-            yield summary
-        }
+        runCandidate = traversalArrows[F](context, openIssuesRef, recursiveFlow).runCandidate
+        // Sequential today; runCandidate is a plain TaskCandidate --> RunSummary
+        // arrow, so independent roots can later run concurrently by lifting
+        // this traverse into an &&&/***-composed arrow instead (see
+        // TraversalArrows' doc in BusinessLogic.scala).
+        summaries <- candidates.traverse(candidate => runCandidate.run(candidate))
       yield summaries.lastOption.getOrElse(
         RunSummary(
           status = Status("completed"),
@@ -324,52 +308,78 @@ object Main extends IOApp:
 
   private val RecursiveRootIterationCap = 50
 
+  // Builds the traversal-for-selection composition: route each candidate on
+  // whether --recursive is set, then either walk its dependency tree once or
+  // repeat the walk until it closes. See TraversalArrows in BusinessLogic.scala
+  // for why this is expressed as an arrow composition rather than an if/else.
+  private def traversalArrows[F[_]: Sync](
+      context: RunContext,
+      openIssues: Ref[F, Map[TaskNumber, Issue]],
+      recursiveFlow: -->[F, Issue, RunSummary]
+  ): TraversalArrows[Flow[F]] =
+    TraversalArrows[Flow[F]](
+      routeRecursiveMode = Kleisli.fromFunction { candidate =>
+        if context.recursive.value then Left(candidate) else Right(candidate)
+      },
+      runUntilClosed = Kleisli { candidate =>
+        runRootUntilClosed[F](context, openIssues, recursiveFlow, candidate.issue.number)
+      },
+      runOnce = Kleisli { candidate =>
+        openIssues.get.flatMap { currentMap =>
+          currentMap.get(candidate.issue.number) match
+            case Some(latestIssue) => recursiveFlow.run(latestIssue)
+            case None =>
+              RunSummary(
+                status = Status("completed"),
+                message = Message5(
+                  s"Task #${candidate.issue.number} is already completed."
+                ),
+                task = Some(candidate.issue)
+              ).pure[F]
+        }
+      }
+    )
+
   // Repeats the dependency-tree walk against a single root task until it
   // closes: a split mid-tree creates new sub-issues that `openIssues` (a
   // one-shot snapshot) doesn't know about, so a single pass can short-circuit
   // without ever running them. Refetching and retrying picks those up on the
   // next pass, same as re-invoking the script by hand would.
-  private def runRootUntilClosed[F[_]: Sync]: Kleisli[
-    F,
-    (
-        RunContext,
-        Ref[F, Map[TaskNumber, Issue]],
-        -->[F, Issue, RunSummary],
-        TaskNumber
-    ),
-    RunSummary
-  ] =
-    Kleisli.apply { case (context, openIssues, recursiveFlow, rootNumber) =>
-      def loop(iteration: Int, previous: Option[RunSummary]): F[RunSummary] =
-        for
-          freshIssues <- GitHub.fetchIssues(context.root)
-          freshMap = freshIssues.map(i => i.number -> i).toMap
-          _ <- openIssues.set(freshMap)
-          result <- freshMap.get(rootNumber) match
-            case None =>
-              RunSummary(
-                status = Status("completed"),
-                message = Message5(s"Task #$rootNumber is already completed."),
-                task = None
-              ).pure[F]
-            case Some(rootIssue) =>
-              for
-                summary <- recursiveFlow.run(rootIssue)
-                next <-
-                  if summary.status.value === "needs-input" then summary.pure[F]
-                  else if previous.contains(summary) then
-                    progress(
-                      s"Task #$rootNumber made no further progress under --recursive; stopping."
-                    ).as(summary)
-                  else if iteration >= RecursiveRootIterationCap then
-                    progress(
-                      s"Task #$rootNumber hit the --recursive iteration cap ($RecursiveRootIterationCap); stopping."
-                    ).as(summary)
-                  else loop(iteration + 1, Some(summary))
-              yield next
-        yield result
-      loop(1, None)
-    }
+  private def runRootUntilClosed[F[_]: Sync](
+      context: RunContext,
+      openIssues: Ref[F, Map[TaskNumber, Issue]],
+      recursiveFlow: -->[F, Issue, RunSummary],
+      rootNumber: TaskNumber
+  ): F[RunSummary] =
+    def loop(iteration: Int, previous: Option[RunSummary]): F[RunSummary] =
+      for
+        freshIssues <- GitHub.fetchIssues(context.root)
+        freshMap = freshIssues.map(i => i.number -> i).toMap
+        _ <- openIssues.set(freshMap)
+        result <- freshMap.get(rootNumber) match
+          case None =>
+            RunSummary(
+              status = Status("completed"),
+              message = Message5(s"Task #$rootNumber is already completed."),
+              task = None
+            ).pure[F]
+          case Some(rootIssue) =>
+            for
+              summary <- recursiveFlow.run(rootIssue)
+              next <-
+                if summary.status.value === "needs-input" then summary.pure[F]
+                else if previous.contains(summary) then
+                  progress(
+                    s"Task #$rootNumber made no further progress under --recursive; stopping."
+                  ).as(summary)
+                else if iteration >= RecursiveRootIterationCap then
+                  progress(
+                    s"Task #$rootNumber hit the --recursive iteration cap ($RecursiveRootIterationCap); stopping."
+                  ).as(summary)
+                else loop(iteration + 1, Some(summary))
+            yield next
+      yield result
+    loop(1, None)
 
   private def executeRecursive[F[_]: Sync](
       context: RunContext,

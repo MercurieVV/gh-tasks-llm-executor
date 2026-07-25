@@ -374,6 +374,29 @@ final case class RecursiveArrows[-->[_, _]](
       ) >>> (summon[ArrowChoice[-->]].id[RunSummary] ||| claimAndRun)))
     self
 
+/** Arrows that drive one selected root candidate's dependency tree to
+  * completion: either a single dependency-first pass, or (under
+  * `--recursive`) repeatedly re-walking it until a pass makes no further
+  * progress. `routeRecursiveMode` is the only place that decision is made;
+  * `runCandidate` fuses both branches with `|||` so callers never branch on
+  * `Recursive` themselves.
+  *
+  * Parallelization seam: `executeSelectedCandidates` (ProgramArrows) today
+  * folds `runCandidate` over each root candidate sequentially via
+  * `traverse`. Since `runCandidate` is already a plain
+  * `TaskCandidate --> RunSummary` arrow, running independent roots
+  * concurrently later is a matter of lifting that `traverse` into an
+  * `&&&`/`***`-composed arrow (given a `Parallel`-capable `F`) rather than
+  * restructuring this type.
+  */
+final case class TraversalArrows[-->[_, _]](
+    routeRecursiveMode: TaskCandidate --> Either[TaskCandidate, TaskCandidate],
+    runUntilClosed: TaskCandidate --> RunSummary,
+    runOnce: TaskCandidate --> RunSummary
+):
+  def runCandidate(using ArrowChoice[-->]): TaskCandidate --> RunSummary =
+    routeRecursiveMode >>> (runUntilClosed ||| runOnce)
+
 /** Complete business workflow assembled from independently testable arrow groups.
   */
 final case class BusinessLogic[-->[_, _]](
