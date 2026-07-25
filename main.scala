@@ -1040,6 +1040,37 @@ object Main extends IOApp:
   // invocation and left an open Pull Request behind: verify/merge that PR,
   // then close the task the same way a fresh run's closeTaskIssue would, and
   // sweep up any leftover local worktree/branch (usually already gone).
+  // Same merge-conflict repair fallback as createAndMergePrWithConflictRepair:
+  // resuming a PR still hits GitHub's "cannot trigger checks while conflicted"
+  // wall, so retry via resolveMergeConflict before giving up on the resume.
+  private def resumeOpenPullRequestWithConflictRepair[F[_]](
+      run: ClaimedTask
+  )(using F: Sync[F]): F[Unit] =
+    GitHub
+      .resumeOpenPullRequest(progress)(run.context.root, run.branchName)
+      .handleErrorWith { error =>
+        if isMergeConflictError(error) then
+          val request = PublishRequest(
+            root = run.context.root,
+            worktreePath = run.worktreePath,
+            branchName = run.branchName,
+            baseBranch = run.baseBranch,
+            task = run.task,
+            finalization = AgentFinalization(None, None),
+            runner = run.runner
+          )
+          for
+            _ <- progress(
+              s"Merge conflict detected resuming task #${run.task.number}; attempting automatic resolution..."
+            )
+            resolved <- resolveMergeConflict(progress).run(request)
+            _ <-
+              if resolved then resumeOpenPullRequestWithConflictRepair(run)
+              else F.raiseError(error)
+          yield ()
+        else F.raiseError(error)
+      }
+
   private def resumeExistingPullRequest[F[_]: Sync]: -->[F, ClaimedTask, RunSummary] =
     val resumeAndClose: -->[F, ClaimedTask, RunSummary] =
       Kleisli[F, ClaimedTask, ExecutedTask] { run =>
@@ -1047,10 +1078,7 @@ object Main extends IOApp:
           _ <- progress(
             s"Task #${run.task.number} already has an open Pull Request for ${run.branchName}; resuming to verify and merge instead of re-implementing..."
           )
-          _ <- GitHub.resumeOpenPullRequest(progress)(
-            run.context.root,
-            run.branchName
-          )
+          _ <- resumeOpenPullRequestWithConflictRepair(run)
         yield ExecutedTask(run, output = AgentOutput(""))
       } >>> closeTaskIssue[F] >>> checkParentsForCompletion[F] >>> Kleisli[
         F,
