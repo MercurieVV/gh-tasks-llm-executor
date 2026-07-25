@@ -44,18 +44,18 @@
     {
       "agent": "aider",
       "model": "deepseek/deepseek-chat",
-      "inputUsdPerMTok": 0.27,
-      "outputUsdPerMTok": 1.1,
-      "source": "DeepSeek API pricing",
-      "asOfDate": "2026-07-17"
+      "inputUsdPerMTok": 0.14,
+      "outputUsdPerMTok": 0.28,
+      "source": "DeepSeek API pricing (billed as deepseek-v4-flash; deepseek-chat retired)",
+      "asOfDate": "2026-07-26"
     },
     {
       "agent": "aider",
       "model": "deepseek/deepseek-reasoner",
-      "inputUsdPerMTok": 0.55,
-      "outputUsdPerMTok": 2.19,
-      "source": "DeepSeek API pricing",
-      "asOfDate": "2026-07-17"
+      "inputUsdPerMTok": 0.435,
+      "outputUsdPerMTok": 0.87,
+      "source": "DeepSeek API pricing (billed as deepseek-v4-pro; deepseek-reasoner retired)",
+      "asOfDate": "2026-07-26"
     }
   ]
 }

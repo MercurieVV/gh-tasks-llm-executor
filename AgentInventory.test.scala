@@ -12,8 +12,8 @@ class AgentInventorySuite extends CatsEffectSuite:
       assertEquals(costs("codex-gpt-5-high"), Some(0.105))
       assertEquals(costs("codex-gpt-5-medium"), Some(0.065))
       assertEquals(costs("codex-gpt-5-low"), Some(0.045))
-      assertEquals(costs("aider-deepseek-deepseek-chat"), Some(0.010))
-      assertEquals(costs("aider-deepseek-deepseek-reasoner"), Some(0.029))
+      assertEquals(costs("aider-deepseek-deepseek-chat"), Some(0.004))
+      assertEquals(costs("aider-deepseek-deepseek-reasoner"), Some(0.016))
     }
   }
 

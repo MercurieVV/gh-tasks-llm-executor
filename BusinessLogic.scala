@@ -133,7 +133,15 @@ final case class TaskRunner(
           effort.toList.flatMap(value => Seq("--config", s"model_reasoning_effort=$value")) ++
           Seq(prompt.value)
       case "aider" =>
-        Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
+        // DeepSeek retired deepseek-chat/deepseek-reasoner in favor of
+        // deepseek-v4-flash/deepseek-v4-pro. Runner ids/model fields keep the
+        // old names so previously-persisted task metadata still resolves via
+        // AgentInventory.selectRunner; only the invoked API model changes.
+        val mappedModel = model match
+          case Some("deepseek/deepseek-chat")     => Some("deepseek/deepseek-v4-flash")
+          case Some("deepseek/deepseek-reasoner") => Some("deepseek/deepseek-v4-pro")
+          case other                               => other
+        Seq(agent.value) ++ mappedModel.toList.flatMap(value => Seq("--model", value)) ++
           Seq("--yes-always", "--no-auto-commits", "--message", prompt.value)
       case _ =>
         Seq(agent.value) ++ model.toList.flatMap(value => Seq("-m", value)) ++

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedBy": "scripts/discover-agent-runners.scala",
-  "generatedAtEpochMillis": "1784982479770",
+  "generatedAtEpochMillis": "1785015658847",
   "metadataFormat": "preferred llms/models/efforts/versions",
   "tools": [
     {
@@ -367,10 +367,10 @@
         "test"
       ],
       "available": true,
-      "inputUsdPerMTok": 0.27,
-      "outputUsdPerMTok": 1.1,
-      "source": "DeepSeek API pricing",
-      "asOfDate": "2026-07-17",
+      "inputUsdPerMTok": 0.14,
+      "outputUsdPerMTok": 0.28,
+      "source": "DeepSeek API pricing (billed as deepseek-v4-flash; deepseek-chat retired)",
+      "asOfDate": "2026-07-26",
       "probe": {
         "command": "aider",
         "path": "/Users/viktorskalinins/.local/bin/aider",
@@ -405,10 +405,10 @@
         "implement"
       ],
       "available": true,
-      "inputUsdPerMTok": 0.55,
-      "outputUsdPerMTok": 2.19,
-      "source": "DeepSeek API pricing",
-      "asOfDate": "2026-07-17",
+      "inputUsdPerMTok": 0.435,
+      "outputUsdPerMTok": 0.87,
+      "source": "DeepSeek API pricing (billed as deepseek-v4-pro; deepseek-reasoner retired)",
+      "asOfDate": "2026-07-26",
       "probe": {
         "command": "aider",
         "path": "/Users/viktorskalinins/.local/bin/aider",
