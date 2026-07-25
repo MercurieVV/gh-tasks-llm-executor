@@ -4,7 +4,7 @@
 
 ## Phase-typed task decomposition
 
-The evaluator (`evaluateTaskPrompt`, `main.scala`) may split a task into
+The evaluator (`evaluateTaskPrompt`, `EvaluationArrows.scala`) may split a task into
 phase-typed subtasks drawn from `{plan, source-of-truth, implement, test}`, each
 tagged with a `Phase:` line in its `Task metadata` block and dependency-ordered
 `plan -> source-of-truth -> implement -> test`. Phase decomposition composes with

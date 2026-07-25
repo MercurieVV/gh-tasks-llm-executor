@@ -1,6 +1,6 @@
 // Main
 //> using scala 3.8.4
-//> using options -Wunused:imports
+//> using options -Wunused:imports -Xmax-inlines:128
 
 //> using dependency com.lihaoyi::os-lib:0.11.8
 //> using dependency com.lihaoyi::ujson:4.4.3
