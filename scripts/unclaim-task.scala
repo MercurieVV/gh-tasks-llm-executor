@@ -20,16 +20,26 @@ object UnclaimTask:
     val taskNumber = args(0).trim
     val ref = s"refs/gh-tasks-llm-executor/claims/task-$taskNumber"
 
+    val repoRoot =
+      try
+        os.Path(
+          os.proc("git", "rev-parse", "--show-toplevel").call().out.text().trim
+        )
+      catch
+        case _: Exception =>
+          println("Error: not inside a git repository.")
+          sys.exit(1)
+
     val exists = os
       .proc("git", "ls-remote", "--exit-code", "origin", ref)
-      .call(check = false, stdout = os.Pipe, stderr = os.Pipe)
+      .call(cwd = repoRoot, check = false, stdout = os.Pipe, stderr = os.Pipe)
       .exitCode == 0
 
     if !exists then println(s"Task #$taskNumber has no active claim.")
     else
       val result = os
         .proc("git", "push", "origin", "--delete", ref)
-        .call(check = false, stdout = os.Pipe, stderr = os.Pipe)
+        .call(cwd = repoRoot, check = false, stdout = os.Pipe, stderr = os.Pipe)
       if result.exitCode == 0 then println(s"Unclaimed task #$taskNumber.")
       else
         println(s"Failed to unclaim task #$taskNumber: ${result.err.text().trim}")
