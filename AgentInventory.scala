@@ -31,7 +31,12 @@ final case class AgentTool(
     inputUsdPerMTok: Option[Double] = None,
     outputUsdPerMTok: Option[Double] = None,
     source: Option[String] = None,
-    asOfDate: Option[String] = None
+    asOfDate: Option[String] = None,
+    // 0..1 fraction of this tool's vendor budget already consumed (see
+    // vendor-budgets.json / discover-vendor-budgets.scala). None means no
+    // budget signal was available for this vendor - never penalize what
+    // isn't measured.
+    budgetPressure: Option[Double] = None
 ):
   def cost: Option[Double] =
     for
@@ -61,7 +66,14 @@ final case class AgentTool(
   // exactly one implementation of "how good" and "how cheap" to keep in sync.
   def priority: Int =
     val costRank = cost.map(value => math.round(value * 10000.0).toInt).getOrElse(500000)
-    tier * 1000000 + costRank
+    // Scaled well below the 1,000,000-wide tier gap so a saturated vendor
+    // sinks to the bottom of its own tier (loses ties, tried last) but never
+    // gets bumped into a worse tier - a heavily-used vendor is still
+    // preferable to an incapable one.
+    val pressureRank = budgetPressure
+      .map(value => math.round(math.min(1.0, math.max(0.0, value)) * AgentTool.BudgetPressureScale).toInt)
+      .getOrElse(0)
+    tier * 1000000 + costRank + pressureRank
 
   private def tier: Int =
     val markers = strengths.map(_.toLowerCase).toSet
@@ -99,7 +111,8 @@ final case class AgentTool(
         cost
           .map(value => f"$$$value%.3f/task (${value / 0.010}%.0fx)")
           .getOrElse("unknown")
-    s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue cost=$costValue priority=$priority"
+    val budgetValue = budgetPressure.map(value => f"${value * 100}%.0f%% used").getOrElse("unknown")
+    s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue cost=$costValue budget=$budgetValue priority=$priority"
 
   private def optionMatches(
       configured: Option[String],
@@ -135,6 +148,28 @@ final case class AgentTool(
 
 object AgentTool:
   val MaxPriceAgeDays = 180
+
+  // Max cost-rank observed in practice is a few tens of thousands (see
+  // `priority`); keeping the pressure penalty in that same range means a
+  // saturated vendor loses tiebreaks against cheaper-but-similarly-priced
+  // tools without ever crossing a tier boundary on its own.
+  val BudgetPressureScale = 20000.0
+
+  // Past this fraction of a vendor's budget consumed, treat the tool as
+  // unavailable outright rather than merely deprioritized - avoids kicking
+  // off a task on a vendor that will run out mid-task.
+  val HardExhaustionThreshold = 0.97
+
+  // aider is a multi-vendor runner (its `agent` field is always "aider");
+  // the actual vendor being billed is encoded in the model id.
+  def vendorKeyFor(agent: String, model: Option[String]): String =
+    val agentLower = agent.toLowerCase
+    if agentLower == "aider" then
+      model.map(_.toLowerCase) match
+        case Some(m) if m.contains("deepseek") => "deepseek"
+        case Some(m)                           => m.takeWhile(_ != '/')
+        case None                              => agentLower
+    else agentLower
 
 final case class AgentInventory(tools: List[AgentTool]):
   lazy val availableTools: List[AgentTool] =
@@ -176,6 +211,13 @@ final case class AgentInventory(tools: List[AgentTool]):
 object AgentInventory:
   private val RelativeConfigPath =
     os.rel / ".gh-tasks-llm-executor" / "agent-runners.json"
+  private val RelativeBudgetsPath =
+    os.rel / ".gh-tasks-llm-executor" / "vendor-budgets.json"
+
+  // Budget state moves fast (a session can saturate in minutes), unlike
+  // pricing. Past this age the snapshot is more likely wrong than useful,
+  // so fall back to "no signal" instead of steering on stale pressure.
+  private val MaxBudgetAgeMillis = 6L * 60 * 60 * 1000
 
   private val Fallback = AgentInventory(
     List(
@@ -200,35 +242,75 @@ object AgentInventory:
 
   def load(root: os.Path): AgentInventory =
     val path = root / RelativeConfigPath
-    if os.exists(path) then parse(os.read(path)).getOrElse(Fallback)
+    val pressures = loadVendorPressures(root)
+    if os.exists(path) then parse(os.read(path), pressures).getOrElse(Fallback)
     else Fallback
 
-  private def parse(value: String): Option[AgentInventory] =
+  private def loadVendorPressures(root: os.Path): Map[String, Double] =
+    val path = root / RelativeBudgetsPath
+    if os.exists(path) then parseVendorBudgets(os.read(path)) else Map.empty
+
+  private def parseVendorBudgets(value: String): Map[String, Double] =
     scala.util.Try {
       val json = ujson.read(value)
-      val tools = json("tools").arr.toList.flatMap(parseTool)
+      val generatedAtEpochMillis = json.obj
+        .get("generatedAtEpochMillis")
+        .flatMap(field =>
+          field.strOpt
+            .flatMap(text => scala.util.Try(text.toLong).toOption)
+            .orElse(field.numOpt.map(_.toLong))
+        )
+        .getOrElse(0L)
+      val isStale = (System.currentTimeMillis() - generatedAtEpochMillis) > MaxBudgetAgeMillis
+      if isStale then Map.empty
+      else
+        json.obj
+          .get("budgets")
+          .toList
+          .flatMap(_.arr.toList)
+          .flatMap { entry =>
+            for
+              vendor <- entry.obj.get("vendor").collect { case ujson.Str(value) => value }
+              usedFraction <- entry.obj.get("usedFraction").collect { case ujson.Num(value) => value }
+            yield vendor.toLowerCase -> usedFraction
+          }
+          .toMap
+    }.getOrElse(Map.empty)
+
+  private def parse(value: String, pressures: Map[String, Double]): Option[AgentInventory] =
+    scala.util.Try {
+      val json = ujson.read(value)
+      val tools = json("tools").arr.toList.flatMap(parseTool(_, pressures))
       AgentInventory(tools)
     }.toOption
 
-  private def parseTool(value: ujson.Value): Option[AgentTool] =
+  private def parseTool(value: ujson.Value, pressures: Map[String, Double]): Option[AgentTool] =
     value match
       case ujson.Obj(fields) =>
         for id <- stringField(fields, "id")
-        yield AgentTool(
-          id = AgentToolId(id),
-          agent = Agent(stringField(fields, "agent").getOrElse(id)),
-          model = stringField(fields, "model"),
-          effort = stringField(fields, "effort"),
-          version = stringField(fields, "version"),
-          roles = stringListField(fields, "roles"),
-          jobTypes = stringListField(fields, "jobTypes"),
-          strengths = stringListField(fields, "strengths"),
-          available = Available(boolField(fields, "available").getOrElse(false)),
-          inputUsdPerMTok = positiveNumberField(fields, "inputUsdPerMTok"),
-          outputUsdPerMTok = positiveNumberField(fields, "outputUsdPerMTok"),
-          source = stringField(fields, "source"),
-          asOfDate = stringField(fields, "asOfDate")
-        )
+        yield
+          val agent = stringField(fields, "agent").getOrElse(id)
+          val model = stringField(fields, "model")
+          val vendorKey = AgentTool.vendorKeyFor(agent, model)
+          val budgetPressure = pressures.get(vendorKey)
+          val jsonAvailable = boolField(fields, "available").getOrElse(false)
+          val hardExhausted = budgetPressure.exists(_ >= AgentTool.HardExhaustionThreshold)
+          AgentTool(
+            id = AgentToolId(id),
+            agent = Agent(agent),
+            model = model,
+            effort = stringField(fields, "effort"),
+            version = stringField(fields, "version"),
+            roles = stringListField(fields, "roles"),
+            jobTypes = stringListField(fields, "jobTypes"),
+            strengths = stringListField(fields, "strengths"),
+            available = Available(jsonAvailable && !hardExhausted),
+            inputUsdPerMTok = positiveNumberField(fields, "inputUsdPerMTok"),
+            outputUsdPerMTok = positiveNumberField(fields, "outputUsdPerMTok"),
+            source = stringField(fields, "source"),
+            asOfDate = stringField(fields, "asOfDate"),
+            budgetPressure = budgetPressure
+          )
       case _ => None
 
   private def stringField(

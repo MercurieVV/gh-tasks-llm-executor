@@ -50,3 +50,6 @@ build/
 .idea/
 *.log
 prompt.txt
+
+### Vendor budget probe output (per-machine, carries $ spend/balance) ###
+.gh-tasks-llm-executor/vendor-budgets.json

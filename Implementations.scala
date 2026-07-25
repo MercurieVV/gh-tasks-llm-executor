@@ -36,11 +36,29 @@ object Impl:
       .get("GH_TASKS_USER_INPUT_SOUND")
       .forall(value => !Set("0", "false", "no", "off").contains(value.toLowerCase))
 
+  // TTL-gated, not per-task: refreshing means shelling out to codex/gemini/
+  // deepseek/ccusage probes, so it only runs once per process invocation
+  // (here, before AgentInventory reads the snapshot) and only when the
+  // on-disk snapshot is older than the TTL. A probe failure never blocks
+  // task execution - `.attempt.void` swallows it and AgentInventory just
+  // reads whatever snapshot (possibly stale, possibly absent) is on disk.
+  def refreshVendorBudgetsIfStale[F[_]: Sync](root: os.Path): F[Unit] =
+    Sync[F]
+      .blocking {
+        val ttlMillis = Cli.envLong("GH_TASKS_VENDOR_BUDGET_TTL_MINUTES", 15).minutes.toMillis
+        val isStale = VendorBudgets.ageMillis(root).forall(_ > ttlMillis)
+        if isStale then VendorBudgets.collectAndWrite(root)
+        ()
+      }
+      .attempt
+      .void
+
   def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =
     Kleisli { input =>
-      AgentInventory
-        .loadF[F](input.root)
-        .map(RunContext(input.root, _, input.taskNumber, input.recursive, input.parallelExecution))
+      for
+        _ <- refreshVendorBudgetsIfStale[F](input.root)
+        inventory <- AgentInventory.loadF[F](input.root)
+      yield RunContext(input.root, inventory, input.taskNumber, input.recursive, input.parallelExecution)
     }
 
   def selectTask[F[_]: Sync]: -->[F, RunContext, TaskSelection] =

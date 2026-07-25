@@ -77,6 +77,30 @@ availability/version, cross-references `model-prices.json` for pricing, and
 regenerates the runner list the executor selects from at run time — rerun it
 whenever installed agent CLIs or their models change.
 
+### Vendor budget balancing
+
+Each vendor (claude, codex, gemini, deepseek) has its own token/spend quota,
+so `AgentTool.priority` factors in how much of that quota is already used —
+a saturated vendor loses tiebreaks against similarly-priced tools before
+crossing into a worse capability tier, and hard-exhaustion marks it
+unavailable outright. See `.gh-tasks-llm-executor/vendor-budgets.json`
+(gitignored, per-machine, carries $ figures).
+
+This runs automatically: `resolveContext` refreshes the snapshot in-process
+(`VendorBudgets.scala`) once per invocation, only if it's older than
+`GH_TASKS_VENDOR_BUDGET_TTL_MINUTES` (default 15). A probe failure never
+blocks task execution. To refresh manually instead:
+
+```bash
+scala-cli scripts/discover-vendor-budgets.scala
+```
+
+Env vars: `AGENT_RUNNER_CLAUDE_SESSION_BUDGET_USD` (default 25, claude has no
+vendor-reported quota so this is a self-imposed cost cap),
+`AGENT_RUNNER_DEEPSEEK_MONTHLY_BUDGET_EUR` (default 20), `DEEPSEEK_API_KEY`
+(required for the deepseek probe), `GOOGLE_CLOUD_PROJECT` (required for the
+gemini/Vertex probe).
+
 ## What it does
 
 1. Fetches open issues, filters out ones with unresolved dependencies, open
