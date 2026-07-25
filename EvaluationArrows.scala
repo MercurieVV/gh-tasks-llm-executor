@@ -298,6 +298,16 @@ object EvaluationArrows:
             ),
             answerConsumed = evaluated.userAnswer.map(answerDigest)
           )
+        // Comments only need to carry prose when the evaluator actually
+        // rewrote it. Re-posting an unchanged echo of the existing
+        // description duplicates the issue body for no reason; read() still
+        // recovers the description via the older-layer fallback either way
+        // (TaskMetadata's Monoid, enrichedDescription = newer.orElse(older)).
+        val commentMetadata = newMetadata.copy(
+          enrichedDescription = newMetadata.enrichedDescription.filterNot(
+            _.trim === priorMetadata.enrichedDescription.getOrElse("").trim
+          )
+        )
         val finalMetadata = Monoid[TaskMetadata].combine(priorMetadata, newMetadata)
         val updatedTask = claimedTask.task.copy(body = TaskMetadata.render(finalMetadata))
         val updatedRunner = claimedTask.context.agentInventory
@@ -315,7 +325,7 @@ object EvaluationArrows:
                 .write(
                   claimedTask.context.root,
                   claimedTask.task.number,
-                  newMetadata
+                  commentMetadata
                 )
             else Sync[F].unit
           result <- (questions, verifiedEvaluation.execution) match

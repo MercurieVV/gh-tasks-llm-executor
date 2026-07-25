@@ -1368,7 +1368,8 @@ This parent task will not be implemented directly. Run child tasks first; when a
                 case PullRequestChecksPassed(message) =>
                   progress(message.value)
                 case PullRequestChecksFailed(message) =>
-                  F.raiseError(new RuntimeException(message.value))
+                  progress(message.value) *>
+                    F.raiseError(new RuntimeException(message.value))
               }
         yield ()
 
@@ -1422,7 +1423,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
         "checks",
         branchName.value,
         "--json",
-        "name,state"
+        "name,state,description,link"
       ).map { output =>
         val checks = parsePullRequestChecks(output)
         val failed = checks.filter(check =>
@@ -1439,7 +1440,9 @@ This parent task will not be implemented directly. Run child tasks first; when a
           )
         else if failed.nonEmpty then
           PullRequestChecksFailed(
-            Message(s"Pull Request checks failed for $branchName: ${formatChecks(failed)}")
+            Message(
+              s"Pull Request checks failed for $branchName:\n${formatCheckFailures(failed)}"
+            )
           )
         else if pending.nonEmpty then
           PullRequestChecksPending(
@@ -1452,7 +1455,12 @@ This parent task will not be implemented directly. Run child tasks first; when a
       }
     }
 
-  private final case class PullRequestCheck(name: Name, state: State2)
+  private final case class PullRequestCheck(
+      name: Name,
+      state: State2,
+      description: Option[String],
+      link: Option[String]
+  )
 
   private def parsePullRequestChecks(output: String): List[PullRequestCheck] =
     Try(ujson.read(output).arr.toList).toOption.toList.flatten.flatMap {
@@ -1462,12 +1470,33 @@ This parent task will not be implemented directly. Run child tasks first; when a
           state <- fields.get("state").collect { case ujson.Str(value) =>
             value.trim.toUpperCase
           }
-        yield PullRequestCheck(Name(name), State2(state))
+        yield PullRequestCheck(
+          Name(name),
+          State2(state),
+          fields.get("description").collect {
+            case ujson.Str(value) if value.trim.nonEmpty => value.trim
+          },
+          fields.get("link").collect {
+            case ujson.Str(value) if value.trim.nonEmpty => value.trim
+          }
+        )
       case _ => None
     }
 
   private def formatChecks(checks: List[PullRequestCheck]): String =
     checks.map(check => s"${check.name}=${check.state}").mkString(", ")
+
+  // Failure detail fed to the caller's progress log and (via the raised
+  // exception) to a repair agent: name=STATE alone doesn't say why a check
+  // failed, so append each failed check's description/link when gh provides one.
+  private def formatCheckFailures(checks: List[PullRequestCheck]): String =
+    checks
+      .map { check =>
+        val extra = List(check.description, check.link).flatten
+        if extra.isEmpty then s"${check.name}=${check.state}"
+        else s"${check.name}=${check.state} (${extra.mkString(" - ")})"
+      }
+      .mkString("\n")
 
   private final case class MergedPullRequest(
       baseRefName: BranchName,

@@ -472,11 +472,15 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
           _ <-
             if result.exitCode === 0 then F.unit
             else
+              // Prefer stderr, but a failed prePush hook (tests/lint/format)
+              // writes its summary to stdout, so fall back to whichever
+              // stream is non-empty rather than assuming stderr always has
+              // the useful part.
               val detail = Seq(stderr, stdout).find(_.nonEmpty)
               F.raiseError(
                 new RuntimeException(
                   s"Command failed with exit code ${result.exitCode}: ${formatCommand(command)}" +
-                    detail.fold("")(d => s"\n${truncate(d)}")
+                    detail.fold("")(d => s"\n${truncateForError(d)}")
                 )
               )
         yield ()
@@ -487,6 +491,15 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
 
   private def truncate(value: String): String =
     if value.length <= 160 then value else value.take(160) + "...[truncated]"
+
+  // Failure detail fed to a repair agent (see main.scala's repairPrompt), not
+  // the trace log: a blocked `git push` carries mill's full compile/test
+  // output, with the actual failing-test summary near the end, not the
+  // start, so this keeps the tail instead of truncate's head-only 160 chars.
+  private def truncateForError(value: String): String =
+    val limit = 6000
+    if value.length <= limit then value
+    else s"...[truncated ${value.length - limit} earlier chars]...\n" + value.takeRight(limit)
 
 object Git:
   def apply[F[_]: Sync](progress: String => F[Unit]): Git[F] = new Git[F](progress)
