@@ -16,6 +16,8 @@ import scala.concurrent.duration.*
 import scala.util.Try
 import ArrowLogging.*
 import cats.syntax.arrow.*
+import cats.effect.kernel.Async
+import cats.effect.kernel.implicits.parallelForGenSpawn
 
 /** Body text of a GitHub issue after task metadata has been merged in. */
 opaque type IssueBody = String
@@ -52,11 +54,12 @@ object Main extends IOApp:
   def run(args: List[String]): IO[ExitCode] =
     val taskNumber = parseTaskNumber(args)
     val recursive = parseRecursiveFlag(args)
+    val parallelExecution = parseParallelFlag(args)
     val arrowstepArgs = removeScriptArgs(args)
     AgentMain
       .run[IO](arrowstepArgs, os.pwd)(_ =>
         businessLogic[IO].programArrows.program(
-          AppInput(os.pwd, taskNumber, recursive)
+          AppInput(os.pwd, taskNumber, recursive, parallelExecution)
         )
       )
       .flatMap { outcome =>
@@ -64,7 +67,7 @@ object Main extends IOApp:
           IO.pure(ExitCode(outcome.exitCode))
       }
 
-  private def businessLogic[F[_]: Sync]: BusinessLogic[Flow[F]] =
+  private def businessLogic[F[_]: Async]: BusinessLogic[Flow[F]] =
     val changeArrows = ChangeArrows[Flow[F]](
       classifyAgentResultForPublication = classifyAgentResultForPublication[F],
       publishChangedTask = publishChangedTask[F],
@@ -115,7 +118,7 @@ object Main extends IOApp:
     Kleisli { input =>
       AgentInventory
         .loadF[F](input.root)
-        .map(RunContext(input.root, _, input.taskNumber, input.recursive))
+        .map(RunContext(input.root, _, input.taskNumber, input.recursive, input.parallelExecution))
     }
 
   private def selectTask[F[_]: Sync]: -->[F, RunContext, TaskSelection] =
@@ -282,7 +285,7 @@ object Main extends IOApp:
       )
     }
 
-  private def executeSelectedCandidates[F[_]: Sync]: -->[F, TaskSelection, RunSummary] =
+  private def executeSelectedCandidates[F[_]: Async]: -->[F, TaskSelection, RunSummary] =
     Kleisli { selection =>
       val context = selection.context
       val candidates = selection.candidates
@@ -292,11 +295,14 @@ object Main extends IOApp:
         openIssuesRef <- Ref[F].of(openIssuesMap)
         recursiveFlow = executeRecursive[F](context, openIssuesRef)
         runCandidate = traversalArrows[F](context, openIssuesRef, recursiveFlow).runCandidate
-        // Sequential today; runCandidate is a plain TaskCandidate --> RunSummary
-        // arrow, so independent roots can later run concurrently by lifting
-        // this traverse into an &&&/***-composed arrow instead (see
-        // TraversalArrows' doc in BusinessLogic.scala).
-        summaries <- candidates.traverse(candidate => runCandidate.run(candidate))
+        // --parallel runs independent root candidates concurrently through
+        // ParallelArrows.parAll (an *** in spirit, generalized past fixed
+        // arity); otherwise a plain sequential traverse. runCandidate itself
+        // is the same TaskCandidate --> RunSummary arrow either way.
+        summaries <-
+          if context.parallelExecution.value then
+            ParallelArrows.parAll(runCandidate).run(candidates)
+          else candidates.traverse(candidate => runCandidate.run(candidate))
       yield summaries.lastOption.getOrElse(
         RunSummary(
           status = Status("completed"),
@@ -310,9 +316,10 @@ object Main extends IOApp:
 
   // Builds the traversal-for-selection composition: route each candidate on
   // whether --recursive is set, then either walk its dependency tree once or
-  // repeat the walk until it closes. See TraversalArrows in BusinessLogic.scala
-  // for why this is expressed as an arrow composition rather than an if/else.
-  private def traversalArrows[F[_]: Sync](
+  // repeat the walk (via untilClosedArrows) until it closes. See
+  // TraversalArrows/UntilClosedArrows in BusinessLogic.scala for why this is
+  // expressed as arrow composition rather than an if/else and a hand-rolled loop.
+  private def traversalArrows[F[_]: Async](
       context: RunContext,
       openIssues: Ref[F, Map[TaskNumber, Issue]],
       recursiveFlow: -->[F, Issue, RunSummary]
@@ -321,9 +328,9 @@ object Main extends IOApp:
       routeRecursiveMode = Kleisli.fromFunction { candidate =>
         if context.recursive.value then Left(candidate) else Right(candidate)
       },
-      runUntilClosed = Kleisli { candidate =>
-        runRootUntilClosed[F](context, openIssues, recursiveFlow, candidate.issue.number)
-      },
+      runUntilClosed =
+        Kleisli[F, TaskCandidate, RootWalk](candidate => RootWalk(candidate, 1, None).pure[F]) >>>
+          untilClosedArrows[F](context, openIssues, recursiveFlow).runUntilClosed,
       runOnce = Kleisli { candidate =>
         openIssues.get.flatMap { currentMap =>
           currentMap.get(candidate.issue.number) match
@@ -344,44 +351,52 @@ object Main extends IOApp:
   // closes: a split mid-tree creates new sub-issues that `openIssues` (a
   // one-shot snapshot) doesn't know about, so a single pass can short-circuit
   // without ever running them. Refetching and retrying picks those up on the
-  // next pass, same as re-invoking the script by hand would.
-  private def runRootUntilClosed[F[_]: Sync](
+  // next pass, same as re-invoking the script by hand would. Expressed as a
+  // self-referencing arrow (UntilClosedArrows.runUntilClosed) rather than a
+  // recursive method, mirroring executeRecursive below.
+  private def untilClosedArrows[F[_]: Async](
       context: RunContext,
       openIssues: Ref[F, Map[TaskNumber, Issue]],
-      recursiveFlow: -->[F, Issue, RunSummary],
-      rootNumber: TaskNumber
-  ): F[RunSummary] =
-    def loop(iteration: Int, previous: Option[RunSummary]): F[RunSummary] =
-      for
-        freshIssues <- GitHub.fetchIssues(context.root)
-        freshMap = freshIssues.map(i => i.number -> i).toMap
-        _ <- openIssues.set(freshMap)
-        result <- freshMap.get(rootNumber) match
+      recursiveFlow: -->[F, Issue, RunSummary]
+  ): UntilClosedArrows[Flow[F]] =
+    UntilClosedArrows[Flow[F]](
+      refreshRoot = Kleisli { walk =>
+        for
+          freshIssues <- GitHub.fetchIssues(context.root)
+          freshMap = freshIssues.map(i => i.number -> i).toMap
+          _ <- openIssues.set(freshMap)
+        yield freshMap.get(walk.candidate.issue.number) match
           case None =>
-            RunSummary(
-              status = Status("completed"),
-              message = Message5(s"Task #$rootNumber is already completed."),
-              task = None
-            ).pure[F]
+            Left(
+              RunSummary(
+                status = Status("completed"),
+                message = Message5(s"Task #${walk.candidate.issue.number} is already completed."),
+                task = None
+              )
+            )
           case Some(rootIssue) =>
-            for
-              summary <- recursiveFlow.run(rootIssue)
-              next <-
-                if summary.status.value === "needs-input" then summary.pure[F]
-                else if previous.contains(summary) then
-                  progress(
-                    s"Task #$rootNumber made no further progress under --recursive; stopping."
-                  ).as(summary)
-                else if iteration >= RecursiveRootIterationCap then
-                  progress(
-                    s"Task #$rootNumber hit the --recursive iteration cap ($RecursiveRootIterationCap); stopping."
-                  ).as(summary)
-                else loop(iteration + 1, Some(summary))
-            yield next
-      yield result
-    loop(1, None)
+            Right(walk.copy(candidate = walk.candidate.copy(issue = rootIssue)))
+      },
+      runRootOnce = Kleisli { walk =>
+        recursiveFlow.run(walk.candidate.issue).map(summary => (walk, summary))
+      },
+      routeContinuation = Kleisli { case (walk, summary) =>
+        val rootNumber = walk.candidate.issue.number
+        if summary.status.value === "needs-input" then Left(summary).pure[F]
+        else if walk.previous.contains(summary) then
+          progress(
+            s"Task #$rootNumber made no further progress under --recursive; stopping."
+          ).as(Left(summary))
+        else if walk.iteration >= RecursiveRootIterationCap then
+          progress(
+            s"Task #$rootNumber hit the --recursive iteration cap ($RecursiveRootIterationCap); stopping."
+          ).as(Left(summary))
+        else Right(walk.copy(iteration = walk.iteration + 1, previous = Some(summary))).pure[F]
+      },
+      defer = self => Kleisli(walk => self.run(walk))
+    )
 
-  private def executeRecursive[F[_]: Sync](
+  private def executeRecursive[F[_]: Async](
       context: RunContext,
       openIssues: Ref[F, Map[TaskNumber, Issue]]
   ): -->[F, Issue, RunSummary] =
@@ -452,7 +467,7 @@ object Main extends IOApp:
         case Right(()) => Right(issue)
     }
 
-  private def claimAndRun[F[_]: Sync](
+  private def claimAndRun[F[_]: Async](
       context: RunContext
   ): -->[F, Issue, RunSummary] =
     Kleisli { issue =>
@@ -547,7 +562,7 @@ object Main extends IOApp:
     }
 
   private def acquireWorktreeAndExecute[
-      F[_]: Sync
+      F[_]: Async
   ]: -->[F, PreparedTask, ClaimedTask] =
     Kleisli { task =>
       worktreeResource[F](task).use { acquiredTask =>
@@ -1117,7 +1132,7 @@ object Main extends IOApp:
       _.contains("Pull Request checks failed for")
     )
 
-  private def resumeExistingPullRequest[F[_]: Sync]: -->[F, ClaimedTask, RunSummary] =
+  private def resumeExistingPullRequest[F[_]: Async]: -->[F, ClaimedTask, RunSummary] =
     val resumeAndClose: -->[F, ClaimedTask, RunSummary] =
       Kleisli[F, ClaimedTask, ExecutedTask] { run =>
         for
@@ -1208,10 +1223,10 @@ object Main extends IOApp:
   private def summarize(value: Any): String =
     value match
       case null => "null"
-      case AppInput(root, taskNumber, recursive) =>
-        s"AppInput(root=$root,task=${taskNumber.fold("auto")(_.toString)},recursive=$recursive)"
-      case RunContext(root, agentInventory, taskNumber, recursive) =>
-        s"RunContext(root=$root,task=${taskNumber.fold("auto")(_.toString)},recursive=$recursive,availableAgents=${agentInventory.availableTools.size})"
+      case AppInput(root, taskNumber, recursive, parallelExecution) =>
+        s"AppInput(root=$root,task=${taskNumber.fold("auto")(_.toString)},recursive=$recursive,parallel=$parallelExecution)"
+      case RunContext(root, agentInventory, taskNumber, recursive, parallelExecution) =>
+        s"RunContext(root=$root,task=${taskNumber.fold("auto")(_.toString)},recursive=$recursive,parallel=$parallelExecution,availableAgents=${agentInventory.availableTools.size})"
       case Issue(number, title, body, state, _) =>
         s"Issue(#$number,title=${quote(title.value)},state=$state,bodyChars=${body.value.length})"
       case TaskRunner(agent, model, effort, version) =>
@@ -1795,6 +1810,9 @@ Final answer contract:
 
   private def parseRecursiveFlag(args: List[String]): Recursive =
     Recursive(args.contains("--recursive"))
+
+  private def parseParallelFlag(args: List[String]): ParallelExecution =
+    ParallelExecution(args.contains("--parallel"))
 
   private def removeScriptArgs(args: List[String]): List[String] =
     @tailrec

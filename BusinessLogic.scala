@@ -60,6 +60,15 @@ object Recursive:
   def apply(value: Boolean): Recursive = value
   extension (self: Recursive) def value: Boolean = self
 
+/** Whether independent root task candidates should run concurrently instead
+  * of one after another. See `ParallelArrows` for the arrow-level `***`/`&&&`
+  * combinators this enables.
+  */
+opaque type ParallelExecution = Boolean
+object ParallelExecution:
+  def apply(value: Boolean): ParallelExecution = value
+  extension (self: ParallelExecution) def value: Boolean = self
+
 /** GitHub issue or sub-issue number selected for a run. */
 opaque type TaskNumber = Int
 object TaskNumber:
@@ -72,7 +81,8 @@ object TaskNumber:
 final case class AppInput(
     root: os.Path,
     taskNumber: Option[TaskNumber],
-    recursive: Recursive = Recursive(false)
+    recursive: Recursive = Recursive(false),
+    parallelExecution: ParallelExecution = ParallelExecution(false)
 )
 
 /** Resolved execution context shared by all tasks in the current invocation. */
@@ -80,7 +90,8 @@ final case class RunContext(
     root: os.Path,
     agentInventory: AgentInventory,
     taskNumber: Option[TaskNumber],
-    recursive: Recursive = Recursive(false)
+    recursive: Recursive = Recursive(false),
+    parallelExecution: ParallelExecution = ParallelExecution(false)
 )
 
 /** Concrete agent invocation choice, including optional model, effort, and version.
@@ -374,20 +385,52 @@ final case class RecursiveArrows[-->[_, _]](
       ) >>> (summon[ArrowChoice[-->]].id[RunSummary] ||| claimAndRun)))
     self
 
+/** State threaded through the repeated root-closing walk: the candidate as
+  * last refreshed from GitHub, which iteration this is, and the previous
+  * pass's summary (used to detect a pass that made no further progress).
+  * Carrying this in the arrow's input/output, rather than in a closure over
+  * mutable state, is what lets `UntilClosedArrows.runUntilClosed` express the
+  * repeat-until-closed loop as a self-referencing arrow.
+  */
+final case class RootWalk(
+    candidate: TaskCandidate,
+    iteration: Int,
+    previous: Option[RunSummary]
+)
+
+/** Arrows for the repeated "walk a root's dependency tree until it closes"
+  * loop used under `--recursive`: a split mid-tree creates new sub-issues a
+  * one-shot snapshot doesn't know about, so a single pass can short-circuit
+  * without ever running them, and closing the tree means repeating the walk
+  * until a pass makes no further progress. Mirrors `RecursiveArrows` above:
+  * `defer` breaks the eager `lazy val self` cycle, `refreshRoot` and
+  * `routeContinuation` are the two decision points, fused with `|||`.
+  */
+final case class UntilClosedArrows[-->[_, _]](
+    refreshRoot: RootWalk --> Either[RunSummary, RootWalk],
+    runRootOnce: RootWalk --> (RootWalk, RunSummary),
+    routeContinuation: (RootWalk, RunSummary) --> Either[RunSummary, RootWalk],
+    defer: (=> RootWalk --> RunSummary) => (RootWalk --> RunSummary)
+):
+  def runUntilClosed(using ArrowChoice[-->]): RootWalk --> RunSummary =
+    lazy val self: RootWalk --> RunSummary =
+      refreshRoot >>> (summon[ArrowChoice[-->]]
+        .id[RunSummary] ||| (runRootOnce >>> routeContinuation >>> (summon[ArrowChoice[-->]]
+        .id[RunSummary] ||| defer(self))))
+    self
+
 /** Arrows that drive one selected root candidate's dependency tree to
   * completion: either a single dependency-first pass, or (under
-  * `--recursive`) repeatedly re-walking it until a pass makes no further
-  * progress. `routeRecursiveMode` is the only place that decision is made;
+  * `--recursive`) the repeated `UntilClosedArrows.runUntilClosed` walk.
+  * `routeRecursiveMode` is the only place that decision is made;
   * `runCandidate` fuses both branches with `|||` so callers never branch on
   * `Recursive` themselves.
   *
-  * Parallelization seam: `executeSelectedCandidates` (ProgramArrows) today
-  * folds `runCandidate` over each root candidate sequentially via
-  * `traverse`. Since `runCandidate` is already a plain
-  * `TaskCandidate --> RunSummary` arrow, running independent roots
-  * concurrently later is a matter of lifting that `traverse` into an
-  * `&&&`/`***`-composed arrow (given a `Parallel`-capable `F`) rather than
-  * restructuring this type.
+  * `executeSelectedCandidates` (ProgramArrows) runs `runCandidate` over every
+  * selected root candidate; under `--parallel` it does so concurrently via
+  * `ParallelArrows.parAll(runCandidate)` instead of a sequential `traverse` -
+  * `runCandidate` itself needs no change either way, since it is a plain
+  * `TaskCandidate --> RunSummary` arrow.
   */
 final case class TraversalArrows[-->[_, _]](
     routeRecursiveMode: TaskCandidate --> Either[TaskCandidate, TaskCandidate],
