@@ -10,6 +10,8 @@
 //> using dependency org.typelevel::cats-core:2.13.0
 //> using dependency org.typelevel::cats-effect:3.7.0
 
+//> using resourceDir resources
+
 //> using scalafixDependency io.github.mercurievv:scala-purrism-scalafix_3:0.5.6
 
 //> using exclude .bsp

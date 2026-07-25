@@ -58,8 +58,11 @@ scala-cli run /path/to/gh-tasks-llm-executor -- --task=123
   single `claude --model opus` runner (see `AgentInventory.scala`).
 
 Raw model prices live in `.gh-tasks-llm-executor/model-prices.json`. Discovery
-only reads this committed file and never calls the network. To refresh it,
-review updated vendor prices into a JSON file with the same schema, then run
+only reads this committed file and never calls the network. On a target repo
+that has no copy yet, `resolveContext` seeds one automatically on first run
+from the pricing bundled with this project (`resources/model-prices.json`,
+never overwrites an existing file). To refresh it with updated vendor prices
+instead, review them into a JSON file with the same schema, then run
 `scala-cli scripts/refresh-model-prices.scala -- /path/to/reviewed-prices.json`
 followed by `scala-cli scripts/discover-agent-runners.scala`.
 
@@ -76,6 +79,12 @@ Probes locally installed CLIs (`claude`, `codex`, `gemini`, ...) for
 availability/version, cross-references `model-prices.json` for pricing, and
 regenerates the runner list the executor selects from at run time — rerun it
 whenever installed agent CLIs or their models change.
+
+This also runs automatically: `resolveContext` refreshes the snapshot
+in-process (`AgentRunnersDiscovery.scala`, a duplicate of this script kept in
+sync by hand) once per invocation, only if it's older than
+`GH_TASKS_AGENT_RUNNERS_TTL_MINUTES` (default 60). A probe failure never
+blocks task execution, same as the vendor-budget refresh below.
 
 ### Vendor budget balancing
 

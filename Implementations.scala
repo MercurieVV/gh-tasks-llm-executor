@@ -53,10 +53,49 @@ object Impl:
       .attempt
       .void
 
+  // model-prices.json is hand-reviewed vendor pricing (see
+  // scripts/refresh-model-prices.scala), not something to auto-probe. But a
+  // brand-new target repo has no copy at all, so seed it once from the
+  // classpath resource bundled with this project (resources/model-prices.json,
+  // packaged via `//> using resourceDir resources`) - never overwrites an
+  // existing file, so a repo's own reviewed prices are left alone.
+  def seedModelPricesIfMissing[F[_]: Sync](root: os.Path): F[Unit] =
+    Sync[F]
+      .blocking {
+        val destination = root / ".gh-tasks-llm-executor" / "model-prices.json"
+        if !os.exists(destination) then
+          Option(getClass.getResourceAsStream("/model-prices.json")).foreach { stream =>
+            try
+              val bytes = stream.readAllBytes()
+              os.makeDir.all(destination / os.up)
+              os.write.over(destination, bytes)
+            finally stream.close()
+          }
+      }
+      .attempt
+      .void
+
+  // Same TTL-gated, once-per-invocation shape as refreshVendorBudgetsIfStale:
+  // probing installed agent CLIs (claude/codex/aider --version) is cheap but
+  // not free, so only do it when the on-disk snapshot is missing or older
+  // than the TTL. A probe failure never blocks task execution - AgentInventory
+  // just reads whatever snapshot (possibly stale, possibly absent) is on disk.
+  def refreshAgentRunnersIfStale[F[_]: Sync](root: os.Path): F[Unit] =
+    Sync[F]
+      .blocking {
+        val ttlMillis = Cli.envLong("GH_TASKS_AGENT_RUNNERS_TTL_MINUTES", 60).minutes.toMillis
+        val isStale = AgentRunnersDiscovery.ageMillis(root).forall(_ > ttlMillis)
+        if isStale then AgentRunnersDiscovery.collectAndWrite(root)
+      }
+      .attempt
+      .void
+
   def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =
     Kleisli { input =>
       for
         _ <- refreshVendorBudgetsIfStale[F](input.root)
+        _ <- seedModelPricesIfMissing[F](input.root)
+        _ <- refreshAgentRunnersIfStale[F](input.root)
         inventory <- AgentInventory.loadF[F](input.root)
       yield RunContext(input.root, inventory, input.taskNumber, input.recursive, input.parallelExecution)
     }
