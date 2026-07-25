@@ -60,6 +60,14 @@ object Recursive:
   def apply(value: Boolean): Recursive = value
   extension (self: Recursive) def value: Boolean = self
 
+/** Whether independent root task candidates should run concurrently instead of one after another. See `ParallelArrows`
+  * for the arrow-level `***`/`&&&` combinators this enables.
+  */
+opaque type ParallelExecution = Boolean
+object ParallelExecution:
+  def apply(value: Boolean): ParallelExecution = value
+  extension (self: ParallelExecution) def value: Boolean = self
+
 /** GitHub issue or sub-issue number selected for a run. */
 opaque type TaskNumber = Int
 object TaskNumber:
@@ -72,7 +80,8 @@ object TaskNumber:
 final case class AppInput(
     root: os.Path,
     taskNumber: Option[TaskNumber],
-    recursive: Recursive = Recursive(false)
+    recursive: Recursive = Recursive(false),
+    parallelExecution: ParallelExecution = ParallelExecution(false)
 )
 
 /** Resolved execution context shared by all tasks in the current invocation. */
@@ -80,7 +89,8 @@ final case class RunContext(
     root: os.Path,
     agentInventory: AgentInventory,
     taskNumber: Option[TaskNumber],
-    recursive: Recursive = Recursive(false)
+    recursive: Recursive = Recursive(false),
+    parallelExecution: ParallelExecution = ParallelExecution(false)
 )
 
 /** Concrete agent invocation choice, including optional model, effort, and version.
@@ -167,9 +177,9 @@ final case class ClaimedTask(
 /** Prepared task after prompt/context collection, before the agent is executed.
   */
 final case class PreparedTask(
-                               claimedTask: ClaimedTask,
-                               parentConclusion: Option[String],
-                               replayContext: Option[String]
+    claimedTask: ClaimedTask,
+    parentConclusion: Option[String],
+    replayContext: Option[String]
 )
 
 /** Task after agent execution has produced terminal output to inspect and publish.
@@ -221,6 +231,25 @@ final case class PublishRequest(
     runner: TaskRunner
 )
 
+/** State of the push repair loop: what to push, and for whom to repair it. */
+final case class PushRequest(
+    worktreePath: os.Path,
+    branchName: BranchName,
+    task: Issue,
+    runner: TaskRunner
+)
+
+/** State of the Pull Request resume loop.
+  *
+  * `checksRepairAttemptsRemaining` bounds it: an agent that cannot actually fix the failing check would otherwise retry
+  * forever, burning an agent run on every resume of this task. Merge-conflict repairs do not consume the budget - they
+  * make measurable progress or fail outright.
+  */
+final case class PullRequestResume(
+    run: ClaimedTask,
+    checksRepairAttemptsRemaining: Int
+)
+
 /** Publication path for worktree changes that still need commit preparation. */
 final case class ChangedPublication(request: PublishRequest)
 
@@ -257,29 +286,50 @@ final case class RunSummary(
       )
     )
 
+/** A task issue together with the run context it was reached from.
+  *
+  * The recursive walk descends from issue to issue, so the context has to travel with it. It used to be captured in a
+  * closure instead, which is what forced `RecursiveArrows` to be constructed per run rather than wired once.
+  */
+final case class TaskNode(context: RunContext, issue: Issue)
+
+/** What must close before a task node may run, plus whether any of it came from the node being an already split parent
+  * (which means the node should be replayed on a later pass instead of implemented now).
+  */
+final case class DependencyPlan(
+    node: TaskNode,
+    pending: List[TaskNode],
+    hasOpenChildren: Boolean
+)
+
 /** Top-level arrows that turn application input into a user-visible run summary.
+  *
+  * Leaves only. Every composition that spans more than this record lives on `BusinessLogic`, so that no arrow here has
+  * to know how a candidate is actually executed.
   */
 final case class ProgramArrows[-->[_, _]](
     resolveContext: AppInput --> RunContext,
     selectTask: RunContext --> TaskSelection,
     routeEmptySelection: TaskSelection --> Either[NoTask, TaskSelection],
     noTaskSummary: NoTask --> RunSummary,
-    executeSelectedCandidates: TaskSelection --> RunSummary,
+    // Seeds RunEnv.openIssues for the run. Separate from selectTask because the
+    // recursive walk mutates that map as issues close.
+    loadOpenIssues: TaskSelection --> TaskSelection,
+    // Left = run root candidates concurrently (--parallel), Right = one by one.
+    routeParallelExecution: TaskSelection --> Either[TaskSelection, TaskSelection],
+    lastSummary: List[RunSummary] --> RunSummary,
     toProgramSays: RunSummary --> ProgramSays[ujson.Value]
-):
-  def program(using ArrowChoice[-->]): AppInput --> ProgramSays[ujson.Value] =
-    taskFlow >>> toProgramSays
+)
 
-  def taskFlow(using ArrowChoice[-->]): AppInput --> RunSummary =
-    resolveContext >>> selectTask >>> executeTask
-
-  def executeTask(using ArrowChoice[-->]): TaskSelection --> RunSummary =
-    routeEmptySelection >>> (noTaskSummary ||| executeSelectedCandidates)
-
-/** Arrows for acquiring, evaluating, and running one selected task. */
+/** Arrows for acquiring, evaluating, and running one selected task.
+  *
+  * Leaves and the resume group only. `executeCandidate` and friends moved to `BusinessLogic`: resuming a Pull Request
+  * needs `closeTaskIssue`/`checkParentsForCompletion`, which live in `ExecuteTaskArrows`, and no record should reach
+  * into another.
+  */
 final case class TaskArrows[-->[_, _]](
     routeResumeOrRun: TaskCandidate --> Either[ClaimedTask, ClaimedTask],
-    resumeExistingPullRequest: ClaimedTask --> RunSummary,
+    resumeTask: ResumeTaskArrows[-->],
     announceTask: ClaimedTask --> ClaimedTask,
     fetchTaskContext: ClaimedTask --> PreparedTask,
     evaluateTask: PreparedTask --> Either[NeedsUserInput, Either[SplitTask, PreparedTask]],
@@ -288,35 +338,24 @@ final case class TaskArrows[-->[_, _]](
     markTaskInProgress: PreparedTask --> PreparedTask,
     acquireWorktreeAndExecute: PreparedTask --> ClaimedTask,
     completedTaskSummary: ClaimedTask --> RunSummary
-):
-  def executeCandidate(using ArrowChoice[-->]): TaskCandidate --> RunSummary =
-    routeResumeOrRun >>>
-      (resumeExistingPullRequest ||| executeClaimedTask)
+)
 
-  def executeClaimedTask(using ArrowChoice[-->]): ClaimedTask --> RunSummary =
-    announceTask >>>
-      fetchTaskContext >>>
-      evaluateTask >>>
-      (needsUserInputSummary ||| (splitTaskSummary ||| executePreparedTaskAndSummarize))
-
-  def executePreparedTaskAndSummarize(using
-      ArrowChoice[-->]
-  ): PreparedTask --> RunSummary =
-    markTaskInProgress >>> acquireWorktreeAndExecute >>> completedTaskSummary
-
-/** Arrows that decide whether agent output should become a commit. */
+/** Arrows that decide whether agent output should become a commit.
+  *
+  * `publishChangedTask` is not a field here: publishing is `PublicationArrows`' job, and this group only knows how to
+  * turn a changed task into a publish request and how to report a publication failure against the right issue. The
+  * composition of the two is `BusinessLogic.publishChangedTask`.
+  */
 final case class ChangeArrows[-->[_, _]](
     classifyAgentResultForPublication: ExecutedTask -->
       Either[
         ChangedTask,
         UnchangedTask
       ],
-    publishChangedTask: ChangedTask --> ExecutedTask,
+    toPublishRequest: ChangedTask --> PublishRequest,
+    reportPublicationFailure: (ChangedTask, Throwable) --> ExecutedTask,
     reportUnchangedTask: UnchangedTask --> ExecutedTask
-):
-  def commitIfChanged(using ArrowChoice[-->]): ExecutedTask --> ExecutedTask =
-    classifyAgentResultForPublication >>>
-      (publishChangedTask ||| reportUnchangedTask)
+)
 
 /** Arrows that prepare changed or existing work and publish it locally or remotely.
   */
@@ -333,21 +372,135 @@ final case class PublicationArrows[-->[_, _]](
         RemotePublication,
         LocalPublication
       ],
-    publishRemote: RemotePublication --> Unit,
+    publishRemote: PublishRemoteArrows[-->],
     publishLocal: LocalPublication --> Unit
 ):
-  def publishChanges(using ArrowChoice[-->]): PublishRequest --> Unit =
+  def publishChanges(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowAttempt[-->]
+  ): PublishRequest --> Unit =
     classifyPublicationSource >>>
       (prepareChangedPublication ||| prepareExistingPublication) >>>
       publishTransport
 
-  def publishTransport(using ArrowChoice[-->]): PublishRequest --> Unit =
+  def publishTransport(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowAttempt[-->]
+  ): PublishRequest --> Unit =
     choosePublicationTransport >>>
-      (publishRemote ||| publishLocal)
+      (publishRemote.publishRemote ||| publishLocal)
+
+/** Invoking the implementer agent for a prepared task.
+  *
+  * Was a single `runAgent` leaf whose body held two decisions and a retry: skip the agent when the task is already
+  * implemented, and on failure escalate to a stronger runner. Both are now `ArrowChoice` branches.
+  */
+final case class AgentRunArrows[-->[_, _]](
+    // Left = a prior run already implemented this and the work is still
+    // reachable, so the implementer must not be invoked again.
+    routeAlreadyImplemented: PreparedTask --> Either[ExecutedTask, PreparedTask],
+    runTaskWithRunner: PreparedTask --> ExecutedTask,
+    // Left = no stronger runner left, give up. Right = the same task re-aimed
+    // at a stronger implementer, to be attempted once more.
+    routeRunnerFallback: (PreparedTask, Throwable) --> Either[Throwable, PreparedTask],
+    raiseRunnerFailure: Throwable --> ExecutedTask
+):
+  def runAgent(using ArrowChoice[-->], ArrowAttempt[-->]): PreparedTask --> ExecutedTask =
+    routeAlreadyImplemented >>> (summon[ArrowChoice[-->]].id[ExecutedTask] ||| runImplementer)
+
+  def runImplementer(using
+      arrow: ArrowChoice[-->],
+      attempt: ArrowAttempt[-->]
+  ): PreparedTask --> ExecutedTask =
+    attempt.attempt(runTaskWithRunner) >>>
+      (retryWithStrongerRunner ||| arrow.lift(_._2))
+
+  // Exactly one escalation: the fallback runner is not itself retried.
+  private def retryWithStrongerRunner(using
+      arrow: ArrowChoice[-->]
+  ): (PreparedTask, Throwable) --> ExecutedTask =
+    routeRunnerFallback >>> (raiseRunnerFailure ||| runTaskWithRunner)
+
+/** Driving an existing open Pull Request to merged, repairing what blocks it.
+  *
+  * Was `resumeOpenPullRequestWithConflictRepair`, a `def` that called itself from inside `handleErrorWith` with a
+  * hand-carried attempt budget. The budget now lives in `PullRequestResume`, i.e. in the loop's state, the same way
+  * `RootWalk` carries the root-walk's.
+  */
+final case class ResumePullRequestArrows[-->[_, _]](
+    startResume: ClaimedTask --> PullRequestResume,
+    resumePullRequest: PullRequestResume --> Unit,
+    // Merge conflict -> resolve and retry with the budget intact; failing
+    // checks -> run the repair agent, push, retry with one fewer attempt;
+    // anything else (or budget exhausted) -> Left.
+    routeResumeFailure: (PullRequestResume, Throwable) --> Either[Throwable, PullRequestResume],
+    raiseResumeFailure: Throwable --> Unit
+):
+  def resumeUntilMerged(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowAttempt[-->]
+  ): ClaimedTask --> Unit =
+    startResume >>> RepairLoop(resumePullRequest, routeResumeFailure, raiseResumeFailure)
+
+/** Completing a task from a Pull Request an earlier, interrupted run left open. */
+final case class ResumeTaskArrows[-->[_, _]](
+    resume: ResumePullRequestArrows[-->],
+    announceResume: ClaimedTask --> ClaimedTask,
+    resumedExecution: ClaimedTask --> ExecutedTask,
+    cleanupAndSummarize: ClaimedTask --> RunSummary,
+    // Left = the Pull Request turned out to be gone; fall back to an ordinary
+    // run. Right = a real failure to report and re-raise.
+    routeResumeError: (ClaimedTask, Throwable) --> Either[ClaimedTask, (ClaimedTask, Throwable)],
+    announceNoPullRequest: ClaimedTask --> ClaimedTask,
+    reportResumeFailure: (ClaimedTask, Throwable) --> RunSummary
+)
+
+/** Publishing a branch through the GitHub remote: push it, then open and merge its Pull Request.
+  *
+  * Both steps are the same repair loop at different actions - a rejected `git push` (usually the repo's prePush hook)
+  * is repaired by an agent after asking the user, a rejected merge by resolving the conflict against the base branch.
+  * They were two separate self-recursive `def`s.
+  */
+final case class PublishRemoteArrows[-->[_, _]](
+    toPushRequest: RemotePublication --> PushRequest,
+    pushBranch: PushRequest --> Unit,
+    routePushFailure: (PushRequest, Throwable) --> Either[Throwable, PushRequest],
+    raisePushFailure: Throwable --> Unit,
+    toPublishRequest: RemotePublication --> PublishRequest,
+    createAndMergePullRequest: PublishRequest --> Unit,
+    routeMergeFailure: (PublishRequest, Throwable) --> Either[Throwable, PublishRequest],
+    raiseMergeFailure: Throwable --> Unit
+):
+  def publishRemote(using
+      arrow: ArrowChoice[-->],
+      defer: ArrowDefer[-->],
+      attempt: ArrowAttempt[-->]
+  ): RemotePublication --> Unit =
+    // `&&&` on this arrow is sequential, left before right (see ParallelArrows
+    // for why, and for the concurrent variant): the push must land before the
+    // Pull Request is opened against it.
+    (pushUntilAccepted &&& mergeUntilMerged) >>> arrow.lift(_ => ())
+
+  def pushUntilAccepted(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowAttempt[-->]
+  ): RemotePublication --> Unit =
+    toPushRequest >>> RepairLoop(pushBranch, routePushFailure, raisePushFailure)
+
+  def mergeUntilMerged(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowAttempt[-->]
+  ): RemotePublication --> Unit =
+    toPublishRequest >>> RepairLoop(createAndMergePullRequest, routeMergeFailure, raiseMergeFailure)
 
 /** Arrows for the already prepared task execution pipeline. */
 final case class ExecuteTaskArrows[-->[_, _]](
-    runAgent: PreparedTask --> ExecutedTask,
+    runAgent: AgentRunArrows[-->],
     runProjectValidation: ExecutedTask --> ExecutedTask,
     recordAgentOutput: ExecutedTask --> ExecutedTask,
     // Persist the durable "implemented" mark once the agent's output has been
@@ -359,58 +512,250 @@ final case class ExecuteTaskArrows[-->[_, _]](
     checkParentsForCompletion: ClaimedTask --> ClaimedTask
 )
 
-/** Arrows for dependency-first recursive execution of GitHub task trees. */
+/** Arrows for dependency-first recursive execution of GitHub task trees.
+  *
+  * All fields are plain arrows. The recursion is not a field: it is built here from `ArrowDefer.fix`, and the fold over
+  * a task's dependencies from `ArrowTraverse.untilLeft`. Previously `runDependencies` was a field of type `(Issue -->
+  * RunSummary) => (Issue --> Either[RunSummary, Issue])`, i.e. it took the recursive arrow as an argument - which put
+  * `-->` in contravariant position and made the record unmappable by `Functor2K`, so it could be neither folded into
+  * `BusinessLogic` nor covered by arrow logging.
+  */
 final case class RecursiveArrows[-->[_, _]](
-    checkIfCompleted: Issue --> Either[RunSummary, Issue],
-    runDependencies: (Issue --> RunSummary) => (Issue --> Either[RunSummary, Issue]),
-    claimAndRun: Issue --> RunSummary,
-    defer: (=> Issue --> RunSummary) => (Issue --> RunSummary)
+    checkIfCompleted: TaskNode --> Either[RunSummary, TaskNode],
+    // Dependencies and (for a split task) open children, in the order they
+    // must close before the node itself may run.
+    collectPendingDependencies: TaskNode --> DependencyPlan,
+    // Left short-circuits the remaining dependencies: this one did not close.
+    recordDependencyOutcome: (TaskNode, RunSummary) --> Either[RunSummary, Unit],
+    routeDependencyOutcome: (DependencyPlan, Either[RunSummary, Unit]) --> Either[RunSummary, TaskNode],
+    claimAndRun: TaskNode --> RunSummary
 ):
-  def executeRecursive(using ArrowChoice[-->]): Issue --> RunSummary =
-    lazy val self: Issue --> RunSummary =
-      checkIfCompleted >>> (summon[ArrowChoice[-->]]
-        .id[RunSummary] ||| (runDependencies(
-        defer(self)
-      ) >>> (summon[ArrowChoice[-->]].id[RunSummary] ||| claimAndRun)))
-    self
+  def executeRecursive(using
+      arrow: ArrowChoice[-->],
+      defer: ArrowDefer[-->],
+      traverse: ArrowTraverse[-->]
+  ): TaskNode --> RunSummary =
+    defer.fix { self =>
+      checkIfCompleted >>>
+        (arrow.id[RunSummary] |||
+          (runDependencies(self) >>> (arrow.id[RunSummary] ||| claimAndRun)))
+    }
 
-/** Arrows that drive one selected root candidate's dependency tree to
-  * completion: either a single dependency-first pass, or (under
-  * `--recursive`) repeatedly re-walking it until a pass makes no further
-  * progress. `routeRecursiveMode` is the only place that decision is made;
-  * `runCandidate` fuses both branches with `|||` so callers never branch on
+  private def runDependencies(self: TaskNode --> RunSummary)(using
+      arrow: ArrowChoice[-->],
+      traverse: ArrowTraverse[-->]
+  ): TaskNode --> Either[RunSummary, TaskNode] =
+    val runOneDependency: TaskNode --> Either[RunSummary, Unit] =
+      (arrow.id[TaskNode] &&& self) >>> recordDependencyOutcome
+    val runPending: DependencyPlan --> Either[RunSummary, Unit] =
+      arrow.lift((plan: DependencyPlan) => plan.pending) >>> traverse.untilLeft(runOneDependency)
+    collectPendingDependencies >>>
+      (arrow.id[DependencyPlan] &&& runPending) >>>
+      routeDependencyOutcome
+
+/** State threaded through the repeated root-closing walk: the candidate as last refreshed from GitHub, which iteration
+  * this is, and the previous pass's summary (used to detect a pass that made no further progress). Carrying this in the
+  * arrow's input/output, rather than in a closure over mutable state, is what lets `UntilClosedArrows.runUntilClosed`
+  * express the repeat-until-closed loop as a self-referencing arrow.
+  */
+final case class RootWalk(
+    candidate: TaskCandidate,
+    iteration: Int,
+    previous: Option[RunSummary]
+)
+
+/** Arrows for the repeated "walk a root's dependency tree until it closes" loop used under `--recursive`: a split
+  * mid-tree creates new sub-issues a one-shot snapshot doesn't know about, so a single pass can short-circuit without
+  * ever running them, and closing the tree means repeating the walk until a pass makes no further progress. Mirrors
+  * `RecursiveArrows` above: `ArrowDefer.fix` breaks the eager `lazy val self` cycle, `refreshRoot` and
+  * `routeContinuation` are the two decision points, fused with `|||`.
+  */
+final case class UntilClosedArrows[-->[_, _]](
+    refreshRoot: RootWalk --> Either[RunSummary, RootWalk],
+    runRootOnce: RootWalk --> (RootWalk, RunSummary),
+    routeContinuation: (RootWalk, RunSummary) --> Either[RunSummary, RootWalk]
+):
+  def runUntilClosed(using
+      arrow: ArrowChoice[-->],
+      defer: ArrowDefer[-->]
+  ): RootWalk --> RunSummary =
+    defer.fix { self =>
+      refreshRoot >>>
+        (arrow.id[RunSummary] |||
+          (runRootOnce >>> routeContinuation >>> (arrow.id[RunSummary] ||| self)))
+    }
+
+/** Arrows that drive one selected root candidate's dependency tree to completion: either a single dependency-first
+  * pass, or (under `--recursive`) the repeated `UntilClosedArrows.runUntilClosed` walk. `routeRecursiveMode` is the
+  * only place that decision is made; `runCandidate` fuses both branches with `|||` so callers never branch on
   * `Recursive` themselves.
   *
-  * Parallelization seam: `executeSelectedCandidates` (ProgramArrows) today
-  * folds `runCandidate` over each root candidate sequentially via
-  * `traverse`. Since `runCandidate` is already a plain
-  * `TaskCandidate --> RunSummary` arrow, running independent roots
-  * concurrently later is a matter of lifting that `traverse` into an
-  * `&&&`/`***`-composed arrow (given a `Parallel`-capable `F`) rather than
-  * restructuring this type.
+  * `BusinessLogic.executeSelectedCandidates` runs `runCandidate` over every selected root candidate; under `--parallel`
+  * it does so concurrently via `ArrowTraverse.parAll` instead of the sequential `ArrowTraverse.all` - `runCandidate`
+  * itself needs no change either way, since it is a plain `TaskCandidate --> RunSummary` arrow.
   */
 final case class TraversalArrows[-->[_, _]](
     routeRecursiveMode: TaskCandidate --> Either[TaskCandidate, TaskCandidate],
-    runUntilClosed: TaskCandidate --> RunSummary,
+    untilClosed: UntilClosedArrows[-->],
     runOnce: TaskCandidate --> RunSummary
 ):
-  def runCandidate(using ArrowChoice[-->]): TaskCandidate --> RunSummary =
-    routeRecursiveMode >>> (runUntilClosed ||| runOnce)
+  def runCandidate(using
+      arrow: ArrowChoice[-->],
+      defer: ArrowDefer[-->]
+  ): TaskCandidate --> RunSummary =
+    routeRecursiveMode >>>
+      ((startWalk >>> untilClosed.runUntilClosed) ||| runOnce)
+
+  private def startWalk(using arrow: ArrowChoice[-->]): TaskCandidate --> RootWalk =
+    arrow.lift(candidate => RootWalk(candidate, iteration = 1, previous = None))
 
 /** Complete business workflow assembled from independently testable arrow groups.
+  *
+  * Every arrow the program runs is reachable from here as a value, and every composition spanning more than one group
+  * is a method on this class - so the shape of the program can be read without opening a single implementation, and
+  * `withArrowLogging` sees all of it.
   */
 final case class BusinessLogic[-->[_, _]](
     programArrows: ProgramArrows[-->],
     taskArrows: TaskArrows[-->],
     changeArrows: ChangeArrows[-->],
     publicationArrows: PublicationArrows[-->],
-    executeTaskArrows: ExecuteTaskArrows[-->]
+    executeTaskArrows: ExecuteTaskArrows[-->],
+    recursiveArrows: RecursiveArrows[-->],
+    traversalArrows: TraversalArrows[-->]
 ):
-  def executePreparedTaskInWorktree(using ArrowChoice[-->]): PreparedTask --> ClaimedTask =
-    executeTaskArrows.runAgent >>>
+  def program(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowTraverse[-->],
+      ArrowAttempt[-->]
+  ): AppInput --> ProgramSays[ujson.Value] =
+    taskFlow >>> programArrows.toProgramSays
+
+  def taskFlow(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowTraverse[-->],
+      ArrowAttempt[-->]
+  ): AppInput --> RunSummary =
+    programArrows.resolveContext >>> programArrows.selectTask >>> executeTask
+
+  def executeTask(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowTraverse[-->],
+      ArrowAttempt[-->]
+  ): TaskSelection --> RunSummary =
+    programArrows.routeEmptySelection >>>
+      (programArrows.noTaskSummary ||| executeSelectedCandidates)
+
+  /** Runs every selected root candidate, concurrently or one by one. The `--parallel` decision is
+    * `routeParallelExecution >>> (... ||| ...)`, not an `if` inside an effect: both branches are the same
+    * `runCandidate` arrow at two `ArrowTraverse` strategies.
+    */
+  def executeSelectedCandidates(using
+      arrow: ArrowChoice[-->],
+      defer: ArrowDefer[-->],
+      traverse: ArrowTraverse[-->],
+      attempt: ArrowAttempt[-->]
+  ): TaskSelection --> RunSummary =
+    val candidates = arrow.lift((selection: TaskSelection) => selection.candidates)
+    programArrows.loadOpenIssues >>>
+      programArrows.routeParallelExecution >>>
+      ((candidates >>> traverse.parAll(runCandidate)) |||
+        (candidates >>> traverse.all(runCandidate))) >>>
+      programArrows.lastSummary
+
+  def runCandidate(using ArrowChoice[-->], ArrowDefer[-->]): TaskCandidate --> RunSummary =
+    traversalArrows.runCandidate
+
+  def executeRecursive(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowTraverse[-->]
+  ): TaskNode --> RunSummary =
+    recursiveArrows.executeRecursive
+
+  def executeCandidate(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowAttempt[-->]
+  ): TaskCandidate --> RunSummary =
+    taskArrows.routeResumeOrRun >>> (resumeExistingPullRequest ||| executeClaimedTask)
+
+  def executeClaimedTask(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowAttempt[-->]
+  ): ClaimedTask --> RunSummary =
+    taskArrows.announceTask >>>
+      taskArrows.fetchTaskContext >>>
+      taskArrows.evaluateTask >>>
+      (taskArrows.needsUserInputSummary |||
+        (taskArrows.splitTaskSummary ||| executePreparedTaskAndSummarize))
+
+  def executePreparedTaskAndSummarize(using ArrowChoice[-->]): PreparedTask --> RunSummary =
+    taskArrows.markTaskInProgress >>>
+      taskArrows.acquireWorktreeAndExecute >>>
+      taskArrows.completedTaskSummary
+
+  /** Completes a task whose implementer already ran in an earlier, interrupted invocation and left an open Pull
+    * Request: drive that Pull Request to merged, then close the task exactly as a fresh run would.
+    *
+    * If the Pull Request turns out to be gone after all, the fallback is `executeClaimedTask` - the ordinary run
+    * pipeline, referenced rather than re-spelled.
+    */
+  def resumeExistingPullRequest(using
+      arrow: ArrowChoice[-->],
+      defer: ArrowDefer[-->],
+      attempt: ArrowAttempt[-->]
+  ): ClaimedTask --> RunSummary =
+    val resume = taskArrows.resumeTask
+    val recover =
+      resume.routeResumeError >>>
+        ((resume.announceNoPullRequest >>> executeClaimedTask) ||| resume.reportResumeFailure)
+    attempt.attempt(resumeAndClose) >>> (recover ||| arrow.lift(_._2))
+
+  private def resumeAndClose(using
+      arrow: ArrowChoice[-->],
+      defer: ArrowDefer[-->],
+      attempt: ArrowAttempt[-->]
+  ): ClaimedTask --> RunSummary =
+    val resume = taskArrows.resumeTask
+    val merged: ClaimedTask --> ClaimedTask =
+      (resume.resume.resumeUntilMerged &&& arrow.id[ClaimedTask]) >>> arrow.lift(_._2)
+    resume.announceResume >>>
+      merged >>>
+      resume.resumedExecution >>>
+      executeTaskArrows.closeTaskIssue >>>
+      executeTaskArrows.checkParentsForCompletion >>>
+      resume.cleanupAndSummarize
+
+  def commitIfChanged(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowAttempt[-->]
+  ): ExecutedTask --> ExecutedTask =
+    changeArrows.classifyAgentResultForPublication >>>
+      (publishChangedTask ||| changeArrows.reportUnchangedTask)
+
+  def publishChangedTask(using
+      arrow: ArrowChoice[-->],
+      defer: ArrowDefer[-->],
+      attempt: ArrowAttempt[-->]
+  ): ChangedTask --> ExecutedTask =
+    attempt.attempt(changeArrows.toPublishRequest >>> publicationArrows.publishChanges) >>>
+      (changeArrows.reportPublicationFailure ||| arrow.lift(_._1.run))
+
+  def executePreparedTaskInWorktree(using
+      ArrowChoice[-->],
+      ArrowDefer[-->],
+      ArrowAttempt[-->]
+  ): PreparedTask --> ClaimedTask =
+    executeTaskArrows.runAgent.runAgent >>>
       executeTaskArrows.runProjectValidation >>>
       executeTaskArrows.recordAgentOutput >>>
-      changeArrows.commitIfChanged >>>
+      commitIfChanged >>>
       executeTaskArrows.markTaskImplemented >>>
       executeTaskArrows.verifyRelatedPullRequestCi >>>
       executeTaskArrows.closeTaskIssue >>>
