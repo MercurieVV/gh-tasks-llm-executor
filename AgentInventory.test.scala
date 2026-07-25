@@ -28,7 +28,6 @@ class AgentInventorySuite extends CatsEffectSuite:
       jobTypes = Nil,
       strengths = Nil,
       available = Available(true),
-      priority = 1,
       inputUsdPerMTok = None,
       outputUsdPerMTok = Some(1.0)
     )
@@ -47,8 +46,7 @@ class AgentInventorySuite extends CatsEffectSuite:
       roles = List("implementor"),
       jobTypes = Nil,
       strengths = Nil,
-      available = Available(true),
-      priority = 111
+      available = Available(true)
     )
     val claudeTool = AgentTool(
       id = AgentToolId("claude-sonnet"),
@@ -59,8 +57,7 @@ class AgentInventorySuite extends CatsEffectSuite:
       roles = List("implementor"),
       jobTypes = Nil,
       strengths = Nil,
-      available = Available(true),
-      priority = 30
+      available = Available(true)
     )
 
     assert(

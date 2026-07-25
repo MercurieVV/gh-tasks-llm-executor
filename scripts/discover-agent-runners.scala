@@ -91,7 +91,6 @@ def tool(
     jobTypes: List[String],
     strengths: List[String],
     available: Boolean,
-    priority: Int,
     probe: Probe,
     price: Option[ModelPrice]
 ): ujson.Obj =
@@ -111,7 +110,6 @@ def tool(
     "jobTypes" -> jobTypes.map(ujson.Str(_)),
     "strengths" -> strengths.map(ujson.Str(_)),
     "available" -> available,
-    "priority" -> priority,
     "inputUsdPerMTok" -> inputUsdPerMTok,
     "outputUsdPerMTok" -> outputUsdPerMTok,
     "source" -> source,
@@ -146,15 +144,10 @@ def tool(
 
   val claudeTools =
     claudeModels.zipWithIndex.map { case (model, index) =>
-      val priority = model.toLowerCase match
-        case "opus"   => 10
-        case "sonnet" => 30
-        case "haiku"  => 60
-        case _        => 80 + index
       // Phase strengths encode the phase -> capability-tier routing table
-      // (see PROJECT.md). Each runner lists only the phases it is capable of,
-      // and `priority` orders the cheapest-capable first so tier/fit matching
-      // is automatic through AgentInventory.selectRunner.
+      // (see PROJECT.md). Each runner lists only the phases it is capable of;
+      // AgentInventory derives tier/priority from these plus raw price at
+      // selection time, so no ranking is computed here.
       val strengths = model.toLowerCase match
         case "opus" =>
           List(
@@ -178,6 +171,7 @@ def tool(
           List("small-edits", "docs", "mechanical-changes", "implement", "test")
         case _ =>
           List("scala-code", "implement")
+      val price = modelPrices.get(priceKey("claude", model))
       tool(
         id = s"claude-$model",
         agent = "claude",
@@ -199,9 +193,8 @@ def tool(
         ),
         strengths = strengths,
         available = claude.available,
-        priority = priority,
         probe = claude,
-        price = modelPrices.get(priceKey("claude", model))
+        price = price
       )
     }
 
@@ -209,24 +202,8 @@ def tool(
     for
       (model, modelIndex) <- codexModels.zipWithIndex
       (effort, effortIndex) <- codexEfforts.zipWithIndex
-    yield tool(
-      id = s"codex-$model-$effort",
-      agent = "codex",
-      model = model,
-      effort = Some(effort),
-      version = codex.version,
-      roles = List("implementor"),
-      jobTypes = List(
-        "scala",
-        "tests",
-        "repo-editing",
-        "debugging",
-        "plan",
-        "source-of-truth",
-        "implement",
-        "test"
-      ),
-      strengths =
+    yield
+      val strengths =
         if effort == "high" then
           List(
             "deep-code-reasoning",
@@ -237,12 +214,30 @@ def tool(
             "implement"
           )
         else if effort == "medium" then List("scala-code", "focused-fixes", "tests", "implement", "test")
-        else List("small-edits", "mechanical-changes", "implement", "test"),
-      available = codex.available,
-      priority = 100 + modelIndex * 10 + effortIndex,
-      probe = codex,
-      price = modelPrices.get(priceKey("codex", model))
-    )
+        else List("small-edits", "mechanical-changes", "implement", "test")
+      val price = modelPrices.get(priceKey("codex", model))
+      tool(
+        id = s"codex-$model-$effort",
+        agent = "codex",
+        model = model,
+        effort = Some(effort),
+        version = codex.version,
+        roles = List("implementor"),
+        jobTypes = List(
+          "scala",
+          "tests",
+          "repo-editing",
+          "debugging",
+          "plan",
+          "source-of-truth",
+          "implement",
+          "test"
+        ),
+        strengths = strengths,
+        available = codex.available,
+        probe = codex,
+        price = price
+      )
 
   val aiderTools =
     aiderDeepseekModels.zipWithIndex.map { case (model, index) =>
@@ -264,6 +259,7 @@ def tool(
             "implement",
             "test"
           )
+      val price = modelPrices.get(priceKey("aider", model))
       tool(
         id = s"aider-${model.replace('/', '-')}",
         agent = "aider",
@@ -283,9 +279,8 @@ def tool(
         ),
         strengths = strengths,
         available = aider.available,
-        priority = 200 + index,
         probe = aider,
-        price = modelPrices.get(priceKey("aider", model))
+        price = price
       )
     }
 

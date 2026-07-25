@@ -28,7 +28,6 @@ final case class AgentTool(
     jobTypes: List[String],
     strengths: List[String],
     available: Available,
-    priority: Int,
     inputUsdPerMTok: Option[Double] = None,
     outputUsdPerMTok: Option[Double] = None,
     source: Option[String] = None,
@@ -38,9 +37,40 @@ final case class AgentTool(
     for
       input <- inputUsdPerMTok.filter(_ > 0)
       output <- outputUsdPerMTok.filter(_ > 0)
+      if !isPriceStale
     yield
       val raw = input * 0.020 + output * 0.004 * effortMultiplier
       math.round(raw * 1000.0) / 1000.0
+
+  // A price pinned long ago (model repriced upstream, model-prices.json not
+  // refreshed) shouldn't silently drive ranking as if it were current.
+  // Past this age, cost/priority fall back to "unknown" instead of a wrong
+  // number pretending to be right.
+  def isPriceStale: Boolean =
+    asOfDate
+      .flatMap(date => scala.util.Try(java.time.LocalDate.parse(date)).toOption)
+      .exists(pinned =>
+        java.time.temporal.ChronoUnit.DAYS
+          .between(pinned, java.time.LocalDate.now()) > AgentTool.MaxPriceAgeDays
+      )
+
+  // The single place priority is computed: right before an agent gets
+  // selected/run (sorting, fallback, escalation, and prompt display all read
+  // this). Tier is derived from `strengths` (not a second hand-picked
+  // switch) and cost comes straight from the raw price fields, so there is
+  // exactly one implementation of "how good" and "how cheap" to keep in sync.
+  def priority: Int =
+    val costRank = cost.map(value => math.round(value * 10000.0).toInt).getOrElse(500000)
+    tier * 1000000 + costRank
+
+  private def tier: Int =
+    val markers = strengths.map(_.toLowerCase).toSet
+    val highTierMarkers =
+      Set("complex-reasoning", "deep-code-reasoning", "architecture", "evaluation")
+    val midTierMarkers = Set("source-of-truth", "refactoring", "focused-fixes")
+    if markers.exists(highTierMarkers.contains) then 0
+    else if markers.exists(midTierMarkers.contains) then 1
+    else 2
 
   def runner: TaskRunner =
     TaskRunner(
@@ -63,9 +93,12 @@ final case class AgentTool(
     val roleValue = roles.mkString(",")
     val jobTypeValue = jobTypes.mkString(",")
     val strengthValue = strengths.mkString(",")
-    val costValue = cost
-      .map(value => f"$$$value%.3f/task (${value / 0.010}%.0fx)")
-      .getOrElse("unknown")
+    val costValue =
+      if isPriceStale then s"unknown (price stale, asOfDate=${asOfDate.getOrElse("?")})"
+      else
+        cost
+          .map(value => f"$$$value%.3f/task (${value / 0.010}%.0fx)")
+          .getOrElse("unknown")
     s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue cost=$costValue priority=$priority"
 
   private def optionMatches(
@@ -99,6 +132,9 @@ final case class AgentTool(
         case Some("low")  => 0.5
         case Some("high") => 2.0
         case _            => 1.0
+
+object AgentTool:
+  val MaxPriceAgeDays = 180
 
 final case class AgentInventory(tools: List[AgentTool]):
   lazy val availableTools: List[AgentTool] =
@@ -152,8 +188,7 @@ object AgentInventory:
         roles = List("evaluator", "implementor"),
         jobTypes = List("scala", "planning", "debugging", "docs"),
         strengths = List("complex-reasoning", "broad-refactors", "failure-analysis"),
-        available = Available(true),
-        priority = 100
+        available = Available(true)
       )
     )
   )
@@ -189,7 +224,6 @@ object AgentInventory:
           jobTypes = stringListField(fields, "jobTypes"),
           strengths = stringListField(fields, "strengths"),
           available = Available(boolField(fields, "available").getOrElse(false)),
-          priority = intField(fields, "priority").getOrElse(1000),
           inputUsdPerMTok = positiveNumberField(fields, "inputUsdPerMTok"),
           outputUsdPerMTok = positiveNumberField(fields, "outputUsdPerMTok"),
           source = stringField(fields, "source"),
@@ -211,12 +245,6 @@ object AgentInventory:
       key: String
   ): Option[Boolean] =
     fields.get(key).collect { case ujson.Bool(value) => value }
-
-  private def intField(
-      fields: collection.Map[String, ujson.Value],
-      key: String
-  ): Option[Int] =
-    fields.get(key).collect { case ujson.Num(value) => value.toInt }
 
   private def positiveNumberField(
       fields: collection.Map[String, ujson.Value],

@@ -43,7 +43,6 @@ class AgentInventoryConfigDrivenSuite extends munit.FunSuite:
         jobTypes = Nil,
         strengths = Nil,
         available = Available(true),
-        priority = 1,
         inputUsdPerMTok = Some(1.0),
         outputUsdPerMTok = Some(1.0)
       ).cost.get
@@ -65,8 +64,7 @@ class AgentInventoryConfigDrivenSuite extends munit.FunSuite:
       roles = List("implementor"),
       jobTypes = List("test"),
       strengths = Nil,
-      available = Available(true),
-      priority = 1
+      available = Available(true)
     )
     val inventory = AgentInventory(List(unknown))
     assertEquals(unknown.cost, None)
