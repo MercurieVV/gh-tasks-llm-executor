@@ -472,9 +472,11 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
           _ <-
             if result.exitCode === 0 then F.unit
             else
+              val detail = Seq(stderr, stdout).find(_.nonEmpty)
               F.raiseError(
                 new RuntimeException(
-                  s"Command failed with exit code ${result.exitCode}: ${formatCommand(command)}"
+                  s"Command failed with exit code ${result.exitCode}: ${formatCommand(command)}" +
+                    detail.fold("")(d => s"\n${truncate(d)}")
                 )
               )
         yield ()
