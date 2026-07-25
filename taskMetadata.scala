@@ -16,6 +16,11 @@ final case class TaskMetadata(
     // on work it already finished (see main.runAgent's already-implemented
     // short-circuit).
     implemented: Option[String] = None,
+    // Durable "this user answer was already folded into an evaluation" mark
+    // (digest of the answer text, see EvaluationArrows.answerDigest). Without
+    // it, an answer comment stays "latest" forever and would suppress the
+    // cached evaluation on every later replay, re-running the evaluator LLM.
+    answerConsumed: Option[String] = None,
     runnerLines: List[String] = Nil,
     parentLines: List[String] = Nil,
     dependencyLines: List[String] = Nil,
@@ -23,8 +28,8 @@ final case class TaskMetadata(
 ):
   def isEmpty: Boolean =
     evaluation.isEmpty && execution.isEmpty && phase.isEmpty &&
-      implemented.isEmpty && runnerLines.isEmpty && parentLines.isEmpty &&
-      dependencyLines.isEmpty && enrichedDescription.isEmpty
+      implemented.isEmpty && answerConsumed.isEmpty && runnerLines.isEmpty &&
+      parentLines.isEmpty && dependencyLines.isEmpty && enrichedDescription.isEmpty
 
 object TaskMetadata:
 
@@ -40,6 +45,7 @@ object TaskMetadata:
         execution = newer.execution.orElse(older.execution),
         phase = newer.phase.orElse(older.phase),
         implemented = newer.implemented.orElse(older.implemented),
+        answerConsumed = newer.answerConsumed.orElse(older.answerConsumed),
         runnerLines =
           if newer.runnerLines.nonEmpty then newer.runnerLines
           else older.runnerLines,
@@ -93,7 +99,7 @@ object TaskMetadata:
 
     val structuredLines =
       (Set("task metadata:") ++
-        List("evaluation:", "execution:", "phase:", "implemented:") ++
+        List("evaluation:", "execution:", "phase:", "implemented:", "answer-consumed:") ++
         runnerLines ++ parentLines ++ dependencyLines).map(_.trim.toLowerCase)
     val prose = lines
       .filterNot { l =>
@@ -101,7 +107,7 @@ object TaskMetadata:
         val lower = trimmed.toLowerCase
         structuredLines.contains(lower) || lower.startsWith("evaluation:") ||
         lower.startsWith("execution:") || lower.startsWith("phase:") ||
-        lower.startsWith("implemented:")
+        lower.startsWith("implemented:") || lower.startsWith("answer-consumed:")
       }
       .mkString("\n")
       .trim
@@ -111,6 +117,7 @@ object TaskMetadata:
       execution = field("execution"),
       phase = field("phase"),
       implemented = field("implemented"),
+      answerConsumed = field("answer-consumed"),
       runnerLines = runnerLines,
       parentLines = parentLines,
       dependencyLines = dependencyLines,
@@ -125,7 +132,8 @@ object TaskMetadata:
       metadata.evaluation.map(v => s"Evaluation: $v"),
       metadata.execution.map(v => s"Execution: $v"),
       metadata.phase.map(v => s"Phase: $v"),
-      metadata.implemented.map(v => s"Implemented: $v")
+      metadata.implemented.map(v => s"Implemented: $v"),
+      metadata.answerConsumed.map(v => s"Answer-consumed: $v")
     ).flatten ++ metadata.parentLines ++ metadata.dependencyLines ++ metadata.runnerLines
     val metaBlock = metaLines.mkString("\n")
     IssueBody(
