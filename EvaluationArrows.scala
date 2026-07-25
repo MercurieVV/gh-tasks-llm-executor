@@ -11,7 +11,7 @@ import scala.util.Try
 final case class EvaluationArrows[-->[_, _]](
     fetchMaybeUserAnswer: PreparedTask --> Option[EvaluationArrows.UserInput],
     evaluateOrGetCached: EvaluationArrows.EvaluationInput --> EvaluationArrows.EvaluatedTask,
-    verifySplitExists: EvaluationArrows.EvaluatedTask --> TaskEvaluation,
+    verifySplitExists: EvaluationArrows.EvaluatedTask --> EvaluationArrows.VerifiedSplit,
     persistAndRouteEvaluation: EvaluationArrows.VerifiedEvaluation --> EvaluationArrows.Result
 ):
   def evaluateTask(using Arrow[-->]): PreparedTask --> EvaluationArrows.Result =
@@ -40,11 +40,22 @@ object CachedEvaluationArrows:
               )
               replayedEvaluation = EvaluationArrows
                 .completedEvaluation(claimedTask.task, hasRealQuestion)
-                .filter(_ => userAnswer.isEmpty)
+                // A pending (not yet folded in) user answer must force a fresh
+                // evaluation. An answer already marked consumed must NOT: it
+                // stays the latest comment forever, and re-evaluating on it
+                // would re-run the evaluator LLM on every later replay.
+                .filter(_ => EvaluationArrows.answerAlreadyApplied(claimedTask.task, userAnswer))
               result <- replayedEvaluation.traverse { cachedEvaluation =>
                 progress(
                   s"Reusing existing evaluation for #${claimedTask.task.number}."
-                ).as((task, cachedEvaluation, cachedEvaluation.execution == Execution.Split))
+                ).as(
+                  EvaluationArrows.EvaluatedTask(
+                    task = task,
+                    evaluation = cachedEvaluation,
+                    userAnswer = userAnswer,
+                    replayedSplit = cachedEvaluation.execution == Execution.Split
+                  )
+                )
               }
             yield result
           )
@@ -53,7 +64,7 @@ object CachedEvaluationArrows:
 
 final case class AgenticEvaluationArrows[EvalArrow[_, _], VerifyArrow[_, _]](
     evaluate: EvalArrow[EvaluationArrows.EvaluationInput, EvaluationArrows.EvaluatedTask],
-    verifySplitExists: VerifyArrow[EvaluationArrows.EvaluatedTask, TaskEvaluation]
+    verifySplitExists: VerifyArrow[EvaluationArrows.EvaluatedTask, EvaluationArrows.VerifiedSplit]
 )
 
 object AgenticEvaluationArrows:
@@ -103,16 +114,29 @@ object AgenticEvaluationArrows:
 
     val evaluate: Kleisli[[X] =>> OptionT[F, X], EvaluationArrows.EvaluationInput, EvaluationArrows.EvaluatedTask] =
       Kleisli { case (task, userAnswer) =>
-        OptionT.liftF(runEvaluator(task, userAnswer.map(_.value)).map(evaluation => (task, evaluation, false)))
+        OptionT.liftF(
+          runEvaluator(task, userAnswer.map(_.value)).map(evaluation =>
+            EvaluationArrows.EvaluatedTask(
+              task = task,
+              evaluation = evaluation,
+              userAnswer = userAnswer,
+              replayedSplit = false
+            )
+          )
+        )
       }
 
-    val verifySplitExists: Kleisli[[X] =>> OptionT[F, X], EvaluationArrows.EvaluatedTask, TaskEvaluation] =
-      Kleisli { case (task, evaluation, _) =>
+    val verifySplitExists
+        : Kleisli[[X] =>> OptionT[F, X], EvaluationArrows.EvaluatedTask, EvaluationArrows.VerifiedSplit] =
+      Kleisli { evaluated =>
+        val task = evaluated.task
+        val evaluation = evaluated.evaluation
         OptionT.liftF {
           val claimedTask = task.claimedTask
+          val unrepaired = EvaluationArrows.VerifiedSplit(evaluation, repaired = false)
           if evaluation.execution == Execution.Split then
             GitHub.fetchIssues(claimedTask.context.root).flatMap { allIssues =>
-              if GitHub.hasOpenChildren(claimedTask.task, allIssues) then evaluation.pure[F]
+              if GitHub.hasOpenChildren(claimedTask.task, allIssues) then unrepaired.pure[F]
               else
                 // The task has already been evaluated. Do not call the
                 // evaluator again; complete the side effect the split verdict
@@ -127,7 +151,8 @@ object AgenticEvaluationArrows:
                   ) *>
                   createMissingSplitSubtasks(task, evaluation) *>
                   GitHub.fetchIssues(claimedTask.context.root).flatMap { updatedIssues =>
-                    if GitHub.hasOpenChildren(claimedTask.task, updatedIssues) then evaluation.pure[F]
+                    if GitHub.hasOpenChildren(claimedTask.task, updatedIssues) then
+                      EvaluationArrows.VerifiedSplit(evaluation, repaired = true).pure[F]
                     else
                       Sync[F].raiseError(
                         RuntimeException(
@@ -136,13 +161,13 @@ object AgenticEvaluationArrows:
                       )
                   }
             }
-          else evaluation.pure[F]
+          else unrepaired.pure[F]
         }
       }
 
     AgenticEvaluationArrows(
       evaluate = evaluate,
-      verifySplitExists = Kleisli[F, EvaluationArrows.EvaluatedTask, TaskEvaluation] { evaluatedTask =>
+      verifySplitExists = Kleisli[F, EvaluationArrows.EvaluatedTask, EvaluationArrows.VerifiedSplit] { evaluatedTask =>
         verifySplitExists
           .run(evaluatedTask)
           .getOrElseF(
@@ -156,11 +181,31 @@ object AgenticEvaluationArrows:
 object EvaluationArrows:
   opaque type UserInput = String
   object UserInput:
+    def apply(value: String): UserInput = value
     extension (self: UserInput) def value: String = self
 
   type EvaluationInput = (PreparedTask, Option[UserInput])
-  type EvaluatedTask = (PreparedTask, TaskEvaluation, Boolean)
-  type VerifiedEvaluation = (EvaluatedTask, TaskEvaluation)
+
+  /** Outcome of the cached-or-agentic evaluation step.
+    *
+    * `userAnswer` is threaded through so the persist step can durably mark it
+    * consumed; `replayedSplit` records that the split verdict came from cached
+    * metadata rather than a fresh evaluator run.
+    */
+  final case class EvaluatedTask(
+      task: PreparedTask,
+      evaluation: TaskEvaluation,
+      userAnswer: Option[UserInput],
+      replayedSplit: Boolean
+  )
+
+  /** A split verdict after its child issues were confirmed to exist.
+    * `repaired` means this run had to create the missing child issues, so the
+    * split is not a pure replay even when the verdict itself was cached.
+    */
+  final case class VerifiedSplit(evaluation: TaskEvaluation, repaired: Boolean)
+
+  type VerifiedEvaluation = (EvaluatedTask, VerifiedSplit)
   type Result = Either[NeedsUserInput, Either[SplitTask, PreparedTask]]
   type OptionalArrow[F[_]] = [A, B] =>> Kleisli[[X] =>> OptionT[F, X], A, B]
   // Scoped tool permission for the evaluator run only: "split" verdicts
@@ -216,9 +261,24 @@ object EvaluationArrows:
       }
 
     val persistAndRouteEvaluation: Kleisli[F, VerifiedEvaluation, Result] =
-      Kleisli { case ((task, _, replayedSplit), verifiedEvaluation) =>
+      Kleisli { case (evaluated, VerifiedSplit(verifiedEvaluation, repairedSplit)) =>
+        val task = evaluated.task
         val claimedTask = task.claimedTask
         val cleanBody = stripMarkdownFence(verifiedEvaluation.body.value).trim
+        // Questions win over the verdict: a blocked task must never be routed
+        // to implement. Execution.NeedsInput without any questions is an
+        // evaluator defect, so synthesize a real question instead of silently
+        // falling through to implementation.
+        val questions = verifiedEvaluation.questions
+          .map(_.trim)
+          .filter(_.nonEmpty)
+          .orElse(
+            Option.when(verifiedEvaluation.execution == Execution.NeedsInput)(
+              s"""Evaluation of task #${claimedTask.task.number} ended as "needs-input" but produced no concrete questions.
+                 |
+                 |Clarify what this task should do (scope, acceptance criteria), or reply here to have it re-evaluated.""".stripMargin
+            )
+          )
         // Evaluation/Execution are always taken from verifiedEvaluation, not
         // from whatever text happens to be embedded in cleanBody: for the
         // split-verification fallback above, cleanBody is the task's old
@@ -228,11 +288,15 @@ object EvaluationArrows:
         val newMetadata = TaskMetadata
           .parse(cleanBody)
           .copy(
-            evaluation = Some(
-              if verifiedEvaluation.questions.exists(_.trim.nonEmpty) then "needs-input"
-              else "ready"
+            evaluation = Some(if questions.isDefined then "needs-input" else "ready"),
+            // Persist the blocked verdict too, so a replay can't read back
+            // "Evaluation: needs-input, Execution: implement" and implement a
+            // task that is still waiting on the user.
+            execution = Some(
+              if questions.isDefined then Execution.NeedsInput.wireValue
+              else verifiedEvaluation.execution.wireValue
             ),
-            execution = Some(verifiedEvaluation.execution.wireValue)
+            answerConsumed = evaluated.userAnswer.map(answerDigest)
           )
         val finalMetadata = Monoid[TaskMetadata].combine(priorMetadata, newMetadata)
         val updatedTask = claimedTask.task.copy(body = TaskMetadata.render(finalMetadata))
@@ -254,22 +318,29 @@ object EvaluationArrows:
                   newMetadata
                 )
             else Sync[F].unit
-          result <- {
-            verifiedEvaluation.questions.filter(_.trim.nonEmpty) match
-              case Some(questions) =>
-                waitForUserInput((task.copy(claimedTask = updatedRun), questions.trim))
-              case None if verifiedEvaluation.execution == Execution.Split =>
-                Right(
-                  Left(
-                    SplitTask(
-                      updatedRun,
-                      replayed = replayedSplit
-                    )
+          result <- (questions, verifiedEvaluation.execution) match
+            case (Some(pending), _) =>
+              waitForUserInput((task.copy(claimedTask = updatedRun), pending))
+            case (None, Execution.Split) =>
+              Right(
+                Left(
+                  SplitTask(
+                    updatedRun,
+                    // Repairing a cached split creates child issues in THIS
+                    // run, so it still deserves the split-evaluation comment.
+                    replayed = evaluated.replayedSplit && !repairedSplit
                   )
-                ).pure[F]
-              case None =>
-                Right(Right(task.copy(claimedTask = updatedRun))).pure[F]
-          }
+                )
+              ).pure[F]
+            case (None, Execution.Implement) =>
+              Right(Right(task.copy(claimedTask = updatedRun))).pure[F]
+            case (None, Execution.NeedsInput) =>
+              // Unreachable: `questions` is always defined for NeedsInput.
+              Sync[F].raiseError(
+                RuntimeException(
+                  s"Task #${claimedTask.task.number} needs user input but no questions were produced."
+                )
+              )
         yield result
       }
 
@@ -469,12 +540,36 @@ Rules:
         Option.when(start >= 0 && end > start)(value.substring(start, end + 1))
       }
 
+  /** Stable short digest of a user answer, persisted as the "Answer-consumed:"
+    * metadata mark. Whitespace-normalized so trivial re-rendering of the same
+    * comment text doesn't look like a new answer.
+    */
+  def answerDigest(answer: UserInput): String =
+    // Inside the opaque type's scope UserInput is String; ascribe rather than
+    // call the `value` extension, which is shadowed by java.lang.String here.
+    val normalized = (answer: String).trim.replaceAll("\\s+", " ")
+    java.security.MessageDigest
+      .getInstance("SHA-256")
+      .digest(normalized.getBytes("UTF-8"))
+      .take(8)
+      .map(byte => f"${byte & 0xff}%02x")
+      .mkString
+
+  /** True when there is no answer, or the answer was already folded into a
+    * persisted evaluation — i.e. when the cached evaluation may be reused.
+    */
+  def answerAlreadyApplied(task: Issue, answer: Option[UserInput]): Boolean =
+    answer.forall(value => metadataValue(task.body, "answer-consumed").contains(answerDigest(value)))
+
   def completedEvaluation(
       task: Issue,
       hasRealQuestion: Boolean
   ): Option[TaskEvaluation] =
     (evaluationStatus(task.body), executionStatus(task.body)) match
-      case (Some("ready"), Some(execution)) =>
+      // Only actionable verdicts replay as "ready". A persisted
+      // (ready, needs-input) pair is contradictory legacy state: fall through
+      // to a real evaluation rather than implementing a blocked task.
+      case (Some("ready"), Some(execution @ (Execution.Implement | Execution.Split))) =>
         TaskEvaluation(task.body, None, execution = execution).some
       case (Some("needs-input"), _) | (_, Some(Execution.NeedsInput)) if hasRealQuestion =>
         TaskEvaluation(
