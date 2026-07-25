@@ -372,16 +372,6 @@ object EvaluationArrows:
 
     AgentPrompt(s"""Evaluate and prepare this GitHub task before implementation.
 
-Task ID: #${task.number}
-Title: ${task.title}
-Description state: $descriptionState
-
-Available local implementor tools:
-${agentInventory.promptBlock}
-
-Current Task Description:
-${task.body}
-$dependencyConclusionStr$userAnswerStr
 Return only JSON, with this shape:
 {
   "status": "ready" | "split" | "questions",
@@ -439,7 +429,17 @@ Phase -> capability-tier routing (select concrete runners from the available loc
 - implement       -> narrow, well-specified code change      -> medium (task-dependent); cheap ONLY when genuinely trivial + fully specified
 - test            -> narrow verification                     -> low-medium; cheapest capable
 Match each phase's ranked "preferred llms/models/efforts/versions" to this table: primary = cheapest runner that still fits the phase's required capability, fallbacks = progressively stronger runners for escalation. Prefer runners whose jobTypes/strengths advertise the phase name.
-""")
+
+Available local implementor tools:
+${agentInventory.promptBlock}
+
+Task ID: #${task.number}
+Title: ${task.title}
+Description state: $descriptionState
+
+Current Task Description:
+${task.body}
+$dependencyConclusionStr$userAnswerStr""")
 
   def splitTaskPrompt(
       task: Issue,
