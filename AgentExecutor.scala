@@ -135,7 +135,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     val started = System.currentTimeMillis()
     val lastActivity = AtomicLong(started)
     val output = StringBuilder()
-    val command = runner.command(prompt, allowedTools, jsonSchema)
+    val command = runner.command(prompt, allowedTools, jsonSchema, cwd = Some(cwd))
     TaskLogger.unsafeTrace(
       s"agent command cwd=$cwd args=${commandForLog(command, prompt)} promptChars=${prompt.value.length}"
     )

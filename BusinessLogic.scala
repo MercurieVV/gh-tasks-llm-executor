@@ -2,6 +2,8 @@ import arrowstep.core.ProgramSays
 import cats.arrow.ArrowChoice
 import cats.syntax.all.*
 
+import scala.util.Try
+
 opaque type Questions = String
 object Questions:
   def apply(value: String): Questions = value
@@ -110,13 +112,18 @@ final case class TaskRunner(
   def command(
       prompt: AgentPrompt,
       allowedTools: Seq[String] = Nil,
-      jsonSchema: Option[String] = None
+      jsonSchema: Option[String] = None,
+      cwd: Option[os.Path] = None
   ): Seq[String] =
     agent.value match
       case "claude" =>
+        val mcpConfig = workspaceFile(cwd, os.rel / ".agents" / "mcp_config.json")
+        val effectiveAllowedTools =
+          allowedTools ++ mcpConfig.toList.flatMap(_ => ScalaSemanticClaudeTools)
         Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
-          (if allowedTools.isEmpty then Nil
-           else Seq("--allowedTools") ++ allowedTools) ++
+          mcpConfig.toList.flatMap(path => Seq("--mcp-config", path.toString)) ++
+          (if effectiveAllowedTools.isEmpty then Nil
+           else Seq("--allowedTools") ++ effectiveAllowedTools) ++
           jsonSchema.toList.flatMap(schema => Seq("--json-schema", schema)) ++
           Seq("-p", prompt.value)
       case "codex" =>
@@ -131,6 +138,7 @@ final case class TaskRunner(
         Seq(agent.value, "exec") ++
           mappedModel.toList.flatMap(value => Seq("--model", value)) ++
           effort.toList.flatMap(value => Seq("--config", s"model_reasoning_effort=$value")) ++
+          codexMcpConfigArgs(cwd) ++
           Seq(prompt.value)
       case "aider" =>
         // DeepSeek retired deepseek-chat/deepseek-reasoner in favor of
@@ -140,7 +148,7 @@ final case class TaskRunner(
         val mappedModel = model match
           case Some("deepseek/deepseek-chat")     => Some("deepseek/deepseek-v4-flash")
           case Some("deepseek/deepseek-reasoner") => Some("deepseek/deepseek-v4-pro")
-          case other                               => other
+          case other                              => other
         Seq(agent.value) ++ mappedModel.toList.flatMap(value => Seq("--model", value)) ++
           Seq("--yes-always", "--no-auto-commits", "--message", prompt.value)
       case "gemini" =>
@@ -153,6 +161,56 @@ final case class TaskRunner(
       case _ =>
         Seq(agent.value) ++ model.toList.flatMap(value => Seq("-m", value)) ++
           Seq("-p", prompt.value)
+
+  private def workspaceFile(cwd: Option[os.Path], path: os.RelPath): Option[os.Path] =
+    cwd.map(_ / path).filter(os.exists(_))
+
+  private def codexMcpConfigArgs(cwd: Option[os.Path]): Seq[String] =
+    workspaceFile(cwd, os.rel / ".agents" / "mcp_config.json").toList.flatMap { path =>
+      val servers =
+        for
+          json <- Try(ujson.read(os.read(path))).toOption
+          servers <- json.obj.get("mcpServers").map(_.obj)
+        yield servers.toSeq.flatMap { case (name, server) =>
+          val obj = server.obj
+          val command = obj.get("command").map(_.str).toSeq.flatMap { value =>
+            Seq("--config", s"mcp_servers.$name.command=${tomlString(value)}")
+          }
+          val args = obj.get("args").map(_.arr.map(_.str).toSeq).toSeq.flatMap { values =>
+            Seq("--config", s"mcp_servers.$name.args=${tomlStringArray(values)}")
+          }
+          command ++ args
+        }
+      servers.getOrElse(Nil)
+    }
+
+  private def tomlString(value: String): String = ujson.write(value)
+
+  private def tomlStringArray(values: Seq[String]): String =
+    values.map(tomlString).mkString("[", ",", "]")
+
+  private val ScalaSemanticClaudeTools = Seq(
+    "mcp__scala-semantic__annotated_source",
+    "mcp__scala-semantic__set_workspace_root",
+    "mcp__scala-semantic__refresh_workspace",
+    "mcp__scala-semantic__smart_code_duplications",
+    "mcp__scala-semantic__batch_rename_plan",
+    "mcp__scala-semantic__find_symbol",
+    "mcp__scala-semantic__find_usages",
+    "mcp__scala-semantic__class_hierarchy",
+    "mcp__scala-semantic__method_signature",
+    "mcp__scala-semantic__find_overloads",
+    "mcp__scala-semantic__members",
+    "mcp__scala-semantic__resolve_implicits",
+    "mcp__scala-semantic__trace_implicit_chain",
+    "mcp__scala-semantic__call_path",
+    "mcp__scala-semantic__type_at_position",
+    "mcp__scala-semantic__document_outline",
+    "mcp__scala-semantic__rename_plan",
+    "mcp__scala-semantic__move_plan",
+    "mcp__scala-semantic__extract_method_plan",
+    "mcp__scala-semantic__value_flow"
+  )
 
 /** Candidate issue paired with the runner selected to execute or resume it. */
 final case class TaskCandidate(
