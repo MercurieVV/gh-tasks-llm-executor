@@ -1024,6 +1024,36 @@ This parent task will not be implemented directly. Run child tasks first; when a
       }
     }
 
+  private def localBranchExists(root: os.Path, name: String): Boolean =
+    os.proc("git", "rev-parse", "--verify", name)
+      .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+      .exitCode === 0
+
+  def defaultBranchRef(root: os.Path): String =
+    Try(
+      os.proc("git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+        .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        .out
+        .text()
+        .trim
+    ).toOption
+      .filter(_.nonEmpty)
+      .getOrElse(if localBranchExists(root, "master") then "master" else "main")
+
+  def commitsAhead(root: os.Path, branchName: BranchName): Int =
+    Try(
+      os.proc(
+        "git",
+        "rev-list",
+        "--count",
+        s"${defaultBranchRef(root)}..${branchName.value}"
+      ).call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        .out
+        .text()
+        .trim
+        .toInt
+    ).getOrElse(1)
+
   private def mergeIntegrationBranch[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
   ): Kleisli[F, (os.Path, TaskNumber), Unit] =
@@ -1037,6 +1067,12 @@ This parent task will not be implemented directly. Run child tasks first; when a
         case false =>
           progress(
             s"No integration branch $branchName found for parent #$parentId; nothing to merge."
+          )
+        case true if commitsAhead(root, branchName) === 0 =>
+          progress(
+            s"Integration branch $branchName has no commits ahead of the default branch; closing parent #$parentId without a Pull Request."
+          ) *> setIssueStatus(progress)((root, parentId, "completed")) *> closeIssue(
+            (root, parentId)
           )
         case true =>
           for
@@ -1713,14 +1749,32 @@ This parent task will not be implemented directly. Run child tasks first; when a
       )
     }
 
+  // Labels recording which agent/model/effort/version was selected to run
+  // the task, set alongside "in progress" so the choice is visible on the
+  // issue without opening the run log.
+  def runnerLabels(runner: TaskRunner): List[String] =
+    List(
+      Some(s"agent: ${runner.agent.value}"),
+      runner.model.map(value => s"model: $value"),
+      runner.effort.map(value => s"effort: $value"),
+      runner.version.map(value => s"version: $value")
+    ).flatten
+
   def setIssueStatus[F[_]](progress: String => F[Unit])(using
+      Sync[F]
+  ): Kleisli[F, (os.Path, TaskNumber, String), Unit] =
+    setIssueStatusWithRunner(progress)(None)
+
+  def setIssueStatusWithRunner[F[_]](progress: String => F[Unit])(
+      runner: Option[TaskRunner]
+  )(using
       Sync[F]
   ): Kleisli[F, (os.Path, TaskNumber, String), Unit] =
     Kleisli.apply { case (root, taskId, status) =>
       val (toAdd, toRemove) =
         if status === "in progress" then
           (
-            List("status: in progress", "in progress"),
+            List("status: in progress", "in progress") ++ runner.toList.flatMap(runnerLabels),
             List("status: completed", "completed")
           )
         else
@@ -1754,6 +1808,28 @@ This parent task will not be implemented directly. Run child tasks first; when a
         ).handleErrorWith(_ => Sync[F].unit)
 
       toAdd.traverse_(ensureLabel) *> run(addCmd) *> run(removeCmd)
+    }
+
+  // Best-effort rollback for `markTaskInProgress` when task processing stops
+  // before reaching a terminal status (error, cancellation): strips the
+  // in-progress labels without adding a completed one, so the issue doesn't
+  // stay stuck looking claimed after the IssueClaim mutex has already
+  // released.
+  def clearInProgressStatus[F[_]](progress: String => F[Unit])(
+      runner: Option[TaskRunner] = None
+  )(using
+      Sync[F]
+  ): Kleisli[F, (os.Path, TaskNumber), Unit] =
+    Kleisli.apply { case (root, taskId) =>
+      val labels =
+        List("status: in progress", "in progress") ++ runner.toList.flatMap(runnerLabels)
+      val removeFlags = labels.flatMap(label => Seq("--remove-label", label))
+      val removeCmd = Seq("gh", "issue", "edit", taskId.toString) ++ removeFlags
+      call(root, removeCmd*).handleErrorWith { error =>
+        progress(
+          s"Warning: Failed to clear in-progress labels for task #$taskId: ${error.getMessage}"
+        )
+      }
     }
 
   private def call[F[_]: Sync](cwd: os.Path, command: String*): F[Unit] =

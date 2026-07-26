@@ -5,6 +5,7 @@ import cats.effect.kernel.Sync
 import cats.syntax.all.*
 import cats.syntax.arrow.*
 import arrowstep.core.ProgramSays
+import cats.arrow.Arrow
 
 import scala.concurrent.duration.*
 import scala.util.Try
@@ -348,14 +349,14 @@ object Impl:
           Right(walk.copy(candidate = walk.candidate.copy(issue = rootIssue)))
     }
 
-  def runRootOnce[F[_]: Sync](
-      executeRecursive: -->[RunF[F], TaskNode, RunSummary]
-  ): -->[RunF[F], RootWalk, (RootWalk, RunSummary)] =
-    Kleisli { walk =>
-      executeRecursive
-        .run(TaskNode(walk.candidate.context, walk.candidate.issue))
-        .map(summary => (walk, summary))
-    }
+  def runRootOnce[-->[_, _]: Arrow](
+      executeRecursive: TaskNode --> RunSummary
+  ): RootWalk --> (RootWalk, RunSummary) = {
+    val A = Arrow[-->]
+    A.id[RootWalk] &&& (
+      A.id[RootWalk].map(walk => TaskNode(walk.candidate.context, walk.candidate.issue)) >>> executeRecursive
+    )
+  }
 
   def routeContinuation[F[_]: Sync]: -->[F, (RootWalk, RunSummary), Either[RunSummary, RootWalk]] =
     Kleisli { case (walk, summary) =>
@@ -456,7 +457,13 @@ object Impl:
 
       IssueClaim
         .acquire[F](context.root, issue.number, progress)
-        .use(_ => executeCandidate.run(runnable))
+        .use { _ =>
+          executeCandidate
+            .run(runnable)
+            .onError { case _ =>
+              GitHub.clearInProgressStatus(progress)(Some(runner))((context.root, issue.number))
+            }
+        }
         .recoverWith { case _: IssueAlreadyClaimedException =>
           progress(
             s"Task #${issue.number} is claimed by another process. Waiting for completion..."
@@ -601,7 +608,7 @@ object Impl:
     Kleisli { task =>
       val run = task.claimedTask
       GitHub
-        .setIssueStatus(progress)(
+        .setIssueStatusWithRunner(progress)(Some(run.runner))(
           run.context.root,
           run.task.number,
           "in progress"
