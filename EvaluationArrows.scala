@@ -414,15 +414,19 @@ Rules:
 - If the description is missing or weak, create a clear, structured, detailed GitHub issue body.
 - Keep the task narrow and implementation-oriented.
 - Preserve existing parent/dependency references.
-- Preserve existing preferred runner metadata, or add it if missing.
-- Prefer the new metadata key "preferred llms/models/efforts/versions" when adding or replacing runner metadata.
-- Choose implementor runners only from the available local implementor tools above.
-  - Match the chosen runner to the job type, scope, and risk: small mechanical tasks can use cheaper/weaker tools, while broad Scala refactors, failing CI repair, and ambiguous debugging should use stronger tools.
-  - Prefer the cheapest listed runner whose strengths satisfy the task's phase capability floor; only use a pricier runner when no cheaper runner is capable, and use priority only to break near-ties in cost.
-  - Write preferred runners as a ranked list. Each item must be exactly agent/model/effort/version; leave effort or version empty when the tool has no value, for example claude/sonnet//1.0.0.
+- Preserve existing preferred runner metadata, or existing required-abilities metadata, unchanged.
+- Do NOT pin a concrete runner (agent/model/effort/version). Instead, express what the task needs as abstract abilities with importance coefficients (0..1) - the concrete runner is chosen at RUN time (not now), from live cost/availability/budget data, by matching these abilities against each tool's strengths/jobTypes. This lets the operator retune runner selection later without re-evaluating the task.
+  - Write this metadata key exactly:
+    Required abilities/importance:
+    - complex-reasoning: 1.0
+    - scala: 0.6
+  - Name abilities that match the vocabulary already used in tool strengths/jobTypes above (e.g. complex-reasoning, source-of-truth, refactoring, focused-fixes, scala, planning, debugging, docs) so they actually match a tool's advertised strengths/jobTypes at selection time.
+  - Coefficient = importance, not confidence: 1.0 for an ability the task cannot succeed without, lower for nice-to-have.
+  - EXCEPTION - pinning a concrete runner is still allowed, and takes priority over required abilities, ONLY when the task genuinely needs one specific tool/version (e.g. reproducing a bug tied to one exact model). In that rare case, keep using "preferred llms/models/efforts/versions" as a ranked list of exact agent/model/effort/version entries (leave effort or version empty when unused, e.g. claude/sonnet//1.0.0).
+  - Match the abilities to the job type, scope, and risk: small mechanical tasks need few/low-importance abilities, while broad Scala refactors, failing CI repair, and ambiguous debugging need high-importance capability abilities.
 - Include Context, Goal, Scope, Acceptance Criteria, and Notes/Risks when useful.
 - Evaluate whether the task should be split before implementation. Record the evaluation in the body.
-- If splitting is needed, create GitHub subtasks before returning. Each subtask must have parent, dependencies if needed, acceptance criteria, narrow scope, and preferred llms/models/efforts/versions.
+- If splitting is needed, create GitHub subtasks before returning. Each subtask must have parent, dependencies if needed, acceptance criteria, narrow scope, and a "Required abilities/importance:" block.
 - Prefer a target scope that a weaker model such as Haiku could implement without another split.
 - If the task's existing preferred runner metadata pins claude/opus (or any top-tier model) for the whole task, treat that as a signal to split: opus-level judgment is only needed for plan/source-of-truth-shaped work, so carve those parts out and route implement/test leaves to cheaper runners instead of leaving the whole task on opus.
 - If important information is missing and cannot be inferred, set status to "questions" and put concrete user questions in "questions".
@@ -438,15 +442,15 @@ Phase-typed decomposition:
   Execution: implement
   Phase: implement
 - For "source-of-truth": pick, per concrete task, what the authoritative reference is (a spec / definition-of-done, a pinned existing artifact + versions, or the test oracle) and state it EXPLICITLY in that subtask's acceptance criteria so later phases conform to it.
-- Actively narrow "implement" and "test" leaves toward the cheapest tier: split further while a leaf is too big or ambiguous for a weak model such as Haiku. When a leaf resists narrowing (irreducible complexity, cross-cutting reasoning, high risk), STOP and route it to the cheapest runner that actually fits. Set a real capability floor per leaf; never down-tier below that floor for price alone. Under-powering a leaf is the primary failure mode: a too-weak model produces wrong code, forcing repair/replay and a net token LOSS.
+- Actively narrow "implement" and "test" leaves toward the cheapest tier: split further while a leaf is too big or ambiguous for a weak model such as Haiku. When a leaf resists narrowing (irreducible complexity, cross-cutting reasoning, high risk), STOP and set a real capability floor per leaf via required-abilities coefficients; never down-weight an ability below that floor for price alone - the concrete runner is chosen at run time, not by you. Under-powering a leaf is the primary failure mode: a too-weak model produces wrong code, forcing repair/replay and a net token LOSS.
 - Token savings depend on plan/source-of-truth producing acceptance criteria tight enough for the cheaper implement/test model to succeed. Cross-phase context handoff rides through the issue bodies + dependency conclusion, so plan/source-of-truth subtasks must write their conclusions back into the issue body explicitly.
 
-Phase -> capability-tier routing (select concrete runners from the available local implementor tools above by cost vs. fit across ALL vendors; never hardcode a vendor):
-- plan            -> strong reasoning / decomposition        -> high tier
-- source-of-truth -> judgment on authority / spec            -> high-medium tier
-- implement       -> narrow, well-specified code change      -> medium (task-dependent); cheap ONLY when genuinely trivial + fully specified
-- test            -> narrow verification                     -> low-medium; cheapest capable
-Match each phase's ranked "preferred llms/models/efforts/versions" to this table: primary = cheapest runner that still fits the phase's required capability, fallbacks = progressively stronger runners for escalation. Prefer runners whose jobTypes/strengths advertise the phase name.
+Phase -> required-abilities guidance (write these as "Required abilities/importance:" coefficients per subtask; the concrete runner across ALL vendors is picked at run time from live cost/fit data, never hardcode a vendor here):
+- plan            -> strong reasoning / decomposition        -> high importance (e.g. complex-reasoning: 1.0)
+- source-of-truth -> judgment on authority / spec            -> high-medium importance (e.g. source-of-truth: 0.8)
+- implement       -> narrow, well-specified code change      -> medium importance (task-dependent); low ONLY when genuinely trivial + fully specified
+- test            -> narrow verification                     -> low-medium importance; keep the ability list short so a cheap runner is picked
+Name abilities that match the vocabulary already used in tool strengths/jobTypes above so run-time matching actually fires.
 
 Available local implementor tools:
 ${agentInventory.promptBlock}
@@ -490,7 +494,7 @@ Rules:
 - Create the missing child issues now.
 - Each child issue body must include this exact parent link line:
   Parent: #${task.number}
-- Each child issue must include dependencies if needed, acceptance criteria, narrow scope, and preferred llms/models/efforts/versions.
+- Each child issue must include dependencies if needed, acceptance criteria, narrow scope, and a "Required abilities/importance:" block (ability -> importance coefficient 0..1). Only pin a concrete "preferred llms/models/efforts/versions" runner when the child genuinely needs one specific tool/version.
 - Preserve the phase-typed split design when the evaluated task body describes one.
 - Prefer a target scope that a weaker model such as Haiku could implement without another split.
 - Use only GitHub issue creation/comment commands for the split side effects.

@@ -22,6 +22,13 @@ final case class TaskMetadata(
     // cached evaluation on every later replay, re-running the evaluator LLM.
     answerConsumed: Option[String] = None,
     runnerLines: List[String] = Nil,
+    // Raw "Required abilities/importance:" block lines (header + bullets),
+    // same shape as runnerLines. Preferred over a pinned runner for new
+    // tasks: the evaluator names abstract abilities + importance
+    // coefficients here, and AgentInventory.selectRunnerFor picks the
+    // concrete runner at run time using live tool data - see
+    // requiredAbilities / Priority.scala.
+    requiredAbilityLines: List[String] = Nil,
     parentLines: List[String] = Nil,
     dependencyLines: List[String] = Nil,
     enrichedDescription: Option[String] = None
@@ -29,7 +36,14 @@ final case class TaskMetadata(
   def isEmpty: Boolean =
     evaluation.isEmpty && execution.isEmpty && phase.isEmpty &&
       implemented.isEmpty && answerConsumed.isEmpty && runnerLines.isEmpty &&
+      requiredAbilityLines.isEmpty &&
       parentLines.isEmpty && dependencyLines.isEmpty && enrichedDescription.isEmpty
+
+  // Ability name -> importance coefficient, parsed from requiredAbilityLines
+  // bullets ("- ability: coefficient"). Malformed bullets are skipped rather
+  // than failing the whole task's metadata.
+  def requiredAbilities: Map[String, Double] =
+    TaskMetadata.parseRequiredAbilities(requiredAbilityLines)
 
 object TaskMetadata:
 
@@ -49,6 +63,9 @@ object TaskMetadata:
         runnerLines =
           if newer.runnerLines.nonEmpty then newer.runnerLines
           else older.runnerLines,
+        requiredAbilityLines =
+          if newer.requiredAbilityLines.nonEmpty then newer.requiredAbilityLines
+          else older.requiredAbilityLines,
         parentLines =
           if newer.parentLines.nonEmpty then newer.parentLines
           else older.parentLines,
@@ -66,6 +83,21 @@ object TaskMetadata:
       "preferred llms/models/efforts/versions",
       "preferred llms/models/versions"
     )
+  private val RequiredAbilityHeaderMarkers =
+    List("required abilities/importance")
+
+  // "- ability: coefficient" (or "* ability: coefficient"); coefficient must
+  // parse as a Double. Lines that don't match this shape are dropped.
+  private val AbilityBulletRegex =
+    """(?i)^\s*[-*]\s*([a-z0-9][a-z0-9\- ]*)\s*:\s*([0-9]*\.?[0-9]+)\s*$""".r
+
+  def parseRequiredAbilities(lines: List[String]): Map[String, Double] =
+    lines
+      .collect { case AbilityBulletRegex(ability, coefficient) =>
+        scala.util.Try(coefficient.toDouble).toOption.map(ability.trim.toLowerCase -> _)
+      }
+      .flatten
+      .toMap
 
   // Splits `text` into the structured metadata lines and the remaining prose,
   // and folds the structured lines into a TaskMetadata.
@@ -92,6 +124,17 @@ object TaskMetadata:
           .drop(runnerHeaderIdx + 1)
           .takeWhile(l => l.trim.startsWith("-") || l.trim.startsWith("*"))
 
+    val abilityHeaderIdx = lines.indexWhere { line =>
+      val lower = line.trim.toLowerCase
+      RequiredAbilityHeaderMarkers.exists(lower.contains)
+    }
+    val requiredAbilityLines =
+      if abilityHeaderIdx < 0 then Nil
+      else
+        lines(abilityHeaderIdx) :: lines
+          .drop(abilityHeaderIdx + 1)
+          .takeWhile(l => l.trim.startsWith("-") || l.trim.startsWith("*"))
+
     val parentLines =
       lines.filter(l => ParentLineRegex.findFirstIn(l).isDefined)
     val dependencyLines =
@@ -100,7 +143,7 @@ object TaskMetadata:
     val structuredLines =
       (Set("task metadata:") ++
         List("evaluation:", "execution:", "phase:", "implemented:", "answer-consumed:") ++
-        runnerLines ++ parentLines ++ dependencyLines).map(_.trim.toLowerCase)
+        runnerLines ++ requiredAbilityLines ++ parentLines ++ dependencyLines).map(_.trim.toLowerCase)
     val prose = lines
       .filterNot { l =>
         val trimmed = l.trim
@@ -119,6 +162,7 @@ object TaskMetadata:
       implemented = field("implemented"),
       answerConsumed = field("answer-consumed"),
       runnerLines = runnerLines,
+      requiredAbilityLines = requiredAbilityLines,
       parentLines = parentLines,
       dependencyLines = dependencyLines,
       enrichedDescription = Option.when(prose.nonEmpty)(prose)
@@ -134,7 +178,8 @@ object TaskMetadata:
       metadata.phase.map(v => s"Phase: $v"),
       metadata.implemented.map(v => s"Implemented: $v"),
       metadata.answerConsumed.map(v => s"Answer-consumed: $v")
-    ).flatten ++ metadata.parentLines ++ metadata.dependencyLines ++ metadata.runnerLines
+    ).flatten ++ metadata.parentLines ++ metadata.dependencyLines ++ metadata.runnerLines ++
+      metadata.requiredAbilityLines
     val metaBlock = metaLines.mkString("\n")
     IssueBody(
       metadata.enrichedDescription.fold(metaBlock)(prose => s"$prose\n\n$metaBlock")

@@ -230,7 +230,10 @@ object Impl:
             context,
             task,
             context.agentInventory
-              .selectRunner(GitHub.taskRunners(task))
+              .selectRunnerFor(
+                TaskMetadata.parse(task.body.value).requiredAbilities,
+                GitHub.taskRunners(task)
+              )
               .getOrElse(evaluatorRunner),
             resumePullRequest = ResumePullRequest(hasOpenPr)
           )
@@ -468,7 +471,10 @@ object Impl:
       val context = node.context
       val issue = node.issue
       val runner = context.agentInventory
-        .selectRunner(GitHub.taskRunners(issue))
+        .selectRunnerFor(
+          TaskMetadata.parse(issue.body.value).requiredAbilities,
+          GitHub.taskRunners(issue)
+        )
         .getOrElse(evaluatorRunner)
       val runnable = TaskCandidate(context, issue, runner)
 
@@ -1214,12 +1220,13 @@ Workflow:
    - parent: #${task.number}
    - dependencies on earlier subtasks when order matters
    - concrete acceptance criteria
-   - preferred llms/models/efforts/versions as a ranked list
+   - required abilities/importance (ability -> coefficient), not a pinned runner
 4. Prefer splitting until each subtask is small enough that a weaker model such as Haiku could implement it without needing another split.
-5. Use this exact preferred-runner metadata format in every subtask description:
-   preferred llms/models/efforts/versions:
-   - claude/haiku//<version>
-   - codex/gpt-5/high/<version>
+5. Use this exact metadata format in every subtask description, so the concrete runner is picked at run time from live cost/fit data instead of being pinned now:
+   Required abilities/importance:
+   - complex-reasoning: 1.0
+   - scala: 0.6
+   Only add a "preferred llms/models/efforts/versions:" pin instead when the subtask genuinely needs one specific tool/version.
 6. If you split the task, do not implement the parent task. Comment on the parent with the created subtask numbers and the reason for the split.
 7. If the task is already narrow enough, implement it in the current repository and make any necessary file changes.
 

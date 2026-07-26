@@ -59,31 +59,10 @@ final case class AgentTool(
           .between(pinned, java.time.LocalDate.now()) > AgentTool.MaxPriceAgeDays
       )
 
-  // The single place priority is computed: right before an agent gets
-  // selected/run (sorting, fallback, escalation, and prompt display all read
-  // this). Tier is derived from `strengths` (not a second hand-picked
-  // switch) and cost comes straight from the raw price fields, so there is
-  // exactly one implementation of "how good" and "how cheap" to keep in sync.
-  def priority: Int =
-    val vendorCoef = (if agent == Agent("claude") then 1 else 0) * 10000
-    val costRank = cost.map(value => math.round(value * 10000.0).toInt).getOrElse(500000)
-    // Scaled well below the 1,000,000-wide tier gap so a saturated vendor
-    // sinks to the bottom of its own tier (loses ties, tried last) but never
-    // gets bumped into a worse tier - a heavily-used vendor is still
-    // preferable to an incapable one.
-    val pressureRank = budgetPressure
-      .map(value => math.round(math.min(1.0, math.max(0.0, value)) * AgentTool.BudgetPressureScale).toInt)
-      .getOrElse(0)
-    tier * 1000000 + costRank + pressureRank + vendorCoef
-
-  private def tier: Int =
-    val markers = strengths.map(_.toLowerCase).toSet
-    val highTierMarkers =
-      Set("complex-reasoning", "deep-code-reasoning", "architecture", "evaluation")
-    val midTierMarkers = Set("source-of-truth", "refactoring", "focused-fixes")
-    if markers.exists(highTierMarkers.contains) then 0
-    else if markers.exists(midTierMarkers.contains) then 1
-    else 2
+  // No-requirements priority, kept for existing sort/prompt call sites.
+  // Formula, tunables, and requirements-aware scoring now live in
+  // Priority.scala (see that file for the "lower is better" contract).
+  def priority: Long = Priority.score(this, Map.empty, PriorityWeights.Default)
 
   def runner: TaskRunner =
     TaskRunner(
@@ -113,7 +92,7 @@ final case class AgentTool(
           .map(value => f"$$$value%.3f/task (${value / 0.010}%.0fx)")
           .getOrElse("unknown")
     val budgetValue = budgetPressure.map(value => f"${value * 100}%.0f%% used").getOrElse("unknown")
-    s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue cost=$costValue budget=$budgetValue priority=$priority"
+    s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue cost=$costValue budget=$budgetValue"
 
   private def optionMatches(
       configured: Option[String],
@@ -150,17 +129,6 @@ final case class AgentTool(
 object AgentTool:
   val MaxPriceAgeDays = 180
 
-  // Max cost-rank observed in practice is a few tens of thousands (see
-  // `priority`); keeping the pressure penalty in that same range means a
-  // saturated vendor loses tiebreaks against cheaper-but-similarly-priced
-  // tools without ever crossing a tier boundary on its own.
-  val BudgetPressureScale = 20000.0
-
-  // Past this fraction of a vendor's budget consumed, treat the tool as
-  // unavailable outright rather than merely deprioritized - avoids kicking
-  // off a task on a vendor that will run out mid-task.
-  val HardExhaustionThreshold = 0.97
-
   // aider is a multi-vendor runner (its `agent` field is always "aider");
   // the actual vendor being billed is encoded in the model id.
   def vendorKeyFor(agent: String, model: Option[String]): String =
@@ -172,7 +140,10 @@ object AgentTool:
         case None                              => agentLower
     else agentLower
 
-final case class AgentInventory(tools: List[AgentTool]):
+final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights = PriorityWeights.Default):
+  // Ascending: lower AgentTool.priority sorts first (see Priority.scala) - so
+  // this list is already best-first, and `.headOption` everywhere below picks
+  // the preferred tool, not an arbitrary one.
   lazy val availableTools: List[AgentTool] =
     tools.filter(_.available.value).sortBy(_.priority)
 
@@ -188,13 +159,34 @@ final case class AgentInventory(tools: List[AgentTool]):
       .headOption
       .orElse(defaultImplementor)
 
+  // Run-time runner choice: an explicit pinned `preferred` runner (evaluator
+  // wrote a concrete agent/model/effort/version, e.g. to reproduce a bug tied
+  // to one model) always wins outright. Otherwise, when the task instead
+  // carries abstract `requiredAbilities` (ability -> importance coefficient),
+  // rank every available implementor by Priority.score against them using
+  // this inventory's (possibly user-tuned) `weights` - so retuning
+  // priority-weights.json changes the pick on the next run without
+  // re-evaluating any task. With neither signal, fall back to
+  // `defaultImplementor` exactly as before.
+  def selectRunnerFor(
+      requiredAbilities: Map[String, Double],
+      preferred: List[TaskRunner]
+  ): Option[TaskRunner] =
+    if preferred.nonEmpty then selectRunner(preferred)
+    else if requiredAbilities.nonEmpty then
+      availableImplementors
+        .sortBy(tool => Priority.score(tool, requiredAbilities, weights))
+        .headOption
+        .map(_.runner)
+    else defaultImplementor
+
   def nextStrongerImplementor(runner: TaskRunner): Option[TaskRunner] =
     val implementors = availableImplementors
     implementors
       .find(_.matches(runner))
       .flatMap(current =>
         implementors
-          .filter(tool => tool.priority < current.priority)
+          .filter(_.agent != current.agent)
           .sortBy(_.priority)
           .lastOption
           .map(_.runner)
@@ -244,7 +236,8 @@ object AgentInventory:
   def load(root: os.Path): AgentInventory =
     val path = root / RelativeConfigPath
     val pressures = loadVendorPressures(root)
-    if os.exists(path) then parse(os.read(path), pressures).getOrElse(Fallback)
+    val weights = PriorityWeights.load(root)
+    if os.exists(path) then parse(os.read(path), pressures, weights).getOrElse(Fallback)
     else Fallback
 
   private def loadVendorPressures(root: os.Path): Map[String, Double] =
@@ -278,14 +271,22 @@ object AgentInventory:
           .toMap
     }.getOrElse(Map.empty)
 
-  private def parse(value: String, pressures: Map[String, Double]): Option[AgentInventory] =
+  private def parse(
+      value: String,
+      pressures: Map[String, Double],
+      weights: PriorityWeights
+  ): Option[AgentInventory] =
     scala.util.Try {
       val json = ujson.read(value)
-      val tools = json("tools").arr.toList.flatMap(parseTool(_, pressures))
-      AgentInventory(tools)
+      val tools = json("tools").arr.toList.flatMap(parseTool(_, pressures, weights))
+      AgentInventory(tools, weights)
     }.toOption
 
-  private def parseTool(value: ujson.Value, pressures: Map[String, Double]): Option[AgentTool] =
+  private def parseTool(
+      value: ujson.Value,
+      pressures: Map[String, Double],
+      weights: PriorityWeights
+  ): Option[AgentTool] =
     value match
       case ujson.Obj(fields) =>
         for id <- stringField(fields, "id")
@@ -295,7 +296,7 @@ object AgentInventory:
           val vendorKey = AgentTool.vendorKeyFor(agent, model)
           val budgetPressure = pressures.get(vendorKey)
           val jsonAvailable = boolField(fields, "available").getOrElse(false)
-          val hardExhausted = budgetPressure.exists(_ >= AgentTool.HardExhaustionThreshold)
+          val hardExhausted = budgetPressure.exists(_ >= weights.hardExhaustionThreshold)
           AgentTool(
             id = AgentToolId(id),
             agent = Agent(agent),

@@ -74,3 +74,65 @@ class TaskMetadataPhaseSuite extends munit.FunSuite:
     )
     // A non-empty mark keeps write() from treating the metadata as empty.
     assert(!TaskMetadata(implemented = Some("task/7")).isEmpty)
+
+  test("parse reads a Required abilities/importance block into requiredAbilities"):
+    val md = TaskMetadata.parse(
+      """Task metadata:
+        |Evaluation: ready
+        |Execution: implement
+        |Required abilities/importance:
+        |- complex-reasoning: 1.0
+        |- scala: 0.6""".stripMargin
+    )
+    assertEquals(md.requiredAbilities, Map("complex-reasoning" -> 1.0, "scala" -> 0.6))
+
+  test("malformed ability bullets are skipped, not fatal"):
+    val md = TaskMetadata.parse(
+      """Task metadata:
+        |Required abilities/importance:
+        |- complex-reasoning: 1.0
+        |- not-a-number: abc
+        |- scala""".stripMargin
+    )
+    assertEquals(md.requiredAbilities, Map("complex-reasoning" -> 1.0))
+
+  test("absent Required abilities/importance leaves it empty (backward compatibility)"):
+    val md = TaskMetadata.parse(
+      """Task metadata:
+        |Evaluation: ready
+        |Execution: implement""".stripMargin
+    )
+    assertEquals(md.requiredAbilities, Map.empty)
+
+  test("Required abilities/importance round-trips through parse -> render -> parse"):
+    val original = TaskMetadata.parse(
+      """Task metadata:
+        |Evaluation: ready
+        |Execution: implement
+        |Required abilities/importance:
+        |- complex-reasoning: 1.0
+        |- scala: 0.6""".stripMargin
+    )
+    val reparsed = TaskMetadata.parse(TaskMetadata.render(original).value)
+    assertEquals(reparsed.requiredAbilities, Map("complex-reasoning" -> 1.0, "scala" -> 0.6))
+
+  test("Monoid merges requiredAbilityLines right-biased, same as runnerLines"):
+    val older = TaskMetadata.parse(
+      """Task metadata:
+        |Required abilities/importance:
+        |- complex-reasoning: 1.0""".stripMargin
+    )
+    val newer = TaskMetadata.parse(
+      """Task metadata:
+        |Required abilities/importance:
+        |- scala: 0.6""".stripMargin
+    )
+    assertEquals(
+      Monoid[TaskMetadata].combine(older, newer).requiredAbilities,
+      Map("scala" -> 0.6)
+    )
+    // newer without an abilities block falls back to older's.
+    assertEquals(
+      Monoid[TaskMetadata].combine(older, TaskMetadata()).requiredAbilities,
+      Map("complex-reasoning" -> 1.0)
+    )
