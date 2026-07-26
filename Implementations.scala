@@ -285,37 +285,23 @@ object Impl:
       Either.cond(!selection.context.parallelExecution.value, selection, selection)
     }
 
-  // One root candidate raising an uncaught error (e.g. a non-publication task
-  // failure) must not take down every other queued candidate in the same batch.
-  // Publication is different: an unpushed branch is not a finished candidate,
-  // so push/prePush failures stay fatal and stop the run instead of silently
-  // moving on to another task.
+  // One root candidate raising an uncaught error must not take down every
+  // other queued candidate in the same batch. Push/prePush failures should be
+  // handled by the publication repair loop first; if one still escapes, report
+  // it against that candidate and keep the outer run moving.
   def recoverCandidateFailure[F[_]: Sync]: -->[F, (TaskCandidate, Throwable), RunSummary] =
     Kleisli { case (candidate, error) =>
       val message = Option(error.getMessage).getOrElse(error.toString)
-      if isCriticalPublicationFailure(error) then
-        progress(
-          s"Task #${candidate.issue.number.value} failed during required publication: $message"
-        ) *> Sync[F].raiseError(error)
-      else
-        progress(
-          s"Task #${candidate.issue.number.value} failed unrecoverably: $message. Skipping and continuing with remaining tasks."
-        ).as(
-          RunSummary(
-            status = Status("error"),
-            message = Message5(message),
-            task = Some(candidate.issue)
-          )
+      progress(
+        s"Task #${candidate.issue.number.value} failed unrecoverably: $message. Skipping and continuing with remaining tasks."
+      ).as(
+        RunSummary(
+          status = Status("error"),
+          message = Message5(message),
+          task = Some(candidate.issue)
         )
+      )
     }
-
-  def isCriticalPublicationFailure(error: Throwable): Boolean =
-    val message = Option(error.getMessage).getOrElse(error.toString)
-    message.contains("\"git\" \"push\"") ||
-    message.contains("git push") ||
-    message.contains("failed to push some refs") ||
-    message.contains("mill prePush") ||
-    message.contains("prePush hook")
 
   def lastSummary[F[_]: Sync]: -->[F, List[RunSummary], RunSummary] =
     Kleisli.fromFunction { summaries =>
@@ -1443,6 +1429,7 @@ Final answer contract:
   ): Kleisli[F, PublishRequest, Boolean] =
     Kleisli.apply { request =>
       val baseBranch = request.baseBranch.getOrElse(BranchName("master"))
+      val pushRequest = PushRequest(request.worktreePath, request.branchName, request.task, request.runner)
       for
         autoMerged <- git[F].mergeBaseBranch(
           request.worktreePath,
@@ -1452,7 +1439,7 @@ Final answer contract:
           if autoMerged then
             progress(
               s"Automatically merged $baseBranch into ${request.branchName} for task #${request.task.number}."
-            ) *> git[F].push(request.worktreePath, request.branchName).as(true)
+            ) *> repairablePush(progress).run(pushRequest).as(true)
           else
             for
               _ <- progress(
@@ -1480,9 +1467,7 @@ Final answer contract:
                       Some(
                         s"Merge $baseBranch into ${request.branchName}, resolve conflicts"
                       )
-                    ) *> git[F]
-                    .push(request.worktreePath, request.branchName)
-                    .as(true)
+                    ) *> repairablePush(progress).run(pushRequest).as(true)
             yield resolved
       yield resolved
     }

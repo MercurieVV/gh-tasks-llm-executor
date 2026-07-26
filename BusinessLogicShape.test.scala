@@ -67,7 +67,7 @@ class BusinessLogicShapeSuite extends CatsEffectSuite:
         .map(result => assertEquals(result, summary(s"ran ${ParallelArrows.MaxParallelism}")))
     }
 
-  test("a critical push failure aborts the candidate batch instead of continuing"):
+  test("an escaped push failure is reported for that candidate and does not break the batch"):
     Ref[IO].of(List.empty[String]).flatMap { events =>
       val pushFailure = RuntimeException("""Command failed with exit code 1: "git" "push" "-u" "origin" "task-1"""")
       val runOnce = Kleisli { (candidate: TaskCandidate) =>
@@ -87,8 +87,8 @@ class BusinessLogicShapeSuite extends CatsEffectSuite:
         .attempt
         .flatMap { result =>
           events.get.map { seen =>
-            assertEquals(result, Left(pushFailure))
-            assertEquals(seen, List("start1"))
+            assertEquals(result, Right(summary("ran 2")))
+            assertEquals(seen, List("start1", "start2", "end2"))
           }
         }
     }
