@@ -11,15 +11,26 @@ BASE="https://raw.githubusercontent.com/MercurieVV/gh-tasks-llm-executor/${REF}"
 
 FILES=(
   project-remote.scala
-  ArrowLogging.scala
-  main.scala
-  Git.scala
-  github.scala
-  IssueClaim.scala
   AgentExecutor.scala
   AgentInventory.scala
-  TaskLogger.scala
+  AgentRunnersDiscovery.scala
+  ArrowCapabilities.scala
+  ArrowLogging.scala
   BusinessLogic.scala
+  Cli.scala
+  EvaluationArrows.scala
+  Git.scala
+  github.scala
+  Implementations.scala
+  IssueClaim.scala
+  main.scala
+  ParallelArrows.scala
+  Priority.scala
+  RunEnv.scala
+  TaskLogger.scala
+  TokenUsage.scala
+  VendorBudgets.scala
+  Wiring.scala
   taskMetadata.scala
 )
 
