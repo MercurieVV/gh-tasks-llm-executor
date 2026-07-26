@@ -135,9 +135,10 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     val started = System.currentTimeMillis()
     val lastActivity = AtomicLong(started)
     val output = StringBuilder()
-    val command = runner.command(prompt, allowedTools, jsonSchema, cwd = Some(cwd))
+    val promptForRun = runner.effectivePrompt(prompt, allowedTools, cwd = Some(cwd))
+    val command = runner.command(promptForRun, allowedTools, jsonSchema, cwd = Some(cwd))
     TaskLogger.unsafeTrace(
-      s"agent command cwd=$cwd args=${commandForLog(command, prompt)} promptChars=${prompt.value.length}"
+      s"agent command cwd=$cwd args=${commandForLog(command, promptForRun)} promptChars=${promptForRun.value.length}"
     )
     val process = ProcessBuilder(command*)
       .directory(cwd.toIO)
@@ -147,7 +148,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       os.RelPath(s"agent-${process.pid()}-${fileSafe(runner.agent)}")
     TaskLogger.unsafeWriteArtifact(
       runLogDir / "prompt.txt",
-      prompt.value + System.lineSeparator()
+      promptForRun.value + System.lineSeparator()
     )
     TaskLogger.unsafeTrace(
       s"agent process started pid=${process.pid()} alive=${process.isAlive} logDir=$runLogDir"

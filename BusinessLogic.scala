@@ -115,6 +115,7 @@ final case class TaskRunner(
       jsonSchema: Option[String] = None,
       cwd: Option[os.Path] = None
   ): Seq[String] =
+    val promptForRun = effectivePrompt(prompt, allowedTools, cwd)
     agent.value match
       case "claude" =>
         val mcpConfig = workspaceFile(cwd, os.rel / ".agents" / "mcp_config.json")
@@ -125,7 +126,7 @@ final case class TaskRunner(
           (if effectiveAllowedTools.isEmpty then Nil
            else Seq("--allowedTools") ++ effectiveAllowedTools) ++
           jsonSchema.toList.flatMap(schema => Seq("--json-schema", schema)) ++
-          Seq("-p", prompt.value)
+          Seq("-p", promptForRun.value)
       case "codex" =>
         val mappedModel = (model, effort) match
           case (Some("gpt-5") | Some("gpt-5-codex"), Some("medium")) =>
@@ -139,7 +140,7 @@ final case class TaskRunner(
           mappedModel.toList.flatMap(value => Seq("--model", value)) ++
           effort.toList.flatMap(value => Seq("--config", s"model_reasoning_effort=$value")) ++
           codexMcpConfigArgs(cwd) ++
-          Seq(prompt.value)
+          Seq(promptForRun.value)
       case "aider" =>
         // DeepSeek retired deepseek-chat/deepseek-reasoner in favor of
         // deepseek-v4-flash/deepseek-v4-pro. Runner ids/model fields keep the
@@ -150,20 +151,38 @@ final case class TaskRunner(
           case Some("deepseek/deepseek-reasoner") => Some("deepseek/deepseek-v4-pro")
           case other                              => other
         Seq(agent.value) ++ mappedModel.toList.flatMap(value => Seq("--model", value)) ++
-          Seq("--yes-always", "--no-auto-commits", "--message", prompt.value)
+          Seq("--yes-always", "--no-auto-commits", "--message", promptForRun.value)
       case "gemini" =>
         Seq(agent.value) ++ model.toList.flatMap(value => Seq("-m", value)) ++
-          Seq("-p", prompt.value)
+          Seq("-p", promptForRun.value)
       case "agy" =>
         Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
           effort.toList.flatMap(value => Seq("--effort", value)) ++
-          Seq("--print", prompt.value)
+          Seq("--print", promptForRun.value)
       case _ =>
         Seq(agent.value) ++ model.toList.flatMap(value => Seq("-m", value)) ++
-          Seq("-p", prompt.value)
+          Seq("-p", promptForRun.value)
+
+  def effectivePrompt(
+      prompt: AgentPrompt,
+      allowedTools: Seq[String] = Nil,
+      cwd: Option[os.Path] = None
+  ): AgentPrompt =
+    if shouldInjectScalaSemanticInstruction(allowedTools, cwd) &&
+      !prompt.value.contains(ScalaSemanticInstructionHeader)
+    then AgentPrompt(s"$ScalaSemanticInstruction\n\n${prompt.value}")
+    else prompt
 
   private def workspaceFile(cwd: Option[os.Path], path: os.RelPath): Option[os.Path] =
     cwd.map(_ / path).filter(os.exists(_))
+
+  private def shouldInjectScalaSemanticInstruction(
+      allowedTools: Seq[String],
+      cwd: Option[os.Path]
+  ): Boolean =
+    Set("claude", "codex").contains(agent.value) &&
+      allowedTools.nonEmpty &&
+      workspaceFile(cwd, os.rel / ".agents" / "mcp_config.json").nonEmpty
 
   private def codexMcpConfigArgs(cwd: Option[os.Path]): Seq[String] =
     workspaceFile(cwd, os.rel / ".agents" / "mcp_config.json").toList.flatMap { path =>
@@ -188,6 +207,17 @@ final case class TaskRunner(
 
   private def tomlStringArray(values: Seq[String]): String =
     values.map(tomlString).mkString("[", ",", "]")
+
+  private val ScalaSemanticInstructionHeader =
+    "ScalaSemantic MCP requirement:"
+
+  private val ScalaSemanticInstruction =
+    s"""$ScalaSemanticInstructionHeader
+       |- Before inspecting or editing Scala source, call the ScalaSemantic MCP tools.
+       |- Use `set_workspace_root` for the current worktree first.
+       |- Use `annotated_source` to read `.scala` files and semantic tools such as `find_symbol`, `find_usages`, `type_at_position`, `method_signature`, `members`, `class_hierarchy`, `resolve_implicits`, or `call_path` for Scala code questions.
+       |- Do not use shell text tools such as `cat`, `sed`, `rg`, or `grep` to inspect `.scala` source unless ScalaSemantic MCP is unavailable or failing; if that happens, state the failure in your final answer.
+       |""".stripMargin
 
   private val ScalaSemanticClaudeTools = Seq(
     "mcp__scala-semantic__annotated_source",

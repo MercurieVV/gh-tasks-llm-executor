@@ -91,6 +91,7 @@ object WorktreeStart:
     val filesToCopy = Seq(
       Path(".agents/mcp_config.json", repoRoot),
       Path(".agents/AGENTS.md", repoRoot),
+      Path(".mcp.json", repoRoot),
       Path(".codex/config.toml", repoRoot),
       Path(".cursorrules", repoRoot),
       Path("scala-rules.md", repoRoot)

@@ -16,6 +16,9 @@ class TaskRunnerCommandSuite extends munit.FunSuite:
     assert(command.contains("Read"))
     assert(command.contains("mcp__scala-semantic__annotated_source"))
     assert(command.contains("mcp__scala-semantic__find_symbol"))
+    assert(command.last.contains("ScalaSemantic MCP requirement:"))
+    assert(command.last.contains("Use `set_workspace_root` for the current worktree first."))
+    assert(command.last.contains(prompt.value))
 
   test("claude command does not add MCP args without workspace MCP config"):
     val root = os.temp.dir()
@@ -26,9 +29,10 @@ class TaskRunnerCommandSuite extends munit.FunSuite:
 
     assert(!command.contains("--mcp-config"))
     assert(!command.contains("mcp__scala-semantic__annotated_source"))
+    assert(!command.exists(_.contains("ScalaSemantic MCP requirement:")))
     assertEquals(command, Seq("claude", "--allowedTools", "Read", "-p", prompt.value))
 
-  test("codex command maps workspace MCP JSON to config overrides"):
+  test("codex command maps workspace MCP JSON to config overrides and injects ScalaSemantic prompt"):
     val root = os.temp.dir()
     os.makeDir.all(root / ".agents")
     os.write(
@@ -38,9 +42,22 @@ class TaskRunnerCommandSuite extends munit.FunSuite:
 
     val command =
       TaskRunner(AgentBinary("codex"), Some("gpt-5"), Some("low"), None)
-        .command(prompt, cwd = Some(root))
+        .command(prompt, allowedTools = Seq("Read"), cwd = Some(root))
 
     assert(command.contains("--config"))
     assert(command.contains("mcp_servers.scala-semantic.command=\"/repo/scalasemantic-mcp.sh\""))
     assert(command.contains("""mcp_servers.scala-semantic.args=["serve","."]"""))
-    assertEquals(command.last, prompt.value)
+    assert(command.last.contains("ScalaSemantic MCP requirement:"))
+    assert(command.last.contains("Do not use shell text tools"))
+    assert(command.last.contains(prompt.value))
+
+  test("ScalaSemantic prompt injection is idempotent"):
+    val root = os.temp.dir()
+    os.makeDir.all(root / ".agents")
+    os.write(root / ".agents" / "mcp_config.json", """{"mcpServers":{}}""")
+    val runner = TaskRunner(AgentBinary("claude"), Some("sonnet"), None, None)
+
+    val once = runner.effectivePrompt(prompt, allowedTools = Seq("Read"), cwd = Some(root))
+    val twice = runner.effectivePrompt(once, allowedTools = Seq("Read"), cwd = Some(root))
+
+    assertEquals(twice.value, once.value)
