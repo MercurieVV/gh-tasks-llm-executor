@@ -332,6 +332,8 @@ final case class ProgramArrows[-->[_, _]](
     loadOpenIssues: TaskSelection --> TaskSelection,
     // Left = run root candidates concurrently (--parallel), Right = one by one.
     routeParallelExecution: TaskSelection --> Either[TaskSelection, TaskSelection],
+    // One candidate's uncaught failure must not abort the rest of the batch.
+    recoverCandidateFailure: (TaskCandidate, Throwable) --> RunSummary,
     lastSummary: List[RunSummary] --> RunSummary,
     toProgramSays: RunSummary --> ProgramSays[ujson.Value]
 )
@@ -675,14 +677,26 @@ final case class BusinessLogic[-->[_, _]](
       attempt: ArrowAttempt[-->]
   ): TaskSelection --> RunSummary =
     val candidates = arrow.lift((selection: TaskSelection) => selection.candidates)
+    val isolated = runCandidateIsolated
     programArrows.loadOpenIssues >>>
       programArrows.routeParallelExecution >>>
-      ((candidates >>> traverse.parAll(runCandidate)) |||
-        (candidates >>> traverse.all(runCandidate))) >>>
+      ((candidates >>> traverse.parAll(isolated)) |||
+        (candidates >>> traverse.all(isolated))) >>>
       programArrows.lastSummary
 
   def runCandidate(using ArrowChoice[-->], ArrowDefer[-->]): TaskCandidate --> RunSummary =
     traversalArrows.runCandidate
+
+  // Wraps runCandidate so one candidate's uncaught failure becomes a RunSummary
+  // for that candidate instead of aborting every other candidate in the batch
+  // (traverse.all/parAll propagate a raised error across the whole list).
+  def runCandidateIsolated(using
+      arrow: ArrowChoice[-->],
+      defer: ArrowDefer[-->],
+      attempt: ArrowAttempt[-->]
+  ): TaskCandidate --> RunSummary =
+    attempt.attempt(runCandidate) >>>
+      (programArrows.recoverCandidateFailure ||| arrow.lift(_._2))
 
   def executeRecursive(using
       ArrowChoice[-->],

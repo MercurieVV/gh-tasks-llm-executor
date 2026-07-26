@@ -282,6 +282,23 @@ object Impl:
       Either.cond(!selection.context.parallelExecution.value, selection, selection)
     }
 
+  // One root candidate raising an uncaught error (e.g. a repair loop that
+  // exhausted its retries) must not take down every other queued candidate
+  // in the same batch - this turns it into a RunSummary instead so
+  // executeSelectedCandidates can keep going.
+  def recoverCandidateFailure[F[_]: Sync]: -->[F, (TaskCandidate, Throwable), RunSummary] =
+    Kleisli { case (candidate, error) =>
+      progress(
+        s"Task #${candidate.issue.number.value} failed unrecoverably: ${Option(error.getMessage).getOrElse(error.toString)}. Skipping and continuing with remaining tasks."
+      ).as(
+        RunSummary(
+          status = Status("error"),
+          message = Message5(Option(error.getMessage).getOrElse(error.toString)),
+          task = Some(candidate.issue)
+        )
+      )
+    }
+
   def lastSummary[F[_]: Sync]: -->[F, List[RunSummary], RunSummary] =
     Kleisli.fromFunction { summaries =>
       summaries.lastOption.getOrElse(
@@ -1508,10 +1525,17 @@ Final answer contract:
 
   // scala.io.StdIn.readLine() blocks with no timeout support, so read on a
   // daemon thread and join with a deadline; an unanswered prompt must not
-  // hang the process forever.
+  // hang the process forever. Closed/non-interactive stdin (the normal case
+  // for this executor running unattended) makes readLine() return null
+  // immediately - that must fall through to the same "no answer" default-yes
+  // path as a real timeout, not be treated as an explicit empty answer.
   def readLineWithTimeout(timeout: FiniteDuration): Option[String] =
     val result = new java.util.concurrent.atomic.AtomicReference[String](null)
-    val reader = new Thread(() => result.set(Option(scala.io.StdIn.readLine()).getOrElse("")))
+    val reader = new Thread(() =>
+      scala.io.StdIn.readLine() match
+        case null => ()
+        case line => result.set(line)
+    )
     reader.setDaemon(true)
     reader.start()
     reader.join(timeout.toMillis)

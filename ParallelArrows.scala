@@ -1,6 +1,8 @@
 import cats.Parallel
 import cats.data.Kleisli
+import cats.effect.kernel.Concurrent
 import cats.syntax.parallel.*
+import cats.effect.syntax.all.*
 
 /** Parallel analogs of `ArrowChoice`'s `***`/`&&&` for Kleisli arrows backed by an effect `F` with a `Parallel[F]`
   * instance (e.g. `cats.effect.IO`).
@@ -27,8 +29,15 @@ object ParallelArrows:
   ): Kleisli[F, A, (B, C)] =
     Kleisli(a => (left.run(a), right.run(a)).parTupled)
 
-  /** `List`-shaped generalization of `parSplit`/`parMerge` past fixed arity: lifts one arrow over an independent-input
-    * list so every element runs concurrently, through the same `Parallel[F]` instance.
+  /** Root candidates commonly hit the same shared resources (issue tracker rate limits, vendor budgets) - running
+    * every candidate side by side risks a thundering herd, so this caps how many run at once rather than letting
+    * `parAll` fan out unbounded.
     */
-  def parAll[F[_]: Parallel, A, B](one: Kleisli[F, A, B]): Kleisli[F, List[A], List[B]] =
-    Kleisli(inputs => inputs.parTraverse(one.run))
+  val MaxParallelism: Int = 2
+
+  /** `List`-shaped generalization of `parSplit`/`parMerge` past fixed arity: lifts one arrow over an independent-input
+    * list so every element runs concurrently (up to `MaxParallelism` at a time), through the same `Concurrent[F]`
+    * instance.
+    */
+  def parAll[F[_]: Concurrent, A, B](one: Kleisli[F, A, B]): Kleisli[F, List[A], List[B]] =
+    Kleisli(inputs => inputs.parTraverseN(MaxParallelism)(one.run))

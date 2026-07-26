@@ -48,6 +48,7 @@ object BusinessLogicFixture:
       noTaskSummary = unexpected("noTaskSummary"),
       loadOpenIssues = unexpected("loadOpenIssues"),
       routeParallelExecution = unexpected("routeParallelExecution"),
+      recoverCandidateFailure = unexpected("recoverCandidateFailure"),
       lastSummary = unexpected("lastSummary"),
       toProgramSays = unexpected("toProgramSays")
     ),

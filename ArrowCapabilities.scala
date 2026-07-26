@@ -54,7 +54,7 @@ object ArrowTraverse:
   def apply[-->[_, _]](using instance: ArrowTraverse[-->]): ArrowTraverse[-->] =
     instance
 
-  given kleisli[F[_]: Monad: Parallel]: ArrowTraverse[[A, B] =>> Kleisli[F, A, B]] with
+  given kleisli[F[_]: Monad: Parallel: cats.effect.kernel.Concurrent]: ArrowTraverse[[A, B] =>> Kleisli[F, A, B]] with
     def all[A, B](one: Kleisli[F, A, B]): Kleisli[F, List[A], List[B]] =
       Kleisli(inputs => inputs.traverse(one.run))
 

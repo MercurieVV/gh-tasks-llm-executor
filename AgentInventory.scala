@@ -65,6 +65,7 @@ final case class AgentTool(
   // switch) and cost comes straight from the raw price fields, so there is
   // exactly one implementation of "how good" and "how cheap" to keep in sync.
   def priority: Int =
+    val vendorCoef = (if agent == Agent("claude") then 1 else 0) * 10000
     val costRank = cost.map(value => math.round(value * 10000.0).toInt).getOrElse(500000)
     // Scaled well below the 1,000,000-wide tier gap so a saturated vendor
     // sinks to the bottom of its own tier (loses ties, tried last) but never
@@ -73,7 +74,7 @@ final case class AgentTool(
     val pressureRank = budgetPressure
       .map(value => math.round(math.min(1.0, math.max(0.0, value)) * AgentTool.BudgetPressureScale).toInt)
       .getOrElse(0)
-    tier * 1000000 + costRank + pressureRank
+    tier * 1000000 + costRank + pressureRank + vendorCoef
 
   private def tier: Int =
     val markers = strengths.map(_.toLowerCase).toSet

@@ -53,17 +53,18 @@ class BusinessLogicShapeSuite extends CatsEffectSuite:
         }
     }
 
-  test("--parallel actually overlaps candidates"):
-    // Every candidate blocks until all three have started. Only a genuinely
-    // concurrent traversal gets past this; a sequential one would time out.
-    CountDownLatch[IO](3).flatMap { latch =>
+  test("--parallel overlaps candidates up to MaxParallelism"):
+    // Every candidate blocks until MaxParallelism of them have started. A sequential traversal
+    // never reaches that count and times out; a genuinely concurrent one (bounded to exactly
+    // MaxParallelism at a time) gets past it for each successive batch.
+    CountDownLatch[IO](ParallelArrows.MaxParallelism).flatMap { latch =>
       val runOnce = Kleisli { (candidate: TaskCandidate) =>
         latch.release *> latch.await.as(summary(s"ran ${candidate.issue.number.value}"))
       }
       withRunOnce(runOnce).executeSelectedCandidates
-        .run(selection(parallel = true, List(1, 2, 3)))
+        .run(selection(parallel = true, List.range(1, ParallelArrows.MaxParallelism + 1)))
         .timeout(10.seconds)
-        .map(result => assertEquals(result, summary("ran 3")))
+        .map(result => assertEquals(result, summary(s"ran ${ParallelArrows.MaxParallelism}")))
     }
 
   test("a vanished Pull Request falls back to the real run pipeline"):

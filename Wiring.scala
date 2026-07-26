@@ -46,6 +46,7 @@ object Wiring:
         noTaskSummary = Impl.noTaskSummary,
         loadOpenIssues = Impl.loadOpenIssues,
         routeParallelExecution = Impl.routeParallelExecution,
+        recoverCandidateFailure = Impl.recoverCandidateFailure,
         lastSummary = Impl.lastSummary,
         toProgramSays = Impl.toProgramSays
       ),
