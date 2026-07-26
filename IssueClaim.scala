@@ -93,7 +93,16 @@ object IssueClaim:
             .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
         )
         _ <-
-          if result.exitCode === 0 then progress(s"Claimed task #$taskNumber.")
+          if result.exitCode === 0 then
+            progress(s"Claimed task #$taskNumber.") *> (
+              if Cli.fetchOriginEnabled then
+                progress(s"Fetching branch changes for task #$taskNumber from origin...") *>
+                  F.blocking {
+                    os.proc("git", "fetch", "origin", s"task-${taskNumber.value}")
+                      .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+                  }.void
+              else F.unit
+            )
           else
             val stderr = result.err.text()
             if isRefConflict(stderr) then

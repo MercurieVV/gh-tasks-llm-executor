@@ -26,7 +26,16 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
               (root, worktreePath, branchName)
           } *> acquireWorktree).run(input)
         case false =>
-          call(
+          val fetch =
+            if Cli.fetchOriginEnabled then
+              hasRemote(root).flatMap {
+                case true =>
+                  progress("Fetching all changes from origin...") *>
+                    call(root, "git", "fetch", "--prune", "origin").attempt.void
+                case false => F.unit
+              }
+            else F.unit
+          fetch *> call(
             root,
             "git",
             "branch",
@@ -349,12 +358,37 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       }
 
   // Runs the repo's prePush hook (tests/lint/format); raises on rejection.
-  // Repair/retry on failure is an orchestration concern, not a git concern —
-  // see main.scala's publishRemote.
+  // A rejection is either mechanical (remote moved — fixed here for free with
+  // a rebase+retry, no agent needed) or a real hook failure (failing
+  // test/lint — needs code judgment). Only the latter should ever reach a
+  // repair agent, so the mechanical case is handled inline; repair/retry for
+  // genuine failures stays an orchestration concern — see main.scala's
+  // publishRemote.
   def push: Kleisli[F, (os.Path, BranchName), Unit] =
     Kleisli.apply { case (worktreePath, branchName) =>
-      call(worktreePath, "git", "push", "-u", "origin", branchName.value)
+      pushWithRebaseRetry(worktreePath, branchName, MaxPushRebaseRetries)
     }
+
+  private val MaxPushRebaseRetries = 2
+
+  private def pushWithRebaseRetry(
+      worktreePath: os.Path,
+      branchName: BranchName,
+      retriesLeft: Int
+  ): F[Unit] =
+    call(worktreePath, "git", "push", "-u", "origin", branchName.value).handleErrorWith { error =>
+      if retriesLeft > 0 && isNonFastForwardRejection(error) then
+        progress(
+          s"Push rejected (remote moved); rebasing onto origin/$branchName and retrying ($retriesLeft left)..."
+        ) *> call(worktreePath, "git", "pull", "--rebase", "origin", branchName.value) *>
+          pushWithRebaseRetry(worktreePath, branchName, retriesLeft - 1)
+      else F.raiseError(error)
+    }
+
+  private def isNonFastForwardRejection(error: Throwable): Boolean =
+    val message = Option(error.getMessage).getOrElse("")
+    Seq("[rejected]", "non-fast-forward", "fetch first", "failed to push some refs")
+      .exists(message.contains)
 
   def hasRemote: Kleisli[F, os.Path, Boolean] =
     Kleisli.apply { root =>

@@ -59,3 +59,11 @@ object Cli:
       .flatMap(value => Try(value.trim.toLong).toOption)
       .filter(_ > 0)
       .getOrElse(fallback)
+
+  def envBoolean(name: String, fallback: Boolean): Boolean =
+    sys.env
+      .get(name)
+      .map(value => Set("1", "true", "yes", "on").contains(value.trim.toLowerCase))
+      .getOrElse(fallback)
+
+  def fetchOriginEnabled: Boolean = envBoolean("GH_TASKS_FETCH_ORIGIN", false)
