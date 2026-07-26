@@ -46,6 +46,8 @@ object Cli:
           loop(tail, clean)
         case "--recursive" :: tail =>
           loop(tail, clean)
+        case "--parallel" :: tail =>
+          loop(tail, clean)
         case head :: tail =>
           loop(tail, head :: clean)
 

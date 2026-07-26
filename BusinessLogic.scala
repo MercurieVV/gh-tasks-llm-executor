@@ -143,6 +143,13 @@ final case class TaskRunner(
           case other                               => other
         Seq(agent.value) ++ mappedModel.toList.flatMap(value => Seq("--model", value)) ++
           Seq("--yes-always", "--no-auto-commits", "--message", prompt.value)
+      case "gemini" =>
+        Seq(agent.value) ++ model.toList.flatMap(value => Seq("-m", value)) ++
+          Seq("-p", prompt.value)
+      case "agy" =>
+        Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
+          effort.toList.flatMap(value => Seq("--effort", value)) ++
+          Seq("--print", prompt.value)
       case _ =>
         Seq(agent.value) ++ model.toList.flatMap(value => Seq("-m", value)) ++
           Seq("-p", prompt.value)

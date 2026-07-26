@@ -130,6 +130,8 @@ def tool(
   val claude = probe("claude")
   val codex = probe("codex")
   val aider = probe("aider")
+  val gemini = probe("gemini")
+  val agy = probe("agy")
 
   val claudeModels =
     envList("AGENT_RUNNER_CLAUDE_MODELS", List("opus", "sonnet", "haiku"))
@@ -140,6 +142,28 @@ def tool(
   val aiderDeepseekModels = envList(
     "AGENT_RUNNER_AIDER_DEEPSEEK_MODELS",
     List("deepseek/deepseek-chat", "deepseek/deepseek-reasoner")
+  )
+  val geminiModels =
+    envList("AGENT_RUNNER_GEMINI_MODELS", List("gemini-3.1-pro", "gemini-3.6-flash"))
+  // agy (antigravity-cli) multiplexes several backend vendors behind one
+  // binary; `agy models` is the authoritative list (effort is baked into the
+  // gemini ids, absent from the rest) so ids are taken verbatim rather than
+  // cross-joined with a separate efforts list like codex.
+  val agyModels = envList(
+    "AGENT_RUNNER_AGY_MODELS",
+    List(
+      "gemini-3.6-flash-high",
+      "gemini-3.6-flash-medium",
+      "gemini-3.6-flash-low",
+      "gemini-3.5-flash-high",
+      "gemini-3.5-flash-medium",
+      "gemini-3.5-flash-low",
+      "gemini-3.1-pro-high",
+      "gemini-3.1-pro-low",
+      "claude-sonnet-4-6",
+      "claude-opus-4-6-thinking",
+      "gpt-oss-120b-medium"
+    )
   )
 
   val claudeTools =
@@ -284,12 +308,77 @@ def tool(
       )
     }
 
+  val geminiTools =
+    geminiModels.zipWithIndex.map { case (model, index) =>
+      val strengths =
+        if model.contains("pro") then
+          List("complex-reasoning", "scala-code", "plan", "source-of-truth", "implement")
+        else List("scala-code", "focused-fixes", "implement", "test")
+      val price = modelPrices.get(priceKey("gemini", model))
+      tool(
+        id = s"gemini-$model",
+        agent = "gemini",
+        model = model,
+        effort = None,
+        version = gemini.version,
+        roles = List("implementor"),
+        jobTypes = List(
+          "scala",
+          "tests",
+          "repo-editing",
+          "debugging",
+          "plan",
+          "source-of-truth",
+          "implement",
+          "test"
+        ),
+        strengths = strengths,
+        available = gemini.available,
+        probe = gemini,
+        price = price
+      )
+    }
+
+  val agyTools =
+    agyModels.zipWithIndex.map { case (model, index) =>
+      val lower = model.toLowerCase
+      val strengths =
+        if lower.contains("opus") || lower.contains("thinking") then
+          List("complex-reasoning", "architecture", "plan", "source-of-truth", "implement")
+        else if lower.contains("pro") || lower.contains("sonnet") then
+          List("scala-code", "debugging", "source-of-truth", "implement")
+        else List("small-edits", "mechanical-changes", "implement", "test")
+      val price = modelPrices.get(priceKey("agy", model))
+      tool(
+        id = s"agy-$model",
+        agent = "agy",
+        model = model,
+        effort = None,
+        version = agy.version,
+        roles = List("implementor"),
+        jobTypes = List(
+          "scala",
+          "tests",
+          "repo-editing",
+          "debugging",
+          "plan",
+          "source-of-truth",
+          "implement",
+          "test"
+        ),
+        strengths = strengths,
+        available = agy.available,
+        probe = agy,
+        price = price
+      )
+    }
+
   val json = ujson.Obj(
     "schemaVersion" -> 1,
     "generatedBy" -> "scripts/discover-agent-runners.scala",
     "generatedAtEpochMillis" -> System.currentTimeMillis(),
     "metadataFormat" -> "preferred llms/models/efforts/versions",
-    "tools" -> (claudeTools ++ codexTools ++ aiderTools)
+    "tools" -> (claudeTools ++ codexTools ++ aiderTools ++ geminiTools ++ agyTools)
   )
 
   os.makeDir.all(configDir)
