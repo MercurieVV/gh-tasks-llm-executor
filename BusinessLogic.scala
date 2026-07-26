@@ -566,8 +566,8 @@ final case class ResumeTaskArrows[-->[_, _]](
 /** Publishing a branch through the GitHub remote: push it, then open and merge its Pull Request.
   *
   * Both steps are the same repair loop at different actions - a rejected `git push` (usually the repo's prePush hook)
-  * is repaired by an agent after asking the user, a rejected merge by resolving the conflict against the base branch.
-  * They were two separate self-recursive `def`s.
+  * is repaired by an agent and retried, a rejected merge by resolving the conflict against the base branch. They were
+  * two separate self-recursive `def`s.
   */
 final case class PublishRemoteArrows[-->[_, _]](
     toPushRequest: RemotePublication --> PushRequest,

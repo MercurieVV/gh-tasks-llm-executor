@@ -380,15 +380,26 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       if retriesLeft > 0 && isNonFastForwardRejection(error) then
         progress(
           s"Push rejected (remote moved); rebasing onto origin/$branchName and retrying ($retriesLeft left)..."
-        ) *> call(worktreePath, "git", "pull", "--rebase", "origin", branchName.value) *>
-          pushWithRebaseRetry(worktreePath, branchName, retriesLeft - 1)
+        ) *> call(worktreePath, "git", "pull", "--rebase", "origin", branchName.value)
+          .handleErrorWith { pullError =>
+            if isMissingRemoteRef(pullError, branchName) then
+              progress(
+                s"Remote branch origin/$branchName no longer exists; retrying push without rebase..."
+              )
+            else F.raiseError(pullError)
+          } *> pushWithRebaseRetry(worktreePath, branchName, retriesLeft - 1)
       else F.raiseError(error)
     }
 
   private def isNonFastForwardRejection(error: Throwable): Boolean =
     val message = Option(error.getMessage).getOrElse("")
-    Seq("[rejected]", "non-fast-forward", "fetch first", "failed to push some refs")
-      .exists(message.contains)
+    message.contains("non-fast-forward") ||
+    message.contains("fetch first") ||
+    message.contains("[rejected]") && message.contains("stale info")
+
+  private def isMissingRemoteRef(error: Throwable, branchName: BranchName): Boolean =
+    val message = Option(error.getMessage).getOrElse("")
+    message.contains(s"couldn't find remote ref ${branchName.value}")
 
   def hasRemote: Kleisli[F, os.Path, Boolean] =
     Kleisli.apply { root =>

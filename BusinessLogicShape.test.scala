@@ -67,6 +67,32 @@ class BusinessLogicShapeSuite extends CatsEffectSuite:
         .map(result => assertEquals(result, summary(s"ran ${ParallelArrows.MaxParallelism}")))
     }
 
+  test("a critical push failure aborts the candidate batch instead of continuing"):
+    Ref[IO].of(List.empty[String]).flatMap { events =>
+      val pushFailure = RuntimeException("""Command failed with exit code 1: "git" "push" "-u" "origin" "task-1"""")
+      val runOnce = Kleisli { (candidate: TaskCandidate) =>
+        val number = candidate.issue.number.value
+        events.update(_ :+ s"start$number") *>
+          IO.raiseError[RunSummary](pushFailure).whenA(number == 1) *>
+          events.update(_ :+ s"end$number").as(summary(s"ran $number"))
+      }
+      withRunOnce(runOnce)
+        .copy(
+          programArrows = withRunOnce(runOnce).programArrows.copy(
+            recoverCandidateFailure = Impl.recoverCandidateFailure[IO]
+          )
+        )
+        .executeSelectedCandidates
+        .run(selection(parallel = false, List(1, 2)))
+        .attempt
+        .flatMap { result =>
+          events.get.map { seen =>
+            assertEquals(result, Left(pushFailure))
+            assertEquals(seen, List("start1"))
+          }
+        }
+    }
+
   test("a vanished Pull Request falls back to the real run pipeline"):
     val gone = GitHub.NoOpenPullRequestToResumeException(BranchName("task-1"))
     Ref[IO].of(List.empty[String]).flatMap { steps =>

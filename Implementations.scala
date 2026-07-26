@@ -285,22 +285,37 @@ object Impl:
       Either.cond(!selection.context.parallelExecution.value, selection, selection)
     }
 
-  // One root candidate raising an uncaught error (e.g. a repair loop that
-  // exhausted its retries) must not take down every other queued candidate
-  // in the same batch - this turns it into a RunSummary instead so
-  // executeSelectedCandidates can keep going.
+  // One root candidate raising an uncaught error (e.g. a non-publication task
+  // failure) must not take down every other queued candidate in the same batch.
+  // Publication is different: an unpushed branch is not a finished candidate,
+  // so push/prePush failures stay fatal and stop the run instead of silently
+  // moving on to another task.
   def recoverCandidateFailure[F[_]: Sync]: -->[F, (TaskCandidate, Throwable), RunSummary] =
     Kleisli { case (candidate, error) =>
-      progress(
-        s"Task #${candidate.issue.number.value} failed unrecoverably: ${Option(error.getMessage).getOrElse(error.toString)}. Skipping and continuing with remaining tasks."
-      ).as(
-        RunSummary(
-          status = Status("error"),
-          message = Message5(Option(error.getMessage).getOrElse(error.toString)),
-          task = Some(candidate.issue)
+      val message = Option(error.getMessage).getOrElse(error.toString)
+      if isCriticalPublicationFailure(error) then
+        progress(
+          s"Task #${candidate.issue.number.value} failed during required publication: $message"
+        ) *> Sync[F].raiseError(error)
+      else
+        progress(
+          s"Task #${candidate.issue.number.value} failed unrecoverably: $message. Skipping and continuing with remaining tasks."
+        ).as(
+          RunSummary(
+            status = Status("error"),
+            message = Message5(message),
+            task = Some(candidate.issue)
+          )
         )
-      )
     }
+
+  def isCriticalPublicationFailure(error: Throwable): Boolean =
+    val message = Option(error.getMessage).getOrElse(error.toString)
+    message.contains("\"git\" \"push\"") ||
+    message.contains("git push") ||
+    message.contains("failed to push some refs") ||
+    message.contains("mill prePush") ||
+    message.contains("prePush hook")
 
   def lastSummary[F[_]: Sync]: -->[F, List[RunSummary], RunSummary] =
     Kleisli.fromFunction { summaries =>
@@ -1090,7 +1105,9 @@ object Impl:
             prCheckRepairPrompt(run.task, error),
             s"Repair failing Pull Request check for task #${run.task.number}"
           )
-          _ <- git[F].push(run.worktreePath, run.branchName)
+          _ <- repairablePush(progress).run(
+            PushRequest(run.worktreePath, run.branchName, run.task, run.runner)
+          )
         yield Right(
           resume.copy(checksRepairAttemptsRemaining = resume.checksRepairAttemptsRemaining - 1)
         )
@@ -1488,24 +1505,23 @@ Final answer contract:
     Kleisli(request => git[F].push(request.worktreePath, request.branchName))
 
   // `git push` runs the repo's prePush hook (tests/lint/format). A failure
-  // there is usually fixable in-worktree (e.g. a broken test), so before
-  // giving up and releasing the task claim, offer to spawn a repair agent
-  // and retry — looping as long as the user keeps accepting the retry.
+  // there is usually fixable in-worktree (e.g. a broken test), and the branch
+  // must be pushed before the task can be considered handled, so repair and
+  // retry instead of moving on to another task.
   def routePushFailure[F[_]: Sync]: -->[F, (PushRequest, Throwable), Either[Throwable, PushRequest]] =
     Kleisli { case (request, error) =>
       for
         _ <- progress(
           s"Push failed for task #${request.task.number}: ${error.getMessage}"
         )
-        shouldRepair <- askRetryWithRepair[F](request.task.number)
-        outcome <-
-          if shouldRepair then
-            repairAndCommit(progress)(
-              (request.worktreePath, request.task, request.runner, error)
-            ).as(Right(request))
-          else Left(error).pure[F]
-      yield outcome
+        _ <- repairAndCommit(progress)(
+          (request.worktreePath, request.task, request.runner, error)
+        )
+      yield Right(request)
     }
+
+  def repairablePush[F[_]: Sync](progress: String => F[Unit]): Kleisli[F, PushRequest, Unit] =
+    RepairLoop(pushBranch, routePushFailure, Kleisli[F, Throwable, Unit](Sync[F].raiseError))
 
   val RetryPromptTimeout = 30.seconds
 
