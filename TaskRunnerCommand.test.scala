@@ -61,3 +61,20 @@ class TaskRunnerCommandSuite extends munit.FunSuite:
     val twice = runner.effectivePrompt(once, allowedTools = Seq("Read"), cwd = Some(root))
 
     assertEquals(twice.value, once.value)
+
+  test("aider command appends explicit context files"):
+    val command =
+      TaskRunner(AgentBinary("aider"), Some("deepseek/deepseek-reasoner"), None, None)
+        .command(prompt, contextFiles = Seq(".gitignore", "build.mill"))
+
+    assertEquals(command.takeRight(2), Seq(".gitignore", "build.mill"))
+    assert(command.contains("--message"))
+    assert(command.contains(prompt.value))
+    assert(command.contains("deepseek/deepseek-v4-pro"))
+
+  test("non-aider commands ignore context files"):
+    val command =
+      TaskRunner(AgentBinary("gemini"), Some("gemini-pro"), None, None)
+        .command(prompt, contextFiles = Seq(".gitignore"))
+
+    assert(!command.contains(".gitignore"))

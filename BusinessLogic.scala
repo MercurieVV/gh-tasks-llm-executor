@@ -113,7 +113,8 @@ final case class TaskRunner(
       prompt: AgentPrompt,
       allowedTools: Seq[String] = Nil,
       jsonSchema: Option[String] = None,
-      cwd: Option[os.Path] = None
+      cwd: Option[os.Path] = None,
+      contextFiles: Seq[String] = Nil
   ): Seq[String] =
     val promptForRun = effectivePrompt(prompt, allowedTools, cwd)
     agent.value match
@@ -151,7 +152,8 @@ final case class TaskRunner(
           case Some("deepseek/deepseek-reasoner") => Some("deepseek/deepseek-v4-pro")
           case other                              => other
         Seq(agent.value) ++ mappedModel.toList.flatMap(value => Seq("--model", value)) ++
-          Seq("--yes-always", "--no-auto-commits", "--message", promptForRun.value)
+          Seq("--yes-always", "--no-auto-commits", "--message", promptForRun.value) ++
+          contextFiles
       case "gemini" =>
         Seq(agent.value) ++ model.toList.flatMap(value => Seq("-m", value)) ++
           Seq("-p", promptForRun.value)

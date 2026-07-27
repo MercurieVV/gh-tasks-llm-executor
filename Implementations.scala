@@ -1442,14 +1442,19 @@ Final answer contract:
             ) *> repairablePush(progress).run(pushRequest).as(true)
           else
             for
+              conflictedFiles <- git[F].unresolvedConflictFiles(
+                request.worktreePath
+              )
+              conflictedFilesText = conflictedFiles.mkString(", ")
               _ <- progress(
-                s"Automatic merge failed for task #${request.task.number}; running repair agent (${request.runner.display})..."
+                s"Automatic merge failed for task #${request.task.number}; running repair agent (${request.runner.display}) on $conflictedFilesText..."
               )
               _ <- AgentExecutor[F].run(
                 request.runner,
-                mergeConflictRepairPrompt(request.task, baseBranch.value),
+                mergeConflictRepairPrompt(request.task, baseBranch.value, conflictedFiles),
                 request.worktreePath,
-                RepairAllowedTools
+                RepairAllowedTools,
+                contextFiles = conflictedFiles
               )
               stillConflicted <- git[F].hasUnresolvedConflicts(
                 request.worktreePath
@@ -1474,13 +1479,20 @@ Final answer contract:
 
   def mergeConflictRepairPrompt(
       task: Issue,
-      baseBranch: String
+      baseBranch: String,
+      conflictedFiles: Seq[String]
   ): AgentPrompt = AgentPrompt(
     s"""This branch has a `git merge` in progress against `$baseBranch` that produced conflict
        |markers (`<<<<<<<` / `=======` / `>>>>>>>`). Resolve every conflict in this worktree so
        |the merge can complete cleanly, preserving the intended behavior of both sides, without
-       |changing the task's intended behavior. Do not run `git commit`, `git merge --abort`, or
-       |`git push` yourself.
+       |changing the task's intended behavior.
+       |
+       |Unmerged files reported by Git:
+       |${conflictedFiles.map(file => s"- $file").mkString("\n")}
+       |
+       |Run `git status --short`, resolve every unmerged path, and `git add` each resolved file
+       |so `git diff --name-only --diff-filter=U` prints nothing. Do not run `git commit`,
+       |`git merge --abort`, or `git push` yourself.
        |
        |Task: #${task.number} ${task.title}
        |""".stripMargin

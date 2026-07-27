@@ -31,9 +31,10 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       prompt: AgentPrompt,
       cwd: os.Path,
       allowedTools: Seq[String] = Nil,
-      jsonSchema: Option[String] = None
+      jsonSchema: Option[String] = None,
+      contextFiles: Seq[String] = Nil
   ): F[Output] =
-    runAttempt(runner, prompt, cwd, allowedTools, jsonSchema, attempt = 1)
+    runAttempt(runner, prompt, cwd, allowedTools, jsonSchema, contextFiles, attempt = 1)
 
   private def runAttempt(
       runner: TaskRunner,
@@ -41,6 +42,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       cwd: os.Path,
       allowedTools: Seq[String],
       jsonSchema: Option[String],
+      contextFiles: Seq[String],
       attempt: Int
   ): F[Output] =
     for
@@ -48,7 +50,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
         s"Starting agent execution with ${runner.display} in $cwd"
       )
       result <- F.blocking(
-        runMonitored(runner, prompt, cwd, allowedTools, jsonSchema)
+        runMonitored(runner, prompt, cwd, allowedTools, jsonSchema, contextFiles)
       )
       output = result.output
       _ <-
@@ -73,6 +75,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
               cwd,
               allowedTools,
               jsonSchema,
+              contextFiles,
               attempt + 1
             )
         else
@@ -130,13 +133,14 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       prompt: AgentPrompt,
       cwd: os.Path,
       allowedTools: Seq[String],
-      jsonSchema: Option[String]
+      jsonSchema: Option[String],
+      contextFiles: Seq[String]
   ): AgentResult =
     val started = System.currentTimeMillis()
     val lastActivity = AtomicLong(started)
     val output = StringBuilder()
     val promptForRun = runner.effectivePrompt(prompt, allowedTools, cwd = Some(cwd))
-    val command = runner.command(promptForRun, allowedTools, jsonSchema, cwd = Some(cwd))
+    val command = runner.command(promptForRun, allowedTools, jsonSchema, cwd = Some(cwd), contextFiles = contextFiles)
     TaskLogger.unsafeTrace(
       s"agent command cwd=$cwd args=${commandForLog(command, promptForRun)} promptChars=${promptForRun.value.length}"
     )

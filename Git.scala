@@ -464,6 +464,9 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
     }
 
   def hasUnresolvedConflicts: Kleisli[F, os.Path, Boolean] =
+    unresolvedConflictFiles.map(_.nonEmpty)
+
+  def unresolvedConflictFiles: Kleisli[F, os.Path, List[String]] =
     Kleisli.apply { worktreePath =>
       F.blocking(
         os
@@ -472,7 +475,10 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
           .out
           .text()
           .trim
-          .nonEmpty
+          .linesIterator
+          .map(_.trim)
+          .filter(_.nonEmpty)
+          .toList
       )
     }
 
