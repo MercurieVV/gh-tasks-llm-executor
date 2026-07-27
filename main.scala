@@ -24,25 +24,56 @@ object AgentOutput:
   */
 object Main extends IOApp:
   def run(args: List[String]): IO[ExitCode] =
-    val input = AppInput(
-      os.pwd,
-      Cli.parseTaskNumber(args),
-      Cli.parseRecursiveFlag(args),
-      Cli.parseParallelFlag(args)
-    )
-    AgentMain
-      .run[IO](Cli.removeScriptArgs(args), os.pwd)(_ =>
-        Ref[IO]
-          .of(Map.empty[TaskNumber, Issue])
-          .flatMap(openIssues =>
-            Wiring
-              .businessLogic[IO]
-              .program
-              .run(input)
-              .run(RunEnv(openIssues))
+    Cli.parseMetricsCommand(args, os.pwd) match
+      case Some(command) =>
+        IO.blocking(renderMetrics(command)).flatMap(IO.println).as(ExitCode.Success)
+      case None =>
+        val input = AppInput(
+          os.pwd,
+          Cli.parseTaskNumber(args),
+          Cli.parseRecursiveFlag(args),
+          Cli.parseParallelFlag(args)
+        )
+        AgentMain
+          .run[IO](Cli.removeScriptArgs(args), os.pwd)(_ =>
+            Ref[IO]
+              .of(Map.empty[TaskNumber, Issue])
+              .flatMap(openIssues =>
+                Wiring
+                  .businessLogic[IO]
+                  .program
+                  .run(input)
+                  .run(RunEnv(openIssues))
+              )
           )
-      )
-      .flatMap { outcome =>
-        IO.print(outcome.stdout) *>
-          IO.pure(ExitCode(outcome.exitCode))
-      }
+          .flatMap { outcome =>
+            IO.print(outcome.stdout) *>
+              IO.pure(ExitCode(outcome.exitCode))
+          }
+
+  private def renderMetrics(command: Cli.MetricsCommand): String =
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(command.path)
+    command.view match
+      case Cli.MetricsView.Events =>
+        TokenMetrics.renderEvents(backend.query(command.query))
+      case Cli.MetricsView.Summary =>
+        TokenMetrics.renderSummary(backend.summary(command.query))
+      case Cli.MetricsView.Json =>
+        ujson.write(
+          ujson.Obj(
+            "events" -> backend.query(command.query).map { event =>
+              ujson.Obj(
+                "timestampMillis" -> event.timestampMillis,
+                "vendor" -> event.vendor.toString.toLowerCase,
+                "taskNumber" -> event.taskNumber.map(number => ujson.Num(number.value)).getOrElse(ujson.Null),
+                "model" -> event.model.map(ujson.Str(_)).getOrElse(ujson.Null),
+                "scope" -> event.scope,
+                "input" -> event.usage.input,
+                "output" -> event.usage.output,
+                "cacheRead" -> event.usage.cacheRead,
+                "cacheWrite" -> event.usage.cacheWrite,
+                "total" -> event.usage.total
+              )
+            }
+          )
+        )

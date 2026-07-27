@@ -110,6 +110,21 @@ vendor-reported quota so this is a self-imposed cost cap),
 (required for the deepseek probe), `GOOGLE_CLOUD_PROJECT` (required for the
 gemini/Vertex probe).
 
+### Local token metrics
+
+Token metrics can be persisted locally as JSONL at
+`.gh-tasks-llm-executor/token-metrics.jsonl` through `TokenMetrics.JsonlTokenMetricsBackend`.
+The file is append-only and queryable by the local viewer:
+
+```bash
+scala-cli run /path/to/gh-tasks-llm-executor -- metrics
+scala-cli run /path/to/gh-tasks-llm-executor -- metrics summary --vendor=codex
+scala-cli run /path/to/gh-tasks-llm-executor -- metrics --task=123 --json
+```
+
+Supported filters: `--vendor`, `--task`/`--issue`, `--since`, `--until`,
+`--limit`, and `--path`.
+
 ## What it does
 
 1. Fetches open issues, filters out ones with unresolved dependencies, open

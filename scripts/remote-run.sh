@@ -28,6 +28,7 @@ FILES=(
   Priority.scala
   RunEnv.scala
   TaskLogger.scala
+  TokenMetrics.scala
   TokenUsage.scala
   VendorBudgets.scala
   Wiring.scala
