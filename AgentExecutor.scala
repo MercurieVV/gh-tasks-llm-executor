@@ -170,8 +170,21 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       metricsScope: String
   ): AgentResult =
     val started = System.currentTimeMillis()
+    val metricsRootResolved = metricsRoot.getOrElse(TokenMetrics.defaultRootForWorktree(cwd))
+    val metricsPath = TokenMetrics.JsonlTokenMetricsBackend.defaultPath(metricsRootResolved)
+    val metricsVendor = TokenMetrics.parseVendor(runner.agent.value)
     val usageSource = tokenUsageSource(runner, cwd)
     val beforeUsage = usageSource.flatMap(_.current())
+    val metricsSource =
+      if usageSource.nonEmpty then "session"
+      else
+        metricsVendor match
+          case Some(TokenUsage.Vendor.Aider) => "agent-output"
+          case _                             => "unsupported"
+    TaskLogger.unsafeTrace(
+      s"token metrics init agent=${runner.agent.value} vendor=${metricsVendor.map(_.toString.toLowerCase).getOrElse("unknown")} model=${runner.model
+          .getOrElse("-")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} cwd=$cwd root=$metricsRootResolved path=$metricsPath source=$metricsSource"
+    )
     val lastActivity = AtomicLong(started)
     val output = StringBuilder()
     val promptForRun = runner.effectivePrompt(prompt, allowedTools, cwd = Some(cwd))
@@ -258,12 +271,13 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
         case None         => AgentResult(process.exitValue(), AgentOutput(output.toString))
     recordTokenMetrics(
       runner = runner,
-      cwd = cwd,
-      metricsRoot = metricsRoot,
       taskNumber = taskNumber,
       metricsScope = metricsScope,
+      metricsPath = metricsPath,
+      metricsVendor = metricsVendor,
       usageSource = usageSource,
-      beforeUsage = beforeUsage
+      beforeUsage = beforeUsage,
+      output = result.output
     )
     result
 
@@ -278,31 +292,59 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
 
   private def recordTokenMetrics(
       runner: TaskRunner,
-      cwd: os.Path,
-      metricsRoot: Option[os.Path],
       taskNumber: Option[TaskNumber],
       metricsScope: String,
+      metricsPath: os.Path,
+      metricsVendor: Option[TokenUsage.Vendor],
       usageSource: Option[TokenUsage.TokenUsageSource],
-      beforeUsage: Option[TokenUsage.TokenSnapshot]
+      beforeUsage: Option[TokenUsage.TokenSnapshot],
+      output: Output
   ): Unit =
-    usageSource.flatMap(_.current()).foreach { afterUsage =>
-      val usage = beforeUsage.fold(afterUsage)(before => afterUsage - before)
-      if usage.total > 0 || usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0
-      then
-        val root = metricsRoot.getOrElse(TokenMetrics.defaultRootForWorktree(cwd))
-        TokenMetrics
-          .JsonlTokenMetricsBackend(TokenMetrics.JsonlTokenMetricsBackend.defaultPath(root))
-          .record(
-            TokenMetrics.TokenMetricsEvent(
-              timestampMillis = System.currentTimeMillis(),
-              vendor = TokenMetrics.parseVendor(runner.agent.value).get,
-              usage = usage,
-              taskNumber = taskNumber,
-              model = runner.model,
-              scope = metricsScope
+    val usage =
+      usageSource
+        .flatMap(_.current())
+        .map(afterUsage => beforeUsage.fold(afterUsage)(before => afterUsage - before))
+        .orElse(
+          metricsVendor.collect { case TokenUsage.Vendor.Aider =>
+            TokenUsage.AiderTokenUsage.parseOutput(output.value)
+          }.flatten
+        )
+
+    usage match
+      case Some(usage)
+          if usage.total > 0 || usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0 =>
+        metricsVendor.foreach { vendor =>
+          TokenMetrics
+            .JsonlTokenMetricsBackend(metricsPath)
+            .record(
+              TokenMetrics.TokenMetricsEvent(
+                timestampMillis = System.currentTimeMillis(),
+                vendor = vendor,
+                usage = usage,
+                taskNumber = taskNumber,
+                model = runner.model,
+                scope = metricsScope
+              )
             )
+          TaskLogger.unsafeTrace(
+            s"token metrics recorded agent=${runner.agent.value} vendor=${vendor.toString.toLowerCase} model=${runner.model
+                .getOrElse("-")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} path=$metricsPath usage=${TokenMetrics
+                .renderSummary(usage)}"
           )
-    }
+        }
+      case Some(usage) =>
+        TaskLogger.unsafeTrace(
+          s"token metrics skipped reason=zero-usage agent=${runner.agent.value} vendor=${metricsVendor
+              .map(_.toString.toLowerCase)
+              .getOrElse("unknown")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} path=$metricsPath usage=${TokenMetrics
+              .renderSummary(usage)}"
+        )
+      case None =>
+        TaskLogger.unsafeTrace(
+          s"token metrics skipped reason=no-usage agent=${runner.agent.value} vendor=${metricsVendor
+              .map(_.toString.toLowerCase)
+              .getOrElse("unknown")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} path=$metricsPath"
+        )
 
   private def streamReader(
       name: AgentOutputStream,

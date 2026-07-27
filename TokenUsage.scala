@@ -9,6 +9,8 @@ import java.util.concurrent.atomic.AtomicReference
 //   - claude/codex: LOG-DERIVED. Both CLIs write an append-only local
 //     transcript, so `current()` re-reads it fresh every call - always
 //     correct, even if the process restarts mid-session.
+//   - aider: OUTPUT-DERIVED. Aider prints per-message token usage at the
+//     end of a run, so callers parse the captured agent output.
 //   - gemini/deepseek: SELF-ACCUMULATING. Neither exposes a queryable
 //     cumulative counter (gemini/agy's session db stores an opaque protobuf
 //     blob with no token field; deepseek has no session concept at all -
@@ -23,7 +25,7 @@ import java.util.concurrent.atomic.AtomicReference
 object TokenUsage:
 
   enum Vendor:
-    case Claude, Codex, Gemini, Deepseek
+    case Claude, Codex, Gemini, Deepseek, Aider
 
   final case class TokenSnapshot(
       input: Long,
@@ -112,7 +114,9 @@ object TokenUsage:
 
     def current(): Option[TokenSnapshot] =
       sessionFile.flatMap { path =>
-        Try(os.read.lines(path)).getOrElse(Nil).reverseIterator
+        Try(os.read.lines(path))
+          .getOrElse(Nil)
+          .reverseIterator
           .flatMap(line => Try(ujson.read(line)).toOption)
           .flatMap(parseLine)
           .nextOption()
@@ -135,6 +139,35 @@ object TokenUsage:
         cacheWrite = field(usage, "cache_write_input_tokens").flatMap(_.numOpt).getOrElse(0.0).toLong,
         total = totalTokens.toLong
       )
+
+  object AiderTokenUsage:
+    private val tokensLine =
+      """(?i)\bTokens:\s*([0-9]+(?:\.[0-9]+)?)([km]?)\s+sent,\s+([0-9]+(?:\.[0-9]+)?)([km]?)\s+received\.""".r
+
+    def parseOutput(output: String): Option[TokenSnapshot] =
+      tokensLine
+        .findAllMatchIn(output)
+        .map { m =>
+          val input = parseCount(m.group(1), m.group(2))
+          val received = parseCount(m.group(3), m.group(4))
+          TokenSnapshot(
+            input = input,
+            output = received,
+            cacheRead = 0L,
+            cacheWrite = 0L,
+            total = input + received
+          )
+        }
+        .toList
+        .lastOption
+
+    private def parseCount(value: String, suffix: String): Long =
+      val multiplier =
+        suffix.toLowerCase match
+          case "k" => 1000.0
+          case "m" => 1000000.0
+          case _   => 1.0
+      math.round(value.toDouble * multiplier)
 
   // gemini/agy and deepseek: no external transcript to derive from. Caller
   // must call `record` with each response's usage as it observes them;

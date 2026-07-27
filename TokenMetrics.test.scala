@@ -48,6 +48,28 @@ class TokenMetricsSuite extends munit.FunSuite:
     assert(rendered.contains("timestampMillis vendor task model scope input output cacheRead cacheWrite total"))
     assert(rendered.contains("1000 gemini - - quota 1 2 3 4 10"))
 
+  test("Aider output token line parses as a token snapshot"):
+    val output =
+      """Some earlier output
+        |Tokens: 10k sent, 4.9k received. Cost: $0.0088 message, $0.02 session.
+        |""".stripMargin
+
+    assertEquals(
+      TokenUsage.AiderTokenUsage.parseOutput(output),
+      Some(TokenUsage.TokenSnapshot(input = 10000, output = 4900, cacheRead = 0, cacheWrite = 0, total = 14900))
+    )
+
+  test("Aider parser uses the last token line"):
+    val output =
+      """Tokens: 1k sent, 2k received.
+        |Tokens: 12 sent, 34 received.
+        |""".stripMargin
+
+    assertEquals(
+      TokenUsage.AiderTokenUsage.parseOutput(output),
+      Some(TokenUsage.TokenSnapshot(input = 12, output = 34, cacheRead = 0, cacheWrite = 0, total = 46))
+    )
+
   test("CLI parses metrics command filters"):
     val root = os.temp.dir()
     val command = Cli.parseMetricsCommand(
