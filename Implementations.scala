@@ -1605,6 +1605,7 @@ Final answer contract:
         prompt,
         worktreePath,
         RepairAllowedTools,
+        contextFiles = repairContextFiles(worktreePath),
         taskNumber = Some(task.number),
         metricsScope = "repair"
       )
@@ -1616,6 +1617,17 @@ Final answer contract:
             s"Repair agent made no file changes for task #${task.number}."
           )
     yield ()
+
+  private def repairContextFiles(worktreePath: os.Path): Seq[String] =
+    Seq(
+      "scripts/git-pre-push.scala",
+      "scripts/setup-git-hooks.scala",
+      "scripts/git-pre-commit.scala",
+      "build.mill",
+      "build.sc",
+      "build.sbt",
+      "project.scala"
+    ).filter(path => os.exists(worktreePath / os.RelPath(path)))
 
   def repairPrompt(task: Issue, pushError: Throwable): AgentPrompt =
     AgentPrompt(
