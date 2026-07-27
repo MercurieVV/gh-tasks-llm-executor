@@ -32,9 +32,23 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       cwd: os.Path,
       allowedTools: Seq[String] = Nil,
       jsonSchema: Option[String] = None,
-      contextFiles: Seq[String] = Nil
+      contextFiles: Seq[String] = Nil,
+      taskNumber: Option[TaskNumber] = None,
+      metricsRoot: Option[os.Path] = None,
+      metricsScope: String = "agent"
   ): F[Output] =
-    runAttempt(runner, prompt, cwd, allowedTools, jsonSchema, contextFiles, attempt = 1)
+    runAttempt(
+      runner,
+      prompt,
+      cwd,
+      allowedTools,
+      jsonSchema,
+      contextFiles,
+      taskNumber,
+      metricsRoot,
+      metricsScope,
+      attempt = 1
+    )
 
   private def runAttempt(
       runner: TaskRunner,
@@ -43,6 +57,9 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       allowedTools: Seq[String],
       jsonSchema: Option[String],
       contextFiles: Seq[String],
+      taskNumber: Option[TaskNumber],
+      metricsRoot: Option[os.Path],
+      metricsScope: String,
       attempt: Int
   ): F[Output] =
     for
@@ -50,7 +67,17 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
         s"Starting agent execution with ${runner.display} in $cwd"
       )
       result <- F.blocking(
-        runMonitored(runner, prompt, cwd, allowedTools, jsonSchema, contextFiles)
+        runMonitored(
+          runner,
+          prompt,
+          cwd,
+          allowedTools,
+          jsonSchema,
+          contextFiles,
+          taskNumber,
+          metricsRoot,
+          metricsScope
+        )
       )
       output = result.output
       _ <-
@@ -76,6 +103,9 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
               allowedTools,
               jsonSchema,
               contextFiles,
+              taskNumber,
+              metricsRoot,
+              metricsScope,
               attempt + 1
             )
         else
@@ -134,9 +164,14 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       cwd: os.Path,
       allowedTools: Seq[String],
       jsonSchema: Option[String],
-      contextFiles: Seq[String]
+      contextFiles: Seq[String],
+      taskNumber: Option[TaskNumber],
+      metricsRoot: Option[os.Path],
+      metricsScope: String
   ): AgentResult =
     val started = System.currentTimeMillis()
+    val usageSource = tokenUsageSource(runner, cwd)
+    val beforeUsage = usageSource.flatMap(_.current())
     val lastActivity = AtomicLong(started)
     val output = StringBuilder()
     val promptForRun = runner.effectivePrompt(prompt, allowedTools, cwd = Some(cwd))
@@ -217,9 +252,57 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     stdout.join(TimeUnit.SECONDS.toMillis(5))
     stderr.join(TimeUnit.SECONDS.toMillis(5))
 
-    timedOut match
-      case Some(reason) => throw RuntimeException(reason)
-      case None         => AgentResult(process.exitValue(), AgentOutput(output.toString))
+    val result =
+      timedOut match
+        case Some(reason) => throw RuntimeException(reason)
+        case None         => AgentResult(process.exitValue(), AgentOutput(output.toString))
+    recordTokenMetrics(
+      runner = runner,
+      cwd = cwd,
+      metricsRoot = metricsRoot,
+      taskNumber = taskNumber,
+      metricsScope = metricsScope,
+      usageSource = usageSource,
+      beforeUsage = beforeUsage
+    )
+    result
+
+  private def tokenUsageSource(
+      runner: TaskRunner,
+      cwd: os.Path
+  ): Option[TokenUsage.TokenUsageSource] =
+    TokenMetrics.parseVendor(runner.agent.value).collect {
+      case TokenUsage.Vendor.Claude => TokenUsage.ClaudeTokenUsageSource(cwd)
+      case TokenUsage.Vendor.Codex  => TokenUsage.CodexTokenUsageSource()
+    }
+
+  private def recordTokenMetrics(
+      runner: TaskRunner,
+      cwd: os.Path,
+      metricsRoot: Option[os.Path],
+      taskNumber: Option[TaskNumber],
+      metricsScope: String,
+      usageSource: Option[TokenUsage.TokenUsageSource],
+      beforeUsage: Option[TokenUsage.TokenSnapshot]
+  ): Unit =
+    usageSource.flatMap(_.current()).foreach { afterUsage =>
+      val usage = beforeUsage.fold(afterUsage)(before => afterUsage - before)
+      if usage.total > 0 || usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0
+      then
+        val root = metricsRoot.getOrElse(TokenMetrics.defaultRootForWorktree(cwd))
+        TokenMetrics
+          .JsonlTokenMetricsBackend(TokenMetrics.JsonlTokenMetricsBackend.defaultPath(root))
+          .record(
+            TokenMetrics.TokenMetricsEvent(
+              timestampMillis = System.currentTimeMillis(),
+              vendor = TokenMetrics.parseVendor(runner.agent.value).get,
+              usage = usage,
+              taskNumber = taskNumber,
+              model = runner.model,
+              scope = metricsScope
+            )
+          )
+    }
 
   private def streamReader(
       name: AgentOutputStream,

@@ -61,3 +61,10 @@ class TokenMetricsSuite extends munit.FunSuite:
     assertEquals(command.flatMap(_.query.taskNumber).map(_.value), Some(12))
     assertEquals(command.flatMap(_.query.sinceMillis), Some(100L))
     assertEquals(command.flatMap(_.query.limit), Some(10))
+
+  test("defaultRootForWorktree maps task worktrees back to target repo root"):
+    val root = os.temp.dir()
+    val worktree = root / ".worktrees" / "task-12"
+
+    assertEquals(TokenMetrics.defaultRootForWorktree(worktree), root)
+    assertEquals(TokenMetrics.defaultRootForWorktree(root), root)

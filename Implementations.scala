@@ -889,7 +889,10 @@ object Impl:
           run.runner,
           prompt,
           run.worktreePath,
-          ImplementerAllowedTools
+          ImplementerAllowedTools,
+          taskNumber = Some(run.task.number),
+          metricsRoot = Some(run.context.root),
+          metricsScope = "implement"
         )
         _ <- Sync[F]
           .raiseError(
@@ -1454,7 +1457,10 @@ Final answer contract:
                 mergeConflictRepairPrompt(request.task, baseBranch.value, conflictedFiles),
                 request.worktreePath,
                 RepairAllowedTools,
-                contextFiles = conflictedFiles
+                contextFiles = conflictedFiles,
+                taskNumber = Some(request.task.number),
+                metricsRoot = Some(request.root),
+                metricsScope = "merge-repair"
               )
               stillConflicted <- git[F].hasUnresolvedConflicts(
                 request.worktreePath
@@ -1594,7 +1600,14 @@ Final answer contract:
       _ <- progress(
         s"Running repair agent (${runner.display}) for task #${task.number}..."
       )
-      _ <- AgentExecutor[F].run(runner, prompt, worktreePath, RepairAllowedTools)
+      _ <- AgentExecutor[F].run(
+        runner,
+        prompt,
+        worktreePath,
+        RepairAllowedTools,
+        taskNumber = Some(task.number),
+        metricsScope = "repair"
+      )
       changed <- git[F].filesChanged(worktreePath)
       _ <-
         if changed then git[F].commitAll(worktreePath, task, Some(commitMessage))

@@ -46,6 +46,10 @@ object TokenMetrics:
     def defaultPath(root: os.Path = os.pwd): os.Path =
       root / ".gh-tasks-llm-executor" / "token-metrics.jsonl"
 
+  def defaultRootForWorktree(cwd: os.Path): os.Path =
+    val parent = cwd / os.up
+    if parent.last == ".worktrees" then parent / os.up else cwd
+
   def renderSummary(snapshot: TokenUsage.TokenSnapshot): String =
     List(
       s"input=${snapshot.input}",
