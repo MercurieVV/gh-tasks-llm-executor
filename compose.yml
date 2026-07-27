@@ -1,0 +1,14 @@
+services:
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:v1.148.0
+    command:
+      - -storageDataPath=/victoria-metrics-data
+      - -selfScrapeInterval=10s
+      - -opentelemetry.usePrometheusNaming=true
+    ports:
+      - "8428:8428"
+    volumes:
+      - victoria-metrics-data:/victoria-metrics-data
+
+volumes:
+  victoria-metrics-data:

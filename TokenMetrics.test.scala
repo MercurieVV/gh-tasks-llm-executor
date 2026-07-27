@@ -78,6 +78,7 @@ class TokenMetricsSuite extends munit.FunSuite:
     )
 
     assertEquals(command.map(_.path), Some(root / ".gh-tasks-llm-executor" / "token-metrics.jsonl"))
+    assertEquals(command.map(_.backend), Some(TokenMetrics.BackendKind.VictoriaMetrics))
     assertEquals(command.map(_.view), Some(Cli.MetricsView.Summary))
     assertEquals(command.flatMap(_.query.vendor), Some(TokenUsage.Vendor.Codex))
     assertEquals(command.flatMap(_.query.taskNumber).map(_.value), Some(12))

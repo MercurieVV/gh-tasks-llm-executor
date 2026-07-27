@@ -10,6 +10,8 @@ object Cli:
 
   final case class MetricsCommand(
       path: os.Path,
+      backend: TokenMetrics.BackendKind,
+      victoriaUrl: String,
       query: TokenMetrics.TokenMetricsQuery,
       view: MetricsView
   )
@@ -79,9 +81,18 @@ object Cli:
     val path = optionValue(args, "--path")
       .map(value => os.Path(value, root))
       .getOrElse(TokenMetrics.JsonlTokenMetricsBackend.defaultPath(root))
+    val backend = optionValue(args, "--backend")
+      .flatMap(TokenMetrics.BackendKind.parse)
+      .orElse(sys.env.get("GH_TASKS_TOKEN_METRICS_BACKEND").flatMap(TokenMetrics.BackendKind.parse))
+      .getOrElse(TokenMetrics.BackendKind.VictoriaMetrics)
+    val victoriaUrl = optionValue(args, "--victoria-url")
+      .orElse(sys.env.get("GH_TASKS_METRICS_VICTORIA_URL"))
+      .getOrElse(TokenMetrics.VictoriaMetricsBackend.defaultBaseUrl)
 
     MetricsCommand(
       path = path,
+      backend = backend,
+      victoriaUrl = victoriaUrl,
       query = TokenMetrics.TokenMetricsQuery(
         vendor = optionValue(args, "--vendor").flatMap(TokenMetrics.parseVendor),
         taskNumber = optionValue(args, "--task").orElse(optionValue(args, "--issue")).flatMap(parseNumber),

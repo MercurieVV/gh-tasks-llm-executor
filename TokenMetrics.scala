@@ -1,3 +1,13 @@
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
+import cats.syntax.all.*
+import org.typelevel.otel4s.Attribute
+import org.typelevel.otel4s.oteljava.OtelJava
+
+import java.net.HttpURLConnection
+import java.net.URI
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import scala.util.Try
 
 object TokenMetrics:
@@ -24,6 +34,7 @@ object TokenMetrics:
         untilMillis.forall(event.timestampMillis <= _)
 
   trait TokenMetricsBackend:
+    def destination: String
     def record(event: TokenMetricsEvent): Unit
     def query(query: TokenMetricsQuery): List[TokenMetricsEvent]
 
@@ -31,6 +42,8 @@ object TokenMetrics:
       this.query(query.copy(limit = None)).foldLeft(TokenUsage.TokenSnapshot.Zero)(_ + _.usage)
 
   final class JsonlTokenMetricsBackend(path: os.Path) extends TokenMetricsBackend:
+    def destination: String = path.toString
+
     def record(event: TokenMetricsEvent): Unit =
       os.makeDir.all(path / os.up)
       os.write.append(path, writeEvent(event) + System.lineSeparator(), createFolders = true)
@@ -45,6 +58,196 @@ object TokenMetrics:
   object JsonlTokenMetricsBackend:
     def defaultPath(root: os.Path = os.pwd): os.Path =
       root / ".gh-tasks-llm-executor" / "token-metrics.jsonl"
+
+  final class VictoriaMetricsBackend(baseUrl: String = VictoriaMetricsBackend.defaultBaseUrl)
+      extends TokenMetricsBackend:
+    def destination: String = baseUrl
+
+    def record(event: TokenMetricsEvent): Unit =
+      Try(VictoriaMetricsBackend.record(event, baseUrl).unsafeRunSync()).fold(_ => (), identity)
+
+    def query(query: TokenMetricsQuery): List[TokenMetricsEvent] =
+      VictoriaMetricsBackend.query(query, baseUrl)
+
+  object VictoriaMetricsBackend:
+    val MetricName = "gh_tasks_llm_executor_token_usage"
+    val PrometheusMetricName = MetricName + "_total"
+
+    def defaultBaseUrl: String =
+      sys.env.get("GH_TASKS_METRICS_VICTORIA_URL").getOrElse("http://localhost:8428")
+
+    def defaultOtlpMetricsEndpoint(baseUrl: String = defaultBaseUrl): String =
+      stripTrailingSlash(baseUrl) + "/opentelemetry/v1/metrics"
+
+    private def record(event: TokenMetricsEvent, baseUrl: String): IO[Unit] =
+      IO.delay(configureOtel(baseUrl)) *>
+        OtelJava.autoConfigured[IO]().use { otel =>
+          for
+            meter <- otel.meterProvider.get("gh-tasks-llm-executor")
+            counter <- meter
+              .counter[Long](MetricName)
+              .withUnit("{token}")
+              .withDescription("Token usage reported by local agent runs")
+              .create
+            _ <- List(
+              "input" -> event.usage.input,
+              "output" -> event.usage.output,
+              "cache_read" -> event.usage.cacheRead,
+              "cache_write" -> event.usage.cacheWrite,
+              "total" -> event.usage.total
+            ).traverse_ { case (kind, value) =>
+              if value > 0 then counter.add(value, attributes(event, kind))
+              else IO.unit
+            }
+          yield ()
+        }
+
+    private def configureOtel(baseUrl: String): Unit =
+      setPropertyIfMissing("otel.service.name", "gh-tasks-llm-executor")
+      setPropertyIfMissing("otel.metrics.exporter", "otlp")
+      setPropertyIfMissing("otel.traces.exporter", "none")
+      setPropertyIfMissing("otel.logs.exporter", "none")
+      setPropertyIfMissing("otel.exporter.otlp.metrics.endpoint", defaultOtlpMetricsEndpoint(baseUrl))
+      setPropertyIfMissing("otel.exporter.otlp.metrics.protocol", "http/protobuf")
+      setPropertyIfMissing("otel.metric.export.interval", "1000")
+
+    private def setPropertyIfMissing(name: String, value: String): Unit =
+      if sys.props.get(name).isEmpty && sys.env.get(envName(name)).isEmpty then System.setProperty(name, value)
+
+    private def envName(property: String): String =
+      property.toUpperCase.replace('.', '_').replace('-', '_')
+
+    private def attributes(event: TokenMetricsEvent, tokenType: String): List[Attribute[?]] =
+      List(
+        Some(Attribute("vendor", event.vendor.toString.toLowerCase)),
+        Some(Attribute("scope", event.scope)),
+        Some(Attribute("token_type", tokenType)),
+        event.taskNumber.map(number => Attribute("task", number.value.toLong)),
+        event.model.map(model => Attribute("model", model))
+      ).flatten
+
+    private def query(query: TokenMetricsQuery, baseUrl: String): List[TokenMetricsEvent] =
+      val selector = buildSelector(query)
+      val params = List(
+        "match[]" -> selector,
+        "start" -> query.sinceMillis.getOrElse(0L).toString,
+        "end" -> query.untilMillis.getOrElse(System.currentTimeMillis()).toString
+      )
+      val response = httpGet(stripTrailingSlash(baseUrl) + "/api/v1/export", params)
+      val events = response.toList
+        .flatMap(_.linesIterator.toList)
+        .flatMap(readExportSeries)
+        .groupMapReduce(_.key)(_.event)((left, right) => left.merge(right))
+        .values
+        .toList
+        .sortBy(_.timestampMillis)
+      query.limit.fold(events)(limit => events.takeRight(limit.max(0)))
+
+    private final case class ExportPointKey(
+        timestampMillis: Long,
+        vendor: TokenUsage.Vendor,
+        taskNumber: Option[TaskNumber],
+        model: Option[String],
+        scope: String
+    )
+
+    private final case class ExportPoint(key: ExportPointKey, event: TokenMetricsEvent)
+
+    extension (left: TokenMetricsEvent)
+      private def merge(right: TokenMetricsEvent): TokenMetricsEvent =
+        left.copy(usage = left.usage + right.usage)
+
+    private def readExportSeries(line: String): List[ExportPoint] =
+      val parsed =
+        for
+          json <- Try(ujson.read(line)).toOption
+          obj <- json.objOpt
+          metric <- obj.get("metric").flatMap(_.objOpt)
+          vendor <- metric.get("vendor").flatMap(_.strOpt).flatMap(parseVendor)
+          tokenType <- metric.get("token_type").flatMap(_.strOpt)
+          scope <- metric.get("scope").flatMap(_.strOpt)
+          values <- obj.get("values").flatMap(_.arrOpt).map(_.toList)
+          timestamps <- obj.get("timestamps").flatMap(_.arrOpt).map(_.toList)
+        yield values.zip(timestamps).flatMap { case (valueJson, timestampJson) =>
+          for
+            value <- readLong(valueJson)
+            timestamp <- readLong(timestampJson)
+          yield
+            val taskNumber = metric.get("task").flatMap(readLong).map(value => TaskNumber(value.toInt))
+            val model = metric.get("model").flatMap(_.strOpt)
+            val key = ExportPointKey(timestamp, vendor, taskNumber, model, scope)
+            ExportPoint(
+              key,
+              TokenMetricsEvent(timestamp, vendor, snapshot(tokenType, value), taskNumber, model, scope)
+            )
+        }
+      parsed.getOrElse(Nil)
+
+    private def snapshot(tokenType: String, value: Long): TokenUsage.TokenSnapshot =
+      tokenType match
+        case "input"  => TokenUsage.TokenSnapshot(input = value, output = 0, cacheRead = 0, cacheWrite = 0, total = 0)
+        case "output" => TokenUsage.TokenSnapshot(input = 0, output = value, cacheRead = 0, cacheWrite = 0, total = 0)
+        case "cache_read" =>
+          TokenUsage.TokenSnapshot(input = 0, output = 0, cacheRead = value, cacheWrite = 0, total = 0)
+        case "cache_write" =>
+          TokenUsage.TokenSnapshot(input = 0, output = 0, cacheRead = 0, cacheWrite = value, total = 0)
+        case "total" => TokenUsage.TokenSnapshot(input = 0, output = 0, cacheRead = 0, cacheWrite = 0, total = value)
+        case _       => TokenUsage.TokenSnapshot.Zero
+
+    private def buildSelector(query: TokenMetricsQuery): String =
+      val labels = List(
+        Some(s"""__name__=~"($MetricName|$PrometheusMetricName)""""),
+        query.vendor.map(vendor => s"""vendor="${vendor.toString.toLowerCase}""""),
+        query.taskNumber.map(task => s"""task="${task.value}"""")
+      ).flatten
+      "{" + labels.mkString(",") + "}"
+
+    private def httpGet(url: String, params: List[(String, String)]): Option[String] =
+      val encoded = params.map { case (name, value) => encode(name) + "=" + encode(value) }.mkString("&")
+      val connection = URI.create(url + "?" + encoded).toURL.openConnection().asInstanceOf[HttpURLConnection]
+      Try {
+        connection.setRequestMethod("GET")
+        connection.setConnectTimeout(1000)
+        connection.setReadTimeout(3000)
+        val stream =
+          if connection.getResponseCode >= 400 then connection.getErrorStream
+          else connection.getInputStream
+        try scala.io.Source.fromInputStream(stream, "UTF-8").mkString
+        finally stream.close()
+      }.toOption
+
+    private def encode(value: String): String =
+      URLEncoder.encode(value, StandardCharsets.UTF_8)
+
+    private def stripTrailingSlash(value: String): String =
+      value.stripSuffix("/")
+
+  enum BackendKind:
+    case VictoriaMetrics, Jsonl
+
+  object BackendKind:
+    def parse(value: String): Option[BackendKind] =
+      value.trim.toLowerCase match
+        case "victoria" | "victoriametrics" | "victoria-metrics" => Some(VictoriaMetrics)
+        case "jsonl" | "file"                                    => Some(Jsonl)
+        case _                                                   => None
+
+  def defaultBackend(root: os.Path = os.pwd): TokenMetricsBackend =
+    backendFromEnv(root)
+
+  def backendFromEnv(root: os.Path = os.pwd): TokenMetricsBackend =
+    sys.env
+      .get("GH_TASKS_TOKEN_METRICS_BACKEND")
+      .flatMap(BackendKind.parse)
+      .fold[TokenMetricsBackend](VictoriaMetricsBackend()) {
+        case BackendKind.VictoriaMetrics => VictoriaMetricsBackend()
+        case BackendKind.Jsonl           => JsonlTokenMetricsBackend(JsonlTokenMetricsBackend.defaultPath(root))
+      }
+
+  def backend(kind: BackendKind, root: os.Path, victoriaUrl: String): TokenMetricsBackend =
+    kind match
+      case BackendKind.VictoriaMetrics => VictoriaMetricsBackend(victoriaUrl)
+      case BackendKind.Jsonl           => JsonlTokenMetricsBackend(JsonlTokenMetricsBackend.defaultPath(root))
 
   def defaultRootForWorktree(cwd: os.Path): os.Path =
     val parent = cwd / os.up

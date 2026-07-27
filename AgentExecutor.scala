@@ -171,7 +171,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
   ): AgentResult =
     val started = System.currentTimeMillis()
     val metricsRootResolved = metricsRoot.getOrElse(TokenMetrics.defaultRootForWorktree(cwd))
-    val metricsPath = TokenMetrics.JsonlTokenMetricsBackend.defaultPath(metricsRootResolved)
+    val metricsBackend = TokenMetrics.defaultBackend(metricsRootResolved)
     val metricsVendor = TokenMetrics.parseVendor(runner.agent.value)
     val usageSource = tokenUsageSource(runner, cwd)
     val beforeUsage = usageSource.flatMap(_.current())
@@ -183,7 +183,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
           case _                             => "unsupported"
     TaskLogger.unsafeTrace(
       s"token metrics init agent=${runner.agent.value} vendor=${metricsVendor.map(_.toString.toLowerCase).getOrElse("unknown")} model=${runner.model
-          .getOrElse("-")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} cwd=$cwd root=$metricsRootResolved path=$metricsPath source=$metricsSource"
+          .getOrElse("-")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} cwd=$cwd root=$metricsRootResolved destination=${metricsBackend.destination} source=$metricsSource"
     )
     val lastActivity = AtomicLong(started)
     val output = StringBuilder()
@@ -273,7 +273,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       runner = runner,
       taskNumber = taskNumber,
       metricsScope = metricsScope,
-      metricsPath = metricsPath,
+      metricsBackend = metricsBackend,
       metricsVendor = metricsVendor,
       usageSource = usageSource,
       beforeUsage = beforeUsage,
@@ -294,7 +294,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       runner: TaskRunner,
       taskNumber: Option[TaskNumber],
       metricsScope: String,
-      metricsPath: os.Path,
+      metricsBackend: TokenMetrics.TokenMetricsBackend,
       metricsVendor: Option[TokenUsage.Vendor],
       usageSource: Option[TokenUsage.TokenUsageSource],
       beforeUsage: Option[TokenUsage.TokenSnapshot],
@@ -314,21 +314,18 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       case Some(usage)
           if usage.total > 0 || usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0 =>
         metricsVendor.foreach { vendor =>
-          TokenMetrics
-            .JsonlTokenMetricsBackend(metricsPath)
-            .record(
-              TokenMetrics.TokenMetricsEvent(
-                timestampMillis = System.currentTimeMillis(),
-                vendor = vendor,
-                usage = usage,
-                taskNumber = taskNumber,
-                model = runner.model,
-                scope = metricsScope
-              )
-            )
+          val event = TokenMetrics.TokenMetricsEvent(
+            timestampMillis = System.currentTimeMillis(),
+            vendor = vendor,
+            usage = usage,
+            taskNumber = taskNumber,
+            model = runner.model,
+            scope = metricsScope
+          )
+          metricsBackend.record(event)
           TaskLogger.unsafeTrace(
             s"token metrics recorded agent=${runner.agent.value} vendor=${vendor.toString.toLowerCase} model=${runner.model
-                .getOrElse("-")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} path=$metricsPath usage=${TokenMetrics
+                .getOrElse("-")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} destination=${metricsBackend.destination} usage=${TokenMetrics
                 .renderSummary(usage)}"
           )
         }
@@ -336,14 +333,14 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
         TaskLogger.unsafeTrace(
           s"token metrics skipped reason=zero-usage agent=${runner.agent.value} vendor=${metricsVendor
               .map(_.toString.toLowerCase)
-              .getOrElse("unknown")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} path=$metricsPath usage=${TokenMetrics
+              .getOrElse("unknown")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} destination=${metricsBackend.destination} usage=${TokenMetrics
               .renderSummary(usage)}"
         )
       case None =>
         TaskLogger.unsafeTrace(
           s"token metrics skipped reason=no-usage agent=${runner.agent.value} vendor=${metricsVendor
               .map(_.toString.toLowerCase)
-              .getOrElse("unknown")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} path=$metricsPath"
+              .getOrElse("unknown")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} destination=${metricsBackend.destination}"
         )
 
   private def streamReader(

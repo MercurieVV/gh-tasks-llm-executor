@@ -52,7 +52,11 @@ object Main extends IOApp:
           }
 
   private def renderMetrics(command: Cli.MetricsCommand): String =
-    val backend = TokenMetrics.JsonlTokenMetricsBackend(command.path)
+    val backend = command.backend match
+      case TokenMetrics.BackendKind.VictoriaMetrics =>
+        TokenMetrics.VictoriaMetricsBackend(command.victoriaUrl)
+      case TokenMetrics.BackendKind.Jsonl =>
+        TokenMetrics.JsonlTokenMetricsBackend(command.path)
     command.view match
       case Cli.MetricsView.Events =>
         TokenMetrics.renderEvents(backend.query(command.query))

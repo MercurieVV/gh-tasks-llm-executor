@@ -112,9 +112,20 @@ gemini/Vertex probe).
 
 ### Local token metrics
 
-Token metrics can be persisted locally as JSONL at
-`.gh-tasks-llm-executor/token-metrics.jsonl` through `TokenMetrics.JsonlTokenMetricsBackend`.
-The file is append-only and queryable by the local viewer:
+Token metrics are exported with otel4s/OpenTelemetry to VictoriaMetrics by default.
+Start the local backend with:
+
+```bash
+docker compose up victoria-metrics
+```
+
+The local VictoriaMetrics OTLP endpoint is
+`http://localhost:8428/opentelemetry/v1/metrics`. VMUI is available at
+`http://localhost:8428/vmui`, and the metrics explorer is at
+`http://localhost:8428/vmui/#/metrics`.
+
+The local viewer queries VictoriaMetrics unless `--backend=jsonl` or
+`GH_TASKS_TOKEN_METRICS_BACKEND=jsonl` is used:
 
 ```bash
 scala-cli run /path/to/gh-tasks-llm-executor -- metrics
@@ -123,7 +134,11 @@ scala-cli run /path/to/gh-tasks-llm-executor -- metrics --task=123 --json
 ```
 
 Supported filters: `--vendor`, `--task`/`--issue`, `--since`, `--until`,
-`--limit`, and `--path`.
+`--limit`, `--backend`, `--victoria-url`, and `--path` for the JSONL fallback.
+
+Metrics can still be persisted locally as JSONL at
+`.gh-tasks-llm-executor/token-metrics.jsonl` through
+`TokenMetrics.JsonlTokenMetricsBackend`.
 
 ## What it does
 
