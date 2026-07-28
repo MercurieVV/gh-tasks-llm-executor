@@ -13,6 +13,7 @@ FILES=(
   project-remote.scala
   main.scala
   BusinessLogic.scala
+  Models.scala
   Priority.scala
   src/main/scala/com/github/mercurievv/ghllm/agent/AgentExecutor.scala
   src/main/scala/com/github/mercurievv/ghllm/agent/AgentInventory.scala
