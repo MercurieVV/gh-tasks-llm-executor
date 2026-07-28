@@ -1,5 +1,5 @@
 // Main
-//> using scala 3.8.4
+//> using scala 3.6.2
 //> using options -Wunused:imports -Xmax-inlines:128
 
 //> using dependency com.lihaoyi::os-lib:0.11.8
