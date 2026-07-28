@@ -1,7 +1,7 @@
 package com.github.mercurievv.ghllm
 
 import higherkindness.droste.data.Mu
-import higherkindness.droste.syntax.all._
+import higherkindness.droste.syntax.fold.*
 import higherkindness.droste.Algebra
 import com.github.mercurievv.ghllm.task.TaskF
 import com.github.mercurievv.ghllm.task.TaskF._
