@@ -100,3 +100,131 @@ class AgentInventorySuite extends CatsEffectSuite:
       )
     )
   }
+
+  test("breakEvenRateAgainst: 20x cheaper tool yields Some(0.05)") {
+    val cheap = AgentTool(
+      id = AgentToolId("cheap"),
+      agent = Agent("cheap"),
+      model = Some("cheap"),
+      effort = None,
+      version = None,
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = Nil,
+      available = Available(true),
+      inputUsdPerMTok = Some(1.0),
+      outputUsdPerMTok = Some(0.0001),
+      asOfDate = Some("2035-01-01")
+    )
+    val strong = AgentTool(
+      id = AgentToolId("strong"),
+      agent = Agent("strong"),
+      model = Some("strong"),
+      effort = None,
+      version = None,
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = Nil,
+      available = Available(true),
+      inputUsdPerMTok = Some(20.0),
+      outputUsdPerMTok = Some(0.0001),
+      asOfDate = Some("2035-01-01")
+    )
+    assertEquals(cheap.breakEvenRateAgainst(strong), Some(0.05))
+  }
+
+  test("breakEvenRateAgainst: 2x cheaper tool yields Some(0.5)") {
+    val cheap = AgentTool(
+      id = AgentToolId("cheap"),
+      agent = Agent("cheap"),
+      model = Some("cheap"),
+      effort = None,
+      version = None,
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = Nil,
+      available = Available(true),
+      inputUsdPerMTok = Some(10.0),
+      outputUsdPerMTok = Some(0.0001),
+      asOfDate = Some("2035-01-01")
+    )
+    val strong = AgentTool(
+      id = AgentToolId("strong"),
+      agent = Agent("strong"),
+      model = Some("strong"),
+      effort = None,
+      version = None,
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = Nil,
+      available = Available(true),
+      inputUsdPerMTok = Some(20.0),
+      outputUsdPerMTok = Some(0.0001),
+      asOfDate = Some("2035-01-01")
+    )
+    assertEquals(cheap.breakEvenRateAgainst(strong), Some(0.5))
+  }
+
+  test("breakEvenRateAgainst: more expensive tool clamps to Some(1.0)") {
+    val expensive = AgentTool(
+      id = AgentToolId("expensive"),
+      agent = Agent("expensive"),
+      model = Some("expensive"),
+      effort = None,
+      version = None,
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = Nil,
+      available = Available(true),
+      inputUsdPerMTok = Some(20.0),
+      outputUsdPerMTok = Some(0.0001),
+      asOfDate = Some("2035-01-01")
+    )
+    val strong = AgentTool(
+      id = AgentToolId("strong"),
+      agent = Agent("strong"),
+      model = Some("strong"),
+      effort = None,
+      version = None,
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = Nil,
+      available = Available(true),
+      inputUsdPerMTok = Some(10.0),
+      outputUsdPerMTok = Some(0.0001),
+      asOfDate = Some("2035-01-01")
+    )
+    assertEquals(expensive.breakEvenRateAgainst(strong), Some(1.0))
+  }
+
+  test("breakEvenRateAgainst: tool with no cost yields None") {
+    val unpriced = AgentTool(
+      id = AgentToolId("unpriced"),
+      agent = Agent("unpriced"),
+      model = None,
+      effort = None,
+      version = None,
+      roles = Nil,
+      jobTypes = Nil,
+      strengths = Nil,
+      available = Available(true),
+      inputUsdPerMTok = None,
+      outputUsdPerMTok = None,
+      asOfDate = None
+    )
+    val strong = AgentTool(
+      id = AgentToolId("strong"),
+      agent = Agent("strong"),
+      model = Some("strong"),
+      effort = None,
+      version = None,
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = Nil,
+      available = Available(true),
+      inputUsdPerMTok = Some(10.0),
+      outputUsdPerMTok = Some(0.0001),
+      asOfDate = Some("2035-01-01")
+    )
+    assertEquals(unpriced.breakEvenRateAgainst(strong), None)
+  }
