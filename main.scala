@@ -1,3 +1,12 @@
+package com.github.mercurievv.ghllm
+
+import com.github.mercurievv.ghllm.*
+import com.github.mercurievv.ghllm.agent.*
+import com.github.mercurievv.ghllm.arrow.*
+import com.github.mercurievv.ghllm.cli.*
+import com.github.mercurievv.ghllm.git.*
+import com.github.mercurievv.ghllm.metrics.*
+
 import arrowstep.runtime.AgentMain
 import cats.effect.ExitCode
 import cats.effect.IO

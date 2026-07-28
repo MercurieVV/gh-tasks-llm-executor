@@ -11,28 +11,28 @@ BASE="https://raw.githubusercontent.com/MercurieVV/gh-tasks-llm-executor/${REF}"
 
 FILES=(
   project-remote.scala
-  AgentExecutor.scala
-  AgentInventory.scala
-  AgentRunnersDiscovery.scala
-  ArrowCapabilities.scala
-  ArrowLogging.scala
-  BusinessLogic.scala
-  Cli.scala
-  EvaluationArrows.scala
-  Git.scala
-  github.scala
-  Implementations.scala
-  IssueClaim.scala
   main.scala
-  ParallelArrows.scala
+  BusinessLogic.scala
   Priority.scala
-  RunEnv.scala
-  TaskLogger.scala
-  TokenMetrics.scala
-  TokenUsage.scala
-  VendorBudgets.scala
-  Wiring.scala
-  taskMetadata.scala
+  src/main/scala/com/github/mercurievv/ghllm/agent/AgentExecutor.scala
+  src/main/scala/com/github/mercurievv/ghllm/agent/AgentInventory.scala
+  src/main/scala/com/github/mercurievv/ghllm/agent/AgentRunnersDiscovery.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/ArrowCapabilities.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/ArrowLogging.scala
+  src/main/scala/com/github/mercurievv/ghllm/cli/Cli.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/EvaluationArrows.scala
+  src/main/scala/com/github/mercurievv/ghllm/git/Git.scala
+  src/main/scala/com/github/mercurievv/ghllm/git/github.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/Implementations.scala
+  src/main/scala/com/github/mercurievv/ghllm/git/IssueClaim.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/ParallelArrows.scala
+  src/main/scala/com/github/mercurievv/ghllm/cli/RunEnv.scala
+  src/main/scala/com/github/mercurievv/ghllm/metrics/TaskLogger.scala
+  src/main/scala/com/github/mercurievv/ghllm/metrics/TokenMetrics.scala
+  src/main/scala/com/github/mercurievv/ghllm/metrics/TokenUsage.scala
+  src/main/scala/com/github/mercurievv/ghllm/metrics/VendorBudgets.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/Wiring.scala
+  src/main/scala/com/github/mercurievv/ghllm/cli/taskMetadata.scala
 )
 
 urls=()
