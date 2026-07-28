@@ -1,9 +1,8 @@
 package com.github.mercurievv.ghllm
 
 import higherkindness.droste.{scheme, Algebra}
-import higherkindness.droste.data.Mu
+import higherkindness.droste.data.Fix
 import com.github.mercurievv.ghllm.task.TaskF
-import com.github.mercurievv.ghllm.TaskTree
 import munit.FunSuite
 
 class TaskTreeSuite extends FunSuite {
@@ -14,16 +13,16 @@ class TaskTreeSuite extends FunSuite {
       case TaskF.Branch(_, children) => children.sum + 1
     }
 
-    val tree = TaskTree.branch(
+    val tree = Fix(TaskF.Branch(
       "root",
       List(
-        Mu(TaskF.Leaf(Some(5))),
-        TaskTree.branch(
+        Fix(TaskF.Leaf(Some(5))),
+        Fix(TaskF.Branch(
           "inner",
-          List(Mu(TaskF.Leaf(Some(10))))
-        )
+          List(Fix(TaskF.Leaf(Some(10))))
+        ))
       )
-    )
+    ))
 
     val result = scheme.cata(countAlg).apply(tree)
     assertEquals(result, 4) // root + inner branch + 2 leaves = 4 nodes
