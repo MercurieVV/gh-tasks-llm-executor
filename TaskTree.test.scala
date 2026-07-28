@@ -1,24 +1,31 @@
 package com.github.mercurievv.ghllm
 
+import higherkindness.droste.{scheme, Algebra}
 import higherkindness.droste.data.Mu
-import higherkindness.droste.syntax.fold.*
-import higherkindness.droste.Algebra
 import com.github.mercurievv.ghllm.task.TaskF
-import com.github.mercurievv.ghllm.task.TaskF._
+import com.github.mercurievv.ghllm.TaskTree
+import munit.FunSuite
 
-class TaskTreeSuite extends munit.FunSuite {
+class TaskTreeSuite extends FunSuite {
 
-  test("build a 3-node tree and fold it to a node count with cata") {
-    val leaf = Mu[TaskF](Branch("leaf", Nil))
-    val left = Mu[TaskF](Branch("left", List(leaf)))
-    val tree = Mu[TaskF](Branch("root", List(left)))
-
+  test("cata over a simple tree") {
     val countAlg: Algebra[TaskF, Int] = Algebra {
-      case Branch(_, kids) => kids.sum + 1
-      case Leaf(_)         => 1
+      case TaskF.Leaf(_)           => 1
+      case TaskF.Branch(_, children) => children.sum + 1
     }
 
-    val total = tree.cata(countAlg)
-    assertEquals(total, 3)
+    val tree = TaskTree.branch(
+      "root",
+      List(
+        Mu(TaskF.Leaf(Some(5))),
+        TaskTree.branch(
+          "inner",
+          List(Mu(TaskF.Leaf(Some(10))))
+        )
+      )
+    )
+
+    val result = scheme.cata(countAlg).apply(tree)
+    assertEquals(result, 4) // root + inner branch + 2 leaves = 4 nodes
   }
 }
