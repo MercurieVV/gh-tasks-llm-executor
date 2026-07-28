@@ -3,7 +3,7 @@ package com.github.mercurievv.ghllm
 import higherkindness.droste.{Algebra, scheme}
 import higherkindness.droste.data.Fix
 import higherkindness.droste.syntax.all._
-import com.github.mercurievv.ghllm.TaskTree.{TaskF, given}
+import com.github.mercurievv.ghllm.TaskTree.TaskF
 
 class TaskTreeTest extends munit.FunSuite {
 
