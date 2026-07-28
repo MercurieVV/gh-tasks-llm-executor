@@ -65,10 +65,7 @@ object BusinessLogicFixture:
       routeResumeOrRun = unexpected("routeResumeOrRun"),
       resumeTask = ResumeTaskArrows[TestFlow](
         resume = ResumePullRequestArrows[TestFlow](
-          startResume = unexpected("startResume"),
-          resumePullRequest = unexpected("resumePullRequest"),
-          routeResumeFailure = unexpected("routeResumeFailure"),
-          raiseResumeFailure = unexpected("raiseResumeFailure")
+          resumePullRequest = unexpected("resumePullRequest")
         ),
         announceResume = unexpected("announceResume"),
         resumedExecution = unexpected("resumedExecution"),
@@ -100,20 +97,14 @@ object BusinessLogicFixture:
       publishRemote = PublishRemoteArrows[TestFlow](
         toPushRequest = unexpected("toPushRequest"),
         pushBranch = unexpected("pushBranch"),
-        routePushFailure = unexpected("routePushFailure"),
-        raisePushFailure = unexpected("raisePushFailure"),
         toPublishRequest = unexpected("toPublishRequestRemote"),
-        createAndMergePullRequest = unexpected("createAndMergePullRequest"),
-        routeMergeFailure = unexpected("routeMergeFailure"),
-        raiseMergeFailure = unexpected("raiseMergeFailure")
+        createAndMergePullRequest = unexpected("createAndMergePullRequest")
       ),
       publishLocal = unexpected("publishLocal")
     ),
     executeTaskArrows = ExecuteTaskArrows[TestFlow](
       runAgent = AgentRunArrows[TestFlow](
-        runTaskWithRunner = unexpected("runTaskWithRunner"),
-        routeRunnerFallback = unexpected("routeRunnerFallback"),
-        raiseRunnerFailure = unexpected("raiseRunnerFailure")
+        runTaskWithRunner = unexpected("runTaskWithRunner")
       ),
       runProjectValidation = unexpected("runProjectValidation"),
       recordAgentOutput = unexpected("recordAgentOutput"),

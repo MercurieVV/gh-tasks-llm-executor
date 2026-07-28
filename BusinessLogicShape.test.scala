@@ -110,12 +110,7 @@ class BusinessLogicShapeSuite extends CatsEffectSuite:
           taskArrows = logic.taskArrows.copy(
             resumeTask = logic.taskArrows.resumeTask.copy(
               resume = logic.taskArrows.resumeTask.resume.copy(
-                startResume = Kleisli(run => IO.pure(PullRequestResume(run, 2))),
-                resumePullRequest = Kleisli(_ => IO.raiseError(gone)),
-                // The repair loop declines it first: not repairable, so it
-                // leaves the loop and only then becomes a resume-error branch.
-                routeResumeFailure = Kleisli { case (_, error) => IO.pure(Left(error)) },
-                raiseResumeFailure = Kleisli(IO.raiseError)
+                resumePullRequest = Kleisli(_ => IO.raiseError(gone))
               ),
               announceResume = Kleisli(IO.pure),
               routeResumeError = Kleisli {
@@ -125,10 +120,12 @@ class BusinessLogicShapeSuite extends CatsEffectSuite:
               announceNoPullRequest = Kleisli(run => steps.update(_ :+ "announceNoPr").as(run))
             ),
             announceTask = Kleisli(run => steps.update(_ :+ "announceTask").as(run)),
-            fetchTaskContext = Kleisli(run => steps.update(_ :+ "fetch").as(PreparedTask(run, None, None))),
+            fetchTaskContext =
+              Kleisli((run: ClaimedTask) => steps.update(_ :+ "fetch").as(PreparedTask(run, None, None))),
             evaluateTask = Kleisli(task => steps.update(_ :+ "evaluate").as(Right(Right(task)))),
             markTaskInProgress = Kleisli(task => steps.update(_ :+ "markInProgress").as(task)),
-            acquireWorktreeAndExecute = Kleisli(task => steps.update(_ :+ "execute").as(task.claimedTask)),
+            acquireWorktreeAndExecute =
+              Kleisli((task: PreparedTask) => steps.update(_ :+ "execute").as(task.claimedTask)),
             completedTaskSummary = Kleisli(_ => IO.pure(summary("ran normally")))
           )
         )

@@ -37,10 +37,10 @@ object Wiring:
     def cycle[A, B](arrow: => Kleisli[RunF[F], A, B]): Kleisli[RunF[F], A, B] =
       ArrowDefer[RealArr].defer(arrow)
 
-    lazy val assembled: BusinessLogic[ReplayArr] =
+    lazy val replayed: BusinessLogic[ReplayArr] =
       Replayability.combine(replayWired, realWired)
     lazy val realAssembled: BusinessLogic[RealArr] =
-      Replayability.lowerOrRaise(assembled)
+      Retryability.combine(retryWired, Replayability.lowerOrRaise(replayed))
     lazy val logged: BusinessLogic[RealArr] =
       realAssembled.withArrowLogging(arrowLogger[RunF[F]])
 
@@ -65,21 +65,8 @@ object Wiring:
         toProgramSays = Impl.toProgramSays
       ),
       taskArrows = TaskArrows[RealArr](
-        routeResumeOrRun = Impl.routeResumeOrRun,
-        resumeTask = ResumeTaskArrows[RealArr](
-          resume = ResumePullRequestArrows[RealArr](
-            startResume = Impl.startResume,
-            resumePullRequest = Impl.resumePullRequest,
-            routeResumeFailure = Impl.routeResumeFailure,
-            raiseResumeFailure = Impl.raiseK
-          ),
-          announceResume = Impl.announceResume,
-          resumedExecution = Impl.resumedExecution,
-          cleanupAndSummarize = Impl.cleanupAndSummarize,
-          routeResumeError = Impl.routeResumeError,
-          announceNoPullRequest = Impl.announceNoPullRequest,
-          reportResumeFailure = Impl.reportResumeFailure
-        ),
+        routeResumeOrRun = Impl.routeRun,
+        resumeTask = replayOnlyResumeTask,
         announceTask = Impl.announceTask,
         fetchTaskContext = Impl.fetchTaskContext,
         evaluateTask = evaluationArrows.evaluateTask,
@@ -103,20 +90,14 @@ object Wiring:
         publishRemote = PublishRemoteArrows[RealArr](
           toPushRequest = Impl.toPushRequest,
           pushBranch = Impl.pushBranch,
-          routePushFailure = Impl.routePushFailure,
-          raisePushFailure = Impl.raiseK,
           toPublishRequest = Impl.toPublishRequest,
-          createAndMergePullRequest = Impl.createAndMergePullRequest,
-          routeMergeFailure = Impl.routeMergeFailure,
-          raiseMergeFailure = Impl.raiseK
+          createAndMergePullRequest = Impl.createAndMergePullRequest
         ),
         publishLocal = Impl.publishLocal
       ),
       executeTaskArrows = ExecuteTaskArrows[RealArr](
         runAgent = AgentRunArrows[RealArr](
-          runTaskWithRunner = Impl.runTaskWithRunner,
-          routeRunnerFallback = Impl.routeRunnerFallback,
-          raiseRunnerFailure = Impl.raiseK
+          runTaskWithRunner = Impl.runTaskWithRunner
         ),
         runProjectValidation = Impl.runProjectValidation,
         recordAgentOutput = Impl.recordAgentOutput,
@@ -143,6 +124,24 @@ object Wiring:
       )
     )
 
+    def replayOnlyResumeTask: ResumeTaskArrows[RealArr] =
+      ResumeTaskArrows[RealArr](
+        resume = ResumePullRequestArrows[RealArr](
+          resumePullRequest = replayOnly("resumePullRequest")
+        ),
+        announceResume = replayOnly("announceResume"),
+        resumedExecution = replayOnly("resumedExecution"),
+        cleanupAndSummarize = replayOnly("cleanupAndSummarize"),
+        routeResumeError = replayOnly("routeResumeError"),
+        announceNoPullRequest = replayOnly("announceNoPullRequest"),
+        reportResumeFailure = replayOnly("reportResumeFailure")
+      )
+
+    def replayOnly[A, B](name: String): RealArr[A, B] =
+      Kleisli(_ =>
+        Sync[RunF[F]].raiseError(RuntimeException(s"Unexpected replay-only arrow in real business logic: $name"))
+      )
+
     lazy val replayWired: BusinessLogic[ReplayArr] =
       BusinessLogicReplay[RunF[F]](
         progress = Impl.progress,
@@ -150,6 +149,9 @@ object Wiring:
         waitForUserInput = Impl.waitForUserInput(cycle(logged.taskArrows.evaluateTask)),
         hasOriginBranch = Impl.git[RunF[F]].hasOriginBranch
       )
+
+    lazy val retryWired: BusinessLogic[Retryability.RetryFlow[RealArr]] =
+      BusinessLogicRetry[RunF[F]](progress = Impl.progress)
 
     logged
 

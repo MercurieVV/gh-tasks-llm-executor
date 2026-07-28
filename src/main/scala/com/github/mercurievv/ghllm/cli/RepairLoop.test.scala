@@ -86,29 +86,22 @@ class AgentRunArrowsSuite extends CatsEffectSuite:
     )
   private val boom = RuntimeException("runner failed")
 
-  private def arrows(
-      runTaskWithRunner: TestFlow[PreparedTask, ExecutedTask],
-      routeRunnerFallback: TestFlow[(PreparedTask, Throwable), Either[Throwable, PreparedTask]]
-  ) = AgentRunArrows[TestFlow](
-    runTaskWithRunner = runTaskWithRunner,
-    routeRunnerFallback = routeRunnerFallback,
-    raiseRunnerFailure = Kleisli(IO.raiseError)
-  )
-
   test("a failed run escalates to the stronger runner exactly once"):
     Ref[IO].of(List.empty[AgentBinary]).flatMap { runners =>
-      val logic = arrows(
-        runTaskWithRunner = Kleisli { task =>
-          val runner = task.claimedTask.runner
-          runners.update(_ :+ runner.agent) *>
-            (if runner.agent.value == weak.agent.value then IO.raiseError(boom)
-             else IO.pure(ExecutedTask(task.claimedTask, AgentOutput("ok"))))
-        },
-        routeRunnerFallback = Kleisli { case (task, _) =>
+      val runTaskWithRunner = Kleisli { (task: PreparedTask) =>
+        val runner = task.claimedTask.runner
+        runners.update(_ :+ runner.agent) *>
+          (if runner.agent.value == weak.agent.value then IO.raiseError(boom)
+           else IO.pure(ExecutedTask(task.claimedTask, AgentOutput("ok"))))
+      }
+      val retryingRunTask = BusinessLogicRetry.retryRunTaskWithRunner[IO](
+        routeFallback = Kleisli { case (task, _) =>
           IO.pure(Right(task.copy(claimedTask = task.claimedTask.copy(runner = strong))))
-        }
-      )
-      logic.runAgent.run(prepared(weak)).flatMap { result =>
+        },
+        raiseFailure = Kleisli(IO.raiseError)
+      )(runTaskWithRunner)
+
+      retryingRunTask.run(prepared(weak)).flatMap { result =>
         runners.get.map { attempted =>
           assertEquals(result.output.value, "ok")
           assertEquals(attempted, List(weak.agent, strong.agent))
@@ -117,8 +110,9 @@ class AgentRunArrowsSuite extends CatsEffectSuite:
     }
 
   test("with no stronger runner the failure propagates"):
-    val logic = arrows(
-      runTaskWithRunner = Kleisli(_ => IO.raiseError(boom)),
-      routeRunnerFallback = Kleisli { case (_, error) => IO.pure(Left(error)) }
-    )
-    logic.runAgent.run(prepared(weak)).attempt.map(result => assertEquals(result, Left(boom)))
+    val retryingRunTask = BusinessLogicRetry.retryRunTaskWithRunner[IO](
+      routeFallback = Kleisli { case (_, error) => IO.pure(Left(error)) },
+      raiseFailure = Kleisli(IO.raiseError)
+    )(Kleisli(_ => IO.raiseError(boom)))
+
+    retryingRunTask.run(prepared(weak)).attempt.map(result => assertEquals(result, Left(boom)))

@@ -3,9 +3,7 @@ package com.github.mercurievv.ghllm
 import com.github.mercurievv.ghllm.*
 import com.github.mercurievv.ghllm.agent.*
 import com.github.mercurievv.ghllm.arrow.*
-import com.github.mercurievv.ghllm.cli.*
 import com.github.mercurievv.ghllm.git.*
-import com.github.mercurievv.ghllm.metrics.*
 
 import arrowstep.core.ProgramSays
 import cats.arrow.ArrowChoice
@@ -345,23 +343,12 @@ final case class PublishRequest(
     runner: TaskRunner
 )
 
-/** State of the push repair loop: what to push, and for whom to repair it. */
+/** Remote branch push request. */
 final case class PushRequest(
     worktreePath: os.Path,
     branchName: BranchName,
     task: Issue,
     runner: TaskRunner
-)
-
-/** State of the Pull Request resume loop.
-  *
-  * `checksRepairAttemptsRemaining` bounds it: an agent that cannot actually fix the failing check would otherwise retry
-  * forever, burning an agent run on every resume of this task. Merge-conflict repairs do not consume the budget - they
-  * make measurable progress or fail outright.
-  */
-final case class PullRequestResume(
-    run: ClaimedTask,
-    checksRepairAttemptsRemaining: Int
 )
 
 /** Publication path for worktree changes that still need commit preparation. */
@@ -508,107 +495,27 @@ final case class PublicationArrows[-->[_, _]](
     choosePublicationTransport >>>
       (publishRemote.publishRemote ||| publishLocal)
 
-/** Invoking the implementer agent for a prepared task.
-  *
-  * Was a single `runAgent` leaf whose body held failure handling. Retry selection is now an `ArrowChoice` branch.
-  */
+/** Invoking the implementer agent for a prepared task. */
 final case class AgentRunArrows[-->[_, _]](
-    runTaskWithRunner: PreparedTask --> ExecutedTask,
-    // Left = no stronger runner left, give up. Right = the same task re-aimed
-    // at a stronger implementer, to be attempted once more.
-    routeRunnerFallback: (PreparedTask, Throwable) --> Either[Throwable, PreparedTask],
-    raiseRunnerFailure: Throwable --> ExecutedTask
+    runTaskWithRunner: PreparedTask --> ExecutedTask
 ):
-  def runAgent(using ArrowChoice[-->], ArrowAttempt[-->]): PreparedTask --> ExecutedTask =
-    runImplementer
+  def runAgent: PreparedTask --> ExecutedTask =
+    runTaskWithRunner
 
-  def runImplementer(using
-      arrow: ArrowChoice[-->],
-      attempt: ArrowAttempt[-->]
-  ): PreparedTask --> ExecutedTask =
-    attempt.attempt(runTaskWithRunner) >>>
-      (retryWithStrongerRunner ||| arrow.lift(_._2))
-
-  // Exactly one escalation: the fallback runner is not itself retried.
-  private def retryWithStrongerRunner(using
-      arrow: ArrowChoice[-->]
-  ): (PreparedTask, Throwable) --> ExecutedTask =
-    routeRunnerFallback >>> (raiseRunnerFailure ||| runTaskWithRunner)
-
-/** Driving an existing open Pull Request to merged, repairing what blocks it.
-  *
-  * Was `resumeOpenPullRequestWithConflictRepair`, a `def` that called itself from inside `handleErrorWith` with a
-  * hand-carried attempt budget. The budget now lives in `PullRequestResume`, i.e. in the loop's state, the same way
-  * `RootWalk` carries the root-walk's.
-  */
-final case class ResumePullRequestArrows[-->[_, _]](
-    startResume: ClaimedTask --> PullRequestResume,
-    resumePullRequest: PullRequestResume --> Unit,
-    // Merge conflict -> resolve and retry with the budget intact; failing
-    // checks -> run the repair agent, push, retry with one fewer attempt;
-    // anything else (or budget exhausted) -> Left.
-    routeResumeFailure: (PullRequestResume, Throwable) --> Either[Throwable, PullRequestResume],
-    raiseResumeFailure: Throwable --> Unit
-):
-  def resumeUntilMerged(using
-      ArrowChoice[-->],
-      ArrowDefer[-->],
-      ArrowAttempt[-->]
-  ): ClaimedTask --> Unit =
-    startResume >>> RepairLoop(resumePullRequest, routeResumeFailure, raiseResumeFailure)
-
-/** Completing a task from a Pull Request an earlier, interrupted run left open. */
-final case class ResumeTaskArrows[-->[_, _]](
-    resume: ResumePullRequestArrows[-->],
-    announceResume: ClaimedTask --> ClaimedTask,
-    resumedExecution: ClaimedTask --> ExecutedTask,
-    cleanupAndSummarize: ClaimedTask --> RunSummary,
-    // Left = the Pull Request turned out to be gone; fall back to an ordinary
-    // run. Right = a real failure to report and re-raise.
-    routeResumeError: (ClaimedTask, Throwable) --> Either[ClaimedTask, (ClaimedTask, Throwable)],
-    announceNoPullRequest: ClaimedTask --> ClaimedTask,
-    reportResumeFailure: (ClaimedTask, Throwable) --> RunSummary
-)
-
-/** Publishing a branch through the GitHub remote: push it, then open and merge its Pull Request.
-  *
-  * Both steps are the same repair loop at different actions - a rejected `git push` (usually the repo's prePush hook)
-  * is repaired by an agent and retried, a rejected merge by resolving the conflict against the base branch. They were
-  * two separate self-recursive `def`s.
-  */
+/** Publishing a branch through the GitHub remote: push it, then open and merge its Pull Request. */
 final case class PublishRemoteArrows[-->[_, _]](
     toPushRequest: RemotePublication --> PushRequest,
     pushBranch: PushRequest --> Unit,
-    routePushFailure: (PushRequest, Throwable) --> Either[Throwable, PushRequest],
-    raisePushFailure: Throwable --> Unit,
     toPublishRequest: RemotePublication --> PublishRequest,
-    createAndMergePullRequest: PublishRequest --> Unit,
-    routeMergeFailure: (PublishRequest, Throwable) --> Either[Throwable, PublishRequest],
-    raiseMergeFailure: Throwable --> Unit
+    createAndMergePullRequest: PublishRequest --> Unit
 ):
   def publishRemote(using
-      arrow: ArrowChoice[-->],
-      defer: ArrowDefer[-->],
-      attempt: ArrowAttempt[-->]
+      arrow: ArrowChoice[-->]
   ): RemotePublication --> Unit =
     // `&&&` on this arrow is sequential, left before right (see ParallelArrows
     // for why, and for the concurrent variant): the push must land before the
     // Pull Request is opened against it.
-    (pushUntilAccepted &&& mergeUntilMerged) >>> arrow.lift(_ => ())
-
-  def pushUntilAccepted(using
-      ArrowChoice[-->],
-      ArrowDefer[-->],
-      ArrowAttempt[-->]
-  ): RemotePublication --> Unit =
-    toPushRequest >>> RepairLoop(pushBranch, routePushFailure, raisePushFailure)
-
-  def mergeUntilMerged(using
-      ArrowChoice[-->],
-      ArrowDefer[-->],
-      ArrowAttempt[-->]
-  ): RemotePublication --> Unit =
-    toPublishRequest >>> RepairLoop(createAndMergePullRequest, routeMergeFailure, raiseMergeFailure)
+    ((toPushRequest >>> pushBranch) &&& (toPublishRequest >>> createAndMergePullRequest)) >>> arrow.lift(_ => ())
 
 /** Arrows for the already prepared task execution pipeline. */
 final case class ExecuteTaskArrows[-->[_, _]](
@@ -834,11 +741,11 @@ final case class BusinessLogic[-->[_, _]](
       defer: ArrowDefer[-->],
       attempt: ArrowAttempt[-->]
   ): ClaimedTask --> RunSummary =
-    val resume = taskArrows.resumeTask
-    val recover =
-      resume.routeResumeError >>>
-        ((resume.announceNoPullRequest >>> executeClaimedTask) ||| resume.reportResumeFailure)
-    attempt.attempt(resumeAndClose) >>> (recover ||| arrow.lift(_._2))
+    Replayability.resumeOrRun(
+      taskArrows.resumeTask,
+      resumeAndClose,
+      executeClaimedTask
+    )
 
   private def resumeAndClose(using
       arrow: ArrowChoice[-->],
@@ -887,4 +794,5 @@ final case class BusinessLogic[-->[_, _]](
 
 object BusinessLogic:
   given Functor2K[BusinessLogic] = Functor2K.derived
+  given Apply2K[BusinessLogic] = Apply2K.derived
   given Monoid2K[BusinessLogic] = Monoid2K.derived

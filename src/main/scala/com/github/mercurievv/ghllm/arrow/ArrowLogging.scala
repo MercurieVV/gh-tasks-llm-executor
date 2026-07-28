@@ -83,6 +83,39 @@ object Functor2K:
   ): Functor2K[T] =
     product
 
+trait Apply2K[T[_[_, _]]]:
+  def apK[F[_, _]](functions: T[[A, B] =>> F[A, B] => F[A, B]])(value: T[F]): T[F]
+
+object Apply2K:
+  def apply[T[_[_, _]]](using applyK: Apply2K[T]): Apply2K[T] =
+    applyK
+
+  given [A, B]: Apply2K[K12.Id[A, B]] with
+    def apK[F[_, _]](
+        functions: F[A, B] => F[A, B]
+    )(value: F[A, B]): F[A, B] =
+      functions(value)
+
+  given product[T[_[_, _]]](using
+      inst: K12.ProductInstances[Apply2K, T]
+  ): Apply2K[T] with
+    def apK[F[_, _]](
+        functions: T[[A, B] =>> F[A, B] => F[A, B]]
+    )(value: T[F]): T[F] =
+      inst.map2(functions, value)(
+        [field[_[_, _]]] =>
+          (
+              fieldApply: Apply2K[field],
+              fieldFunctions: field[[A, B] =>> F[A, B] => F[A, B]],
+              fieldValue: field[F]
+          ) => fieldApply.apK(fieldFunctions)(fieldValue)
+      )
+
+  inline def derived[T[_[_, _]]](using
+      K12.ProductGeneric[T]
+  ): Apply2K[T] =
+    product
+
 trait Semigroup2[F[_, _]]:
   def combine[A, B](x: F[A, B], y: F[A, B]): F[A, B]
 

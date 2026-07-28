@@ -26,6 +26,18 @@ object BusinessLogicReplay:
 
     empty.copy(
       taskArrows = empty.taskArrows.copy(
+        routeResumeOrRun = Replayability.routeResumeOrRun(progress),
+        resumeTask = ResumeTaskArrows[ReplayArr](
+          resume = ResumePullRequestArrows[ReplayArr](
+            resumePullRequest = Replayability.resumePullRequest(progress)
+          ),
+          announceResume = Replayability.announceResume,
+          resumedExecution = Replayability.resumedExecution,
+          cleanupAndSummarize = Replayability.cleanupAndSummarize(progress),
+          routeResumeError = Replayability.routeResumeError,
+          announceNoPullRequest = Replayability.announceNoPullRequest,
+          reportResumeFailure = Replayability.reportResumeFailure(progress)
+        ),
         fetchTaskContext = Replayability.fetchTaskReplayContext(progress),
         evaluateTask = evaluationArrows.evaluateTask,
         splitTaskSummary = Replayability.splitTaskSummary

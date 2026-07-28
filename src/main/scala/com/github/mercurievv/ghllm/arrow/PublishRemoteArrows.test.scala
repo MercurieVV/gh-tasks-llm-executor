@@ -43,22 +43,12 @@ class PublishRemoteArrowsSuite extends CatsEffectSuite:
 
   private def arrows(
       pushBranch: TestFlow[PushRequest, Unit],
-      createAndMergePullRequest: TestFlow[PublishRequest, Unit],
-      routePushFailure: TestFlow[(PushRequest, Throwable), Either[Throwable, PushRequest]] = Kleisli {
-        case (_, error) => IO.pure(Left(error))
-      },
-      routeMergeFailure: TestFlow[(PublishRequest, Throwable), Either[Throwable, PublishRequest]] = Kleisli {
-        case (_, error) => IO.pure(Left(error))
-      }
+      createAndMergePullRequest: TestFlow[PublishRequest, Unit]
   ) = PublishRemoteArrows[TestFlow](
     toPushRequest = Kleisli(_ => IO.pure(pushRequest)),
     pushBranch = pushBranch,
-    routePushFailure = routePushFailure,
-    raisePushFailure = Kleisli(IO.raiseError),
     toPublishRequest = Kleisli(publication => IO.pure(publication.request)),
-    createAndMergePullRequest = createAndMergePullRequest,
-    routeMergeFailure = routeMergeFailure,
-    raiseMergeFailure = Kleisli(IO.raiseError)
+    createAndMergePullRequest = createAndMergePullRequest
   )
 
   // The composition uses `&&&`, which is sequential on this arrow. If that ever
@@ -77,18 +67,25 @@ class PublishRemoteArrowsSuite extends CatsEffectSuite:
   test("a repaired push is retried, and the merge still follows it"):
     Ref[IO].of(List.empty[String]).flatMap { events =>
       Ref[IO].of(0).flatMap { pushes =>
-        arrows(
+        val base = arrows(
           pushBranch = Kleisli { _ =>
             pushes.updateAndGet(_ + 1).flatMap { attempt =>
               events.update(_ :+ s"push$attempt") *>
                 IO.raiseError[Unit](boom).whenA(attempt == 1)
             }
           },
-          routePushFailure = Kleisli { case (request, _) =>
+          createAndMergePullRequest = Kleisli(_ => events.update(_ :+ "merge"))
+        )
+        val retryPush = BusinessLogicRetry.retryWithRepair[IO, PushRequest](
+          routeFailure = Kleisli { case (request, _) =>
             events.update(_ :+ "repair").as(Right(request))
           },
-          createAndMergePullRequest = Kleisli(_ => events.update(_ :+ "merge"))
-        ).publishRemote
+          raiseFailure = Kleisli(IO.raiseError)
+        )(base.pushBranch)
+
+        base
+          .copy(pushBranch = retryPush)
+          .publishRemote
           .run(remote)
           .flatMap(_ => events.get.map(seen => assertEquals(seen, List("push1", "repair", "push2", "merge"))))
       }
@@ -112,25 +109,32 @@ class PublishRemoteArrowsSuite extends CatsEffectSuite:
 
   test("a resolved merge conflict retries the merge"):
     Ref[IO].of(0).flatMap { merges =>
-      arrows(
+      val base = arrows(
         pushBranch = Kleisli(_ => IO.unit),
         createAndMergePullRequest = Kleisli { _ =>
           merges.updateAndGet(_ + 1).flatMap(attempt => IO.raiseError[Unit](boom).whenA(attempt == 1))
-        },
-        routeMergeFailure = Kleisli { case (request, _) => IO.pure(Right(request)) }
-      ).publishRemote
+        }
+      )
+      val retryMerge = BusinessLogicRetry.retryWithRepair[IO, PublishRequest](
+        routeFailure = Kleisli { case (request, _) => IO.pure(Right(request)) },
+        raiseFailure = Kleisli(IO.raiseError)
+      )(base.createAndMergePullRequest)
+
+      base
+        .copy(createAndMergePullRequest = retryMerge)
+        .publishRemote
         .run(remote)
         .flatMap(_ => merges.get.map(assertEquals(_, 2)))
     }
 
   test("merge conflict repair prompt names unmerged files and requires staging"):
-    val prompt = Impl
+    val prompt = BusinessLogicRetry
       .mergeConflictRepairPrompt(issue(117), "task-33", Seq(".gitignore", "build.mill"))
       .value
 
-    assert(prompt.contains("Unmerged files reported by Git:"))
-    assert(prompt.contains("- .gitignore"))
-    assert(prompt.contains("- build.mill"))
-    assert(prompt.contains("git add"))
-    assert(prompt.contains("git diff --name-only --diff-filter=U"))
-    assert(prompt.contains("Do not run `git commit`"))
+    assertEquals(prompt.contains("Unmerged files reported by Git:"), true)
+    assertEquals(prompt.contains("- .gitignore"), true)
+    assertEquals(prompt.contains("- build.mill"), true)
+    assertEquals(prompt.contains("git add"), true)
+    assertEquals(prompt.contains("git diff --name-only --diff-filter=U"), true)
+    assertEquals(prompt.contains("Do not run `git commit`"), true)
