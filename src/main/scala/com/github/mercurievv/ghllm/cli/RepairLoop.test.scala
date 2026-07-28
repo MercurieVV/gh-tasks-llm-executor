@@ -38,6 +38,44 @@ class RepairLoopSuite extends CatsEffectSuite:
       loop.run(1) *> attempts.get.map(assertEquals(_, 3))
     }
 
+  test("a failed step repairs and retries the whole chain"):
+    Ref[IO].of(List.empty[String]).flatMap { events =>
+      Ref[IO].of(0).flatMap { attempts =>
+        val chain = Kleisli { (state: Int) =>
+          attempts.updateAndGet(_ + 1).flatMap { attempt =>
+            events.update(_ :+ s"commit-$attempt") *>
+              IO.raiseError[Unit](boom).whenA(attempt == 1) *>
+              events.update(_ :+ s"push-$attempt") *>
+              IO.raiseError[Unit](boom).whenA(attempt == 2) *>
+              events.update(_ :+ s"gha-$attempt")
+          }
+        }
+        val loop = RepairLoop[TestFlow, Int](
+          action = chain,
+          routeFailure = Kleisli { case (state, _) =>
+            events.update(_ :+ "repair").as(Right(state))
+          },
+          raiseFailure = Kleisli(IO.raiseError)
+        )
+
+        loop.run(1) *> events.get.map { seen =>
+          assertEquals(
+            seen,
+            List(
+              "commit-1",
+              "repair",
+              "commit-2",
+              "push-2",
+              "repair",
+              "commit-3",
+              "push-3",
+              "gha-3"
+            )
+          )
+        }
+      }
+    }
+
   test("a budget carried in the loop state bounds the retries"):
     Ref[IO].of(0).flatMap { attempts =>
       val loop = RepairLoop[TestFlow, Int](

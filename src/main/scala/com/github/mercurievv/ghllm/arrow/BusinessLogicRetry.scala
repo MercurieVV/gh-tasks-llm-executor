@@ -192,6 +192,22 @@ object BusinessLogicRetry:
           )
           resolved <- resolveMergeConflict(progress)(request)
         yield if resolved then Right(request) else Left(error)
+      else if isPullRequestChecksFailedError(error) then
+        for
+          _ <- progress(
+            s"Pull Request checks failed for task #${request.task.number}; running repair agent (${request.runner.display}) and retrying publication..."
+          )
+          _ <- repairAndCommitWith(progress)(
+            request.worktreePath,
+            request.task,
+            request.runner,
+            prCheckRepairPrompt(request.task, error),
+            s"Repair failing Pull Request check for task #${request.task.number}"
+          )
+          _ <- repairablePush(progress).run(
+            PushRequest(request.worktreePath, request.branchName, request.task, request.runner)
+          )
+        yield Right(request)
       else Left(error).pure[F]
     }
 
@@ -342,6 +358,7 @@ object BusinessLogicRetry:
     Option(result.get())
 
   val RepairAllowedTools = Impl.ImplementerAllowedTools
+  val MaxRepairBuildCheckAttempts = 3
 
   def repairAndCommit[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
@@ -363,24 +380,37 @@ object BusinessLogicRetry:
       prompt: AgentPrompt,
       commitMessage: String
   )(using F: Sync[F]): F[Unit] =
-    for
-      _ <- progress(
-        s"Running repair agent (${runner.display}) for task #${task.number}..."
-      )
-      _ <- AgentExecutor[F].run(
-        runner,
-        prompt,
-        worktreePath,
-        RepairAllowedTools,
-        contextFiles = repairContextFiles(worktreePath),
-        taskNumber = Some(task.number),
-        metricsScope = "repair"
-      )
-      changed <- Impl.git[F].filesChanged(worktreePath)
-      _ <-
-        if changed then Impl.git[F].commitAll(worktreePath, task, Some(commitMessage))
-        else progress(s"Repair agent made no file changes for task #${task.number}.")
-    yield ()
+    def loop(attemptsRemaining: Int): F[Unit] =
+      for
+        _ <- progress(
+          s"Running repair agent (${runner.display}) for task #${task.number}..."
+        )
+        _ <- AgentExecutor[F].run(
+          runner,
+          prompt,
+          worktreePath,
+          RepairAllowedTools,
+          contextFiles = repairContextFiles(worktreePath),
+          taskNumber = Some(task.number),
+          metricsScope = "repair"
+        )
+        changed <- Impl.git[F].filesChanged(worktreePath)
+        _ <-
+          if changed then
+            Impl.git[F].runProjectValidation(worktreePath).attempt.flatMap {
+              case Right(_) =>
+                Impl.git[F].commitAll(worktreePath, task, Some(commitMessage))
+              case Left(error) if attemptsRemaining > 0 =>
+                progress(
+                  s"Repair build checks failed for task #${task.number}: ${error.getMessage}. Retrying repair (${attemptsRemaining} attempt(s) left)..."
+                ) *> loop(attemptsRemaining - 1)
+              case Left(error) =>
+                F.raiseError(error)
+            }
+          else progress(s"Repair agent made no file changes for task #${task.number}.")
+      yield ()
+
+    loop(MaxRepairBuildCheckAttempts)
 
   private def repairContextFiles(worktreePath: os.Path): Seq[String] =
     Seq(
