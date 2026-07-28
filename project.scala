@@ -29,6 +29,7 @@
 //> using exclude project-remote.scala
 //> using exclude scripts
 //> using exclude website
+//> using exclude src/main/scala/com/github/mercurievv/ghllm/arrow/Wiring.test.scala
 
 // Test
 //> using test.dependency org.scalameta::munit:1.3.3
