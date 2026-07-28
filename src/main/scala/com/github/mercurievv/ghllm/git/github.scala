@@ -141,6 +141,7 @@ object GitHub:
     3.minutes.toMillis
   )
   private val PullRequestFailureLogMaxChars = 12000
+  private val PullRequestFailureLogHeadChars = 3000
 
   def fetchIssues[F[_]: Sync]: Kleisli[F, os.Path, List[Issue]] =
     Kleisli.apply { root =>
@@ -1532,12 +1533,17 @@ This parent task will not be implemented directly. Run child tasks first; when a
           "--log-failed"
         ).map(_.trim).map { output =>
           Option.when(output.nonEmpty)(
-            if output.length <= PullRequestFailureLogMaxChars then output
-            else s"${output.take(PullRequestFailureLogMaxChars)}\n...[truncated failure log]"
+            truncateFailureLog(output)
           )
         }
       }
       .map(_.flatten)
+
+  private def truncateFailureLog(output: String): String =
+    if output.length <= PullRequestFailureLogMaxChars then output
+    else
+      val tailChars = PullRequestFailureLogMaxChars - PullRequestFailureLogHeadChars
+      s"${output.take(PullRequestFailureLogHeadChars)}\n...[truncated middle of failure log]...\n${output.takeRight(tailChars)}"
 
   private final case class PullRequestCheck(
       name: Name,
