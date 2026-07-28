@@ -11,4 +11,4 @@
 //> using dep io.github.mercurievv.minuscles::shapeless3-typeclasses:0.1.0
 //> using dep com.lihaoyi::os-lib:0.11.8
 //> using dep com.lihaoyi::ujson:4.4.3
-//> using dep io.higherkindness::droste-core:0.10.0
+//> using dep io.higherkindness::droste-core:0.9.0
