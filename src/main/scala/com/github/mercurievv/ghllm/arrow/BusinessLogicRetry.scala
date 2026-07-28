@@ -24,9 +24,9 @@ object BusinessLogicRetry:
 
     empty.copy(
       taskArrows = empty.taskArrows.copy(
-        resumeTask = empty.taskArrows.resumeTask.copy(
-          resume = empty.taskArrows.resumeTask.resume.copy(
-            resumePullRequest = retryResumePullRequest(progress)
+        resumeExistingPullRequest = empty.taskArrows.resumeExistingPullRequest.copy(
+          pullRequest = empty.taskArrows.resumeExistingPullRequest.pullRequest.copy(
+            resumeOpenPullRequest = retryResumePullRequest(progress)
           )
         )
       ),

@@ -108,9 +108,9 @@ class BusinessLogicShapeSuite extends CatsEffectSuite:
       logic
         .copy(
           taskArrows = logic.taskArrows.copy(
-            resumeTask = logic.taskArrows.resumeTask.copy(
-              resume = logic.taskArrows.resumeTask.resume.copy(
-                resumePullRequest = Kleisli(_ => IO.raiseError(gone))
+            resumeExistingPullRequest = logic.taskArrows.resumeExistingPullRequest.copy(
+              pullRequest = logic.taskArrows.resumeExistingPullRequest.pullRequest.copy(
+                resumeOpenPullRequest = Kleisli(_ => IO.raiseError(gone))
               ),
               announceResume = Kleisli(IO.pure),
               routeResumeError = Kleisli {

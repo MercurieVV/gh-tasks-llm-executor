@@ -63,12 +63,12 @@ object BusinessLogicFixture:
     ),
     taskArrows = TaskArrows[TestFlow](
       routeResumeOrRun = unexpected("routeResumeOrRun"),
-      resumeTask = ResumeTaskArrows[TestFlow](
-        resume = ResumePullRequestArrows[TestFlow](
-          resumePullRequest = unexpected("resumePullRequest")
+      resumeExistingPullRequest = ExistingPullRequestResumeArrows[TestFlow](
+        pullRequest = PullRequestResumeArrows[TestFlow](
+          resumeOpenPullRequest = unexpected("resumeOpenPullRequest")
         ),
         announceResume = unexpected("announceResume"),
-        resumedExecution = unexpected("resumedExecution"),
+        toResumedExecution = unexpected("toResumedExecution"),
         cleanupAndSummarize = unexpected("cleanupAndSummarize"),
         routeResumeError = unexpected("routeResumeError"),
         announceNoPullRequest = unexpected("announceNoPullRequest"),

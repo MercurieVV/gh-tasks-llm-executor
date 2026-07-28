@@ -27,12 +27,12 @@ object BusinessLogicReplay:
     empty.copy(
       taskArrows = empty.taskArrows.copy(
         routeResumeOrRun = Replayability.routeResumeOrRun(progress),
-        resumeTask = ResumeTaskArrows[ReplayArr](
-          resume = ResumePullRequestArrows[ReplayArr](
-            resumePullRequest = Replayability.resumePullRequest(progress)
+        resumeExistingPullRequest = ExistingPullRequestResumeArrows[ReplayArr](
+          pullRequest = PullRequestResumeArrows[ReplayArr](
+            resumeOpenPullRequest = Replayability.resumePullRequest(progress)
           ),
           announceResume = Replayability.announceResume,
-          resumedExecution = Replayability.resumedExecution,
+          toResumedExecution = Replayability.toResumedExecution,
           cleanupAndSummarize = Replayability.cleanupAndSummarize(progress),
           routeResumeError = Replayability.routeResumeError,
           announceNoPullRequest = Replayability.announceNoPullRequest,

@@ -424,15 +424,10 @@ final case class ProgramArrows[-->[_, _]](
     toProgramSays: RunSummary --> ProgramSays[ujson.Value]
 )
 
-/** Arrows for acquiring, evaluating, and running one selected task.
-  *
-  * Leaves and the resume group only. `executeCandidate` and friends moved to `BusinessLogic`: resuming a Pull Request
-  * needs `closeTaskIssue`/`checkParentsForCompletion`, which live in `ExecuteTaskArrows`, and no record should reach
-  * into another.
-  */
+/** Arrows for acquiring, evaluating, and routing one selected task. */
 final case class TaskArrows[-->[_, _]](
     routeResumeOrRun: TaskCandidate --> Either[ClaimedTask, ClaimedTask],
-    resumeTask: ResumeTaskArrows[-->],
+    resumeExistingPullRequest: ExistingPullRequestResumeArrows[-->],
     announceTask: ClaimedTask --> ClaimedTask,
     fetchTaskContext: ClaimedTask --> PreparedTask,
     evaluateTask: PreparedTask --> Either[NeedsUserInput, Either[SplitTask, PreparedTask]],
@@ -742,23 +737,14 @@ final case class BusinessLogic[-->[_, _]](
       attempt: ArrowAttempt[-->]
   ): ClaimedTask --> RunSummary =
     Replayability.resumeOrRun(
-      taskArrows.resumeTask,
-      resumeAndClose,
+      taskArrows.resumeExistingPullRequest,
+      closeResumedTask,
       executeClaimedTask
     )
 
-  private def resumeAndClose(using
-      arrow: ArrowChoice[-->],
-      defer: ArrowDefer[-->],
-      attempt: ArrowAttempt[-->]
-  ): ClaimedTask --> RunSummary =
-    val resume = taskArrows.resumeTask
-    val merged: ClaimedTask --> ClaimedTask =
-      (resume.resume.resumeUntilMerged &&& arrow.id[ClaimedTask]) >>> arrow.lift(_._2)
-    resume.announceResume >>>
-      merged >>>
-      resume.resumedExecution >>>
-      executeTaskArrows.closeTaskIssue >>>
+  private def closeResumedTask(using ArrowChoice[-->]): ExecutedTask --> RunSummary =
+    val resume = taskArrows.resumeExistingPullRequest
+    executeTaskArrows.closeTaskIssue >>>
       executeTaskArrows.checkParentsForCompletion >>>
       resume.cleanupAndSummarize
 

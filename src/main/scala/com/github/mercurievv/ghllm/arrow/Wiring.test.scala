@@ -29,5 +29,5 @@ class WiringSuite extends CatsEffectSuite:
       assert(logic.publishChangedTask ne null)
       assert(logic.executeTaskArrows.runAgent.runAgent ne null)
       assert(logic.publicationArrows.publishRemote.publishRemote ne null)
-      assert(logic.taskArrows.resumeTask.resume.resumeUntilMerged ne null)
+      assert(logic.taskArrows.resumeExistingPullRequest.pullRequest.mergeExistingPullRequest ne null)
     }

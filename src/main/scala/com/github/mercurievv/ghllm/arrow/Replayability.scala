@@ -14,17 +14,17 @@ import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
 /** Driving an existing open Pull Request to merged. */
-final case class ResumePullRequestArrows[-->[_, _]](
-    resumePullRequest: ClaimedTask --> Unit
+final case class PullRequestResumeArrows[-->[_, _]](
+    resumeOpenPullRequest: ClaimedTask --> Unit
 ):
-  def resumeUntilMerged: ClaimedTask --> Unit =
-    resumePullRequest
+  def mergeExistingPullRequest: ClaimedTask --> Unit =
+    resumeOpenPullRequest
 
 /** Completing a task from a Pull Request an earlier, interrupted run left open. */
-final case class ResumeTaskArrows[-->[_, _]](
-    resume: ResumePullRequestArrows[-->],
+final case class ExistingPullRequestResumeArrows[-->[_, _]](
+    pullRequest: PullRequestResumeArrows[-->],
     announceResume: ClaimedTask --> ClaimedTask,
-    resumedExecution: ClaimedTask --> ExecutedTask,
+    toResumedExecution: ClaimedTask --> ExecutedTask,
     cleanupAndSummarize: ClaimedTask --> RunSummary,
     // Left = the Pull Request turned out to be gone; fall back to an ordinary
     // run. Right = a real failure to report and re-raise.
@@ -37,17 +37,25 @@ object Replayability:
   type ReplayFlow[F[_]] = [A, B] =>> Kleisli[[X] =>> OptionT[F, X], A, B]
 
   def resumeOrRun[-->[_, _]](
-      resume: ResumeTaskArrows[-->],
-      resumeAndClose: ClaimedTask --> RunSummary,
+      resume: ExistingPullRequestResumeArrows[-->],
+      closeResumedTask: ExecutedTask --> RunSummary,
       executeClaimedTask: ClaimedTask --> RunSummary
   )(using
       arrow: ArrowChoice[-->],
       attempt: ArrowAttempt[-->]
-  ): ClaimedTask --> RunSummary =
+  ): ClaimedTask --> RunSummary = {
+    val mergeExistingPullRequest: ClaimedTask --> ClaimedTask =
+      ((resume.pullRequest.mergeExistingPullRequest &&& arrow.id[ClaimedTask]) >>> arrow.lift(_._2))
+    val resumePullRequestAndCloseTask: ClaimedTask --> RunSummary =
+      resume.announceResume >>>
+        mergeExistingPullRequest >>>
+        resume.toResumedExecution >>>
+        closeResumedTask
     val recover =
       resume.routeResumeError >>>
         ((resume.announceNoPullRequest >>> executeClaimedTask) ||| resume.reportResumeFailure)
-    attempt.attempt(resumeAndClose) >>> (recover ||| arrow.lift(_._2))
+    attempt.attempt(resumePullRequestAndCloseTask) >>> (recover ||| arrow.lift(_._2))
+  }
 
   given replayFlowMonoid[F[_]: Monad]: Monoid2[ReplayFlow[F]] with
     def empty[A, B]: ReplayFlow[F][A, B] =
@@ -176,7 +184,7 @@ object Replayability:
       )
     }
 
-  def resumedExecution[F[_]: Monad]: ReplayFlow[F][ClaimedTask, ExecutedTask] =
+  def toResumedExecution[F[_]: Monad]: ReplayFlow[F][ClaimedTask, ExecutedTask] =
     Kleisli(run => OptionT.some[F](ExecutedTask(run, AgentOutput(""))))
 
   def cleanupAndSummarize[F[_]: Sync](

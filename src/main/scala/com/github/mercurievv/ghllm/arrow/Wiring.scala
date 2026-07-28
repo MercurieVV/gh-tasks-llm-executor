@@ -66,7 +66,7 @@ object Wiring:
       ),
       taskArrows = TaskArrows[RealArr](
         routeResumeOrRun = Impl.routeRun,
-        resumeTask = replayOnlyResumeTask,
+        resumeExistingPullRequest = replayOnlyExistingPullRequestResume,
         announceTask = Impl.announceTask,
         fetchTaskContext = Impl.fetchTaskContext,
         evaluateTask = evaluationArrows.evaluateTask,
@@ -124,13 +124,13 @@ object Wiring:
       )
     )
 
-    def replayOnlyResumeTask: ResumeTaskArrows[RealArr] =
-      ResumeTaskArrows[RealArr](
-        resume = ResumePullRequestArrows[RealArr](
-          resumePullRequest = replayOnly("resumePullRequest")
+    def replayOnlyExistingPullRequestResume: ExistingPullRequestResumeArrows[RealArr] =
+      ExistingPullRequestResumeArrows[RealArr](
+        pullRequest = PullRequestResumeArrows[RealArr](
+          resumeOpenPullRequest = replayOnly("resumeOpenPullRequest")
         ),
         announceResume = replayOnly("announceResume"),
-        resumedExecution = replayOnly("resumedExecution"),
+        toResumedExecution = replayOnly("toResumedExecution"),
         cleanupAndSummarize = replayOnly("cleanupAndSummarize"),
         routeResumeError = replayOnly("routeResumeError"),
         announceNoPullRequest = replayOnly("announceNoPullRequest"),
