@@ -36,25 +36,16 @@ final case class ExistingPullRequestResumeArrows[-->[_, _]](
 object Replayability:
   type ReplayFlow[F[_]] = [A, B] =>> Kleisli[[X] =>> OptionT[F, X], A, B]
 
-  def resumeOrRun[-->[_, _]](
-      resume: ExistingPullRequestResumeArrows[-->],
-      closeResumedTask: ExecutedTask --> RunSummary,
-      executeClaimedTask: ClaimedTask --> RunSummary
+  def resumeExistingPullRequest[-->[_, _]](
+      resume: ExistingPullRequestResumeArrows[-->]
   )(using
-      arrow: ArrowChoice[-->],
-      attempt: ArrowAttempt[-->]
-  ): ClaimedTask --> RunSummary = {
+      arrow: ArrowChoice[-->]
+  ): ClaimedTask --> ExecutedTask = {
     val mergeExistingPullRequest: ClaimedTask --> ClaimedTask =
       ((resume.pullRequest.mergeExistingPullRequest &&& arrow.id[ClaimedTask]) >>> arrow.lift(_._2))
-    val resumePullRequestAndCloseTask: ClaimedTask --> RunSummary =
-      resume.announceResume >>>
-        mergeExistingPullRequest >>>
-        resume.toResumedExecution >>>
-        closeResumedTask
-    val recover =
-      resume.routeResumeError >>>
-        ((resume.announceNoPullRequest >>> executeClaimedTask) ||| resume.reportResumeFailure)
-    attempt.attempt(resumePullRequestAndCloseTask) >>> (recover ||| arrow.lift(_._2))
+    resume.announceResume >>>
+      mergeExistingPullRequest >>>
+      resume.toResumedExecution
   }
 
   given replayFlowMonoid[F[_]: Monad]: Monoid2[ReplayFlow[F]] with

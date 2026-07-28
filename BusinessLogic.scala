@@ -736,11 +736,13 @@ final case class BusinessLogic[-->[_, _]](
       defer: ArrowDefer[-->],
       attempt: ArrowAttempt[-->]
   ): ClaimedTask --> RunSummary =
-    Replayability.resumeOrRun(
-      taskArrows.resumeExistingPullRequest,
-      closeResumedTask,
-      executeClaimedTask
-    )
+    val resume = taskArrows.resumeExistingPullRequest
+    val resumePullRequestAndCloseTask =
+      Replayability.resumeExistingPullRequest(resume) >>> closeResumedTask
+    val recover =
+      resume.routeResumeError >>>
+        ((resume.announceNoPullRequest >>> executeClaimedTask) ||| resume.reportResumeFailure)
+    attempt.attempt(resumePullRequestAndCloseTask) >>> (recover ||| arrow.lift(_._2))
 
   private def closeResumedTask(using ArrowChoice[-->]): ExecutedTask --> RunSummary =
     val resume = taskArrows.resumeExistingPullRequest
