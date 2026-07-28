@@ -12,6 +12,7 @@
 //> using dependency org.typelevel::otel4s-oteljava:1.0.1
 //> using dependency io.opentelemetry:opentelemetry-exporter-otlp:1.64.0
 //> using dependency io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.64.0
+//> using dependency io.higherkindness::droste-core:0.10.0
 //> using javaOpt -Dotel.java.global-autoconfigure.enabled=true
 
 //> using resourceDir resources
