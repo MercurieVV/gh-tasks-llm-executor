@@ -1,48 +1,14 @@
-package com.github.mercurievv.ghllm
+package com.github.mercurievv.ghllm.arrow
 
-import higherkindness.droste.{Algebra, Fix}
-import higherkindness.droste.syntax.all._
 import cats.Functor
-import munit.FunSuite
 
 object TaskTree {
 
-  /** Pattern functor for a task tree node.
-    * @tparam A placeholder for child subtrees.
-    */
-  final case class TaskF[A](label: String, children: List[A])
+  final case class TaskTreeF[A](label: String, children: List[A])
 
-  /** Functor instance for map over children. */
-  given Functor[TaskF] = new Functor[TaskF] {
-    def map[A, B](fa: TaskF[A])(f: A => B): TaskF[B] =
+  given Functor[TaskTreeF] = new Functor[TaskTreeF] {
+    def map[A, B](fa: TaskTreeF[A])(f: A => B): TaskTreeF[B] =
       fa.copy(children = fa.children.map(f))
   }
 
-  /** Fixed-point carrier. */
-  type FixTaskTree = Fix[TaskF]
-}
-
-class TaskTreeSuite extends FunSuite {
-
-  // Helper to create a leaf node.
-  private def leaf(label: String): TaskTree.FixTaskTree =
-    Fix(TaskTree.TaskF(label, Nil))
-
-  // Helper to create a branch node.
-  private def branch(label: String, children: List[TaskTree.FixTaskTree]): TaskTree.FixTaskTree =
-    Fix(TaskTree.TaskF(label, children))
-
-  test("build a 3-node tree and fold it to a node count with cata") {
-    // Construct a tree: root with two leaf children (total 3 nodes).
-    val tree: TaskTree.FixTaskTree = branch("root", List(leaf("a"), leaf("b")))
-
-    // Algebra that counts number of nodes.
-    val countAlg: Algebra[TaskTree.TaskF, Int] = Algebra {
-      case TaskTree.TaskF(_, children) => 1 + children.sum
-    }
-
-    val totalNodes: Int = tree.cata(countAlg)
-
-    assertEquals(totalNodes, 3)
-  }
 }
