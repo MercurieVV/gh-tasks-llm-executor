@@ -140,6 +140,7 @@ object GitHub:
   private val PullRequestNoChecksGraceMillis = DeadlineMillis(
     3.minutes.toMillis
   )
+  private val PullRequestFailureLogMaxChars = 12000
 
   def fetchIssues[F[_]: Sync]: Kleisli[F, os.Path, List[Issue]] =
     Kleisli.apply { root =>
@@ -1469,7 +1470,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
         branchName.value,
         "--json",
         "name,state,description,link"
-      ).map { output =>
+      ).flatMap { output =>
         val checks = parsePullRequestChecks(output)
         val failed = checks.filter(check =>
           Set("FAIL", "FAILED", "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT")
@@ -1482,23 +1483,61 @@ This parent task will not be implemented directly. Run child tasks first; when a
         if output.trim.isEmpty || checks.isEmpty then
           PullRequestChecksUnavailable(
             Message4(s"Pull Request checks for $branchName are not available yet.")
-          )
+          ).pure[F]
         else if failed.nonEmpty then
-          PullRequestChecksFailed(
-            Message(
-              s"Pull Request checks failed for $branchName:\n${formatCheckFailures(failed)}"
-            )
-          )
+          failed
+            .traverse(check => pullRequestCheckFailureLog(root, check).map(check -> _))
+            .map { failures =>
+              PullRequestChecksFailed(
+                Message(
+                  s"Pull Request checks failed for $branchName:\n${formatCheckFailures(failures)}"
+                )
+              )
+            }
         else if pending.nonEmpty then
           PullRequestChecksPending(
             Message3(s"Pull Request checks pending for $branchName: ${formatChecks(pending)}")
-          )
+          ).pure[F]
         else
           PullRequestChecksPassed(
             Message2(s"Pull Request checks passed for $branchName.")
-          )
+          ).pure[F]
       }
     }
+
+  private final case class GitHubActionsJob(runId: String, jobId: String)
+
+  private val GitHubActionsJobLinkRegex =
+    """.*/actions/runs/([0-9]+)/job/([0-9]+).*""".r
+
+  private def pullRequestCheckFailureLog[F[_]: Sync](
+      root: os.Path,
+      check: PullRequestCheck
+  ): F[Option[String]] =
+    check.link
+      .flatMap(link =>
+        GitHubActionsJobLinkRegex
+          .findFirstMatchIn(link)
+          .map(matchResult => GitHubActionsJob(matchResult.group(1), matchResult.group(2)))
+      )
+      .traverse { job =>
+        callOutputUnchecked(
+          root,
+          "gh",
+          "run",
+          "view",
+          job.runId,
+          "--job",
+          job.jobId,
+          "--log-failed"
+        ).map(_.trim).map { output =>
+          Option.when(output.nonEmpty)(
+            if output.length <= PullRequestFailureLogMaxChars then output
+            else s"${output.take(PullRequestFailureLogMaxChars)}\n...[truncated failure log]"
+          )
+        }
+      }
+      .map(_.flatten)
 
   private final case class PullRequestCheck(
       name: Name,
@@ -1534,12 +1573,14 @@ This parent task will not be implemented directly. Run child tasks first; when a
   // Failure detail fed to the caller's progress log and (via the raised
   // exception) to a repair agent: name=STATE alone doesn't say why a check
   // failed, so append each failed check's description/link when gh provides one.
-  private def formatCheckFailures(checks: List[PullRequestCheck]): String =
+  private def formatCheckFailures(checks: List[(PullRequestCheck, Option[String])]): String =
     checks
-      .map { check =>
+      .map { case (check, failureLog) =>
         val extra = List(check.description, check.link).flatten
-        if extra.isEmpty then s"${check.name}=${check.state}"
-        else s"${check.name}=${check.state} (${extra.mkString(" - ")})"
+        val summary =
+          if extra.isEmpty then s"${check.name}=${check.state}"
+          else s"${check.name}=${check.state} (${extra.mkString(" - ")})"
+        failureLog.fold(summary)(log => s"$summary\n\nFailed log for ${check.name}:\n$log")
       }
       .mkString("\n")
 
