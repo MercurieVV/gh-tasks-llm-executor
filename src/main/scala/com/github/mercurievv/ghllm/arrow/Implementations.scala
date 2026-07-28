@@ -622,14 +622,12 @@ object Impl:
         ),
         task = Some(split.run.task)
       )
-      if split.replayed then summary.pure[F]
-      else
-        GitHub
-          .commentSplitEvaluation(progress)(
-            split.run.context.root,
-            split.run.task
-          )
-          .as(summary)
+      GitHub
+        .commentSplitEvaluation(progress)(
+          split.run.context.root,
+          split.run.task
+        )
+        .as(summary)
     }
 
   def announceTask[F[_]: Sync]: -->[F, ClaimedTask, ClaimedTask] =
@@ -654,10 +652,8 @@ object Impl:
   ]: -->[F, ClaimedTask, PreparedTask] =
     (Kleisli.ask[F, ClaimedTask] &&& Kleisli { (run: ClaimedTask) =>
       GitHub.dependencyConclusion(progress)(run.context.root, run.task)
-    } &&& Kleisli { (run: ClaimedTask) =>
-      GitHub.replayContext(progress)(run.context.root, run.task)
-    }).map({ case ((run, dependencyConclusion), replayContext) =>
-      PreparedTask(run, dependencyConclusion, replayContext)
+    }).map({ case (run, dependencyConclusion) =>
+      PreparedTask(run, dependencyConclusion, replayContext = None)
     })
 
   // Re-evaluating after an answer arrives is the whole point of waiting, so
@@ -800,42 +796,6 @@ object Impl:
               s"skip releaseWorktree (canceled) output=${Wiring.summarize(acquiredTask)}"
             )
     }
-
-  // Heavy guarantee: the implementer LLM is never re-invoked on work it
-  // already finished. If a prior run left the durable "implemented" mark AND
-  // that work is still reachable (open PR or surviving origin branch), skip
-  // the agent call entirely and let the downstream publish/close pipeline
-  // finish from the existing commits. The reachability check keeps this safe:
-  // when the mark is stale (local-only branch that acquireWorktree wiped),
-  // there is nothing to resume, so re-running the implementer is correct.
-  def routeAlreadyImplemented[F[_]: Sync]: -->[F, PreparedTask, Either[ExecutedTask, PreparedTask]] =
-    Kleisli { task =>
-      alreadyImplemented[F](task).flatMap {
-        case Some(branch) =>
-          progress(
-            s"Task #${task.claimedTask.task.number} already implemented on branch $branch " +
-              s"(durable mark + reachable work); skipping implementer ${task.claimedTask.runner.display}."
-          ).as(Left(ExecutedTask(task.claimedTask, AgentOutput(""))))
-        case None => Right(task).pure[F]
-      }
-    }
-
-  def alreadyImplemented[F[_]: Sync](task: PreparedTask): F[Option[String]] =
-    val run = task.claimedTask
-    TaskMetadataStore
-      .commentBased[F](progress)
-      .read(run.context.root, run.task)
-      .flatMap { metadata =>
-        metadata.implemented match
-          case None => none[String].pure[F]
-          case Some(branch) =>
-            for
-              hasPr <- GitHub.hasOpenPullRequestForBranch(run.context.root, run.branchName)
-              reachable <-
-                if hasPr then true.pure[F]
-                else git[F].hasOriginBranch.run((run.context.root, run.branchName))
-            yield Option.when(reachable)(branch)
-      }
 
   // Records the durable "implemented" mark once the agent output has been
   // committed and published. Idempotent: re-runs that resumed via the

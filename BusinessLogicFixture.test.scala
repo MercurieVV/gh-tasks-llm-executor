@@ -111,7 +111,6 @@ object BusinessLogicFixture:
     ),
     executeTaskArrows = ExecuteTaskArrows[TestFlow](
       runAgent = AgentRunArrows[TestFlow](
-        routeAlreadyImplemented = unexpected("routeAlreadyImplemented"),
         runTaskWithRunner = unexpected("runTaskWithRunner"),
         routeRunnerFallback = unexpected("routeRunnerFallback"),
         raiseRunnerFailure = unexpected("raiseRunnerFailure")

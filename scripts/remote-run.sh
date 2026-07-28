@@ -26,6 +26,8 @@ FILES=(
   src/main/scala/com/github/mercurievv/ghllm/arrow/Implementations.scala
   src/main/scala/com/github/mercurievv/ghllm/git/IssueClaim.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/ParallelArrows.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/Replayability.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/BusinessLogicReplay.scala
   src/main/scala/com/github/mercurievv/ghllm/cli/RunEnv.scala
   src/main/scala/com/github/mercurievv/ghllm/metrics/TaskLogger.scala
   src/main/scala/com/github/mercurievv/ghllm/metrics/TokenMetrics.scala

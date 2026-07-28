@@ -84,39 +84,20 @@ class AgentRunArrowsSuite extends CatsEffectSuite:
       None,
       None
     )
-  private val skipped = ExecutedTask(prepared(weak).claimedTask, AgentOutput("skipped"))
   private val boom = RuntimeException("runner failed")
 
   private def arrows(
-      routeAlreadyImplemented: TestFlow[PreparedTask, Either[ExecutedTask, PreparedTask]],
       runTaskWithRunner: TestFlow[PreparedTask, ExecutedTask],
       routeRunnerFallback: TestFlow[(PreparedTask, Throwable), Either[Throwable, PreparedTask]]
   ) = AgentRunArrows[TestFlow](
-    routeAlreadyImplemented = routeAlreadyImplemented,
     runTaskWithRunner = runTaskWithRunner,
     routeRunnerFallback = routeRunnerFallback,
     raiseRunnerFailure = Kleisli(IO.raiseError)
   )
 
-  test("an already implemented task never reaches the implementer"):
-    Ref[IO].of(0).flatMap { invocations =>
-      val logic = arrows(
-        routeAlreadyImplemented = Kleisli(_ => IO.pure(Left(skipped))),
-        runTaskWithRunner = Kleisli(_ => invocations.update(_ + 1).as(skipped)),
-        routeRunnerFallback = Kleisli { case (_, error) => IO.pure(Left(error)) }
-      )
-      logic.runAgent.run(prepared(weak)).flatMap { result =>
-        invocations.get.map { count =>
-          assertEquals(result, skipped)
-          assertEquals(count, 0)
-        }
-      }
-    }
-
   test("a failed run escalates to the stronger runner exactly once"):
     Ref[IO].of(List.empty[AgentBinary]).flatMap { runners =>
       val logic = arrows(
-        routeAlreadyImplemented = Kleisli(task => IO.pure(Right(task))),
         runTaskWithRunner = Kleisli { task =>
           val runner = task.claimedTask.runner
           runners.update(_ :+ runner.agent) *>
@@ -137,7 +118,6 @@ class AgentRunArrowsSuite extends CatsEffectSuite:
 
   test("with no stronger runner the failure propagates"):
     val logic = arrows(
-      routeAlreadyImplemented = Kleisli(task => IO.pure(Right(task))),
       runTaskWithRunner = Kleisli(_ => IO.raiseError(boom)),
       routeRunnerFallback = Kleisli { case (_, error) => IO.pure(Left(error)) }
     )

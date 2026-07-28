@@ -510,13 +510,9 @@ final case class PublicationArrows[-->[_, _]](
 
 /** Invoking the implementer agent for a prepared task.
   *
-  * Was a single `runAgent` leaf whose body held two decisions and a retry: skip the agent when the task is already
-  * implemented, and on failure escalate to a stronger runner. Both are now `ArrowChoice` branches.
+  * Was a single `runAgent` leaf whose body held failure handling. Retry selection is now an `ArrowChoice` branch.
   */
 final case class AgentRunArrows[-->[_, _]](
-    // Left = a prior run already implemented this and the work is still
-    // reachable, so the implementer must not be invoked again.
-    routeAlreadyImplemented: PreparedTask --> Either[ExecutedTask, PreparedTask],
     runTaskWithRunner: PreparedTask --> ExecutedTask,
     // Left = no stronger runner left, give up. Right = the same task re-aimed
     // at a stronger implementer, to be attempted once more.
@@ -524,7 +520,7 @@ final case class AgentRunArrows[-->[_, _]](
     raiseRunnerFailure: Throwable --> ExecutedTask
 ):
   def runAgent(using ArrowChoice[-->], ArrowAttempt[-->]): PreparedTask --> ExecutedTask =
-    routeAlreadyImplemented >>> (summon[ArrowChoice[-->]].id[ExecutedTask] ||| runImplementer)
+    runImplementer
 
   def runImplementer(using
       arrow: ArrowChoice[-->],
@@ -891,4 +887,4 @@ final case class BusinessLogic[-->[_, _]](
 
 object BusinessLogic:
   given Functor2K[BusinessLogic] = Functor2K.derived
-  given Semigroup2K[BusinessLogic] = Semigroup2K.derived
+  given Monoid2K[BusinessLogic] = Monoid2K.derived

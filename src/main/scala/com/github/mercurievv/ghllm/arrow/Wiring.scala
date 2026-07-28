@@ -1,7 +1,6 @@
 package com.github.mercurievv.ghllm.arrow
 
 import com.github.mercurievv.ghllm.*
-import com.github.mercurievv.ghllm.agent.*
 import com.github.mercurievv.ghllm.arrow.*
 import com.github.mercurievv.ghllm.cli.*
 import com.github.mercurievv.ghllm.git.*
@@ -32,23 +31,29 @@ import ArrowLogging.*
 object Wiring:
 
   def businessLogic[F[_]: Async]: BusinessLogic[Flow[RunF[F]]] =
-    type Arr = Flow[RunF[F]]
-    def cycle[A, B](arrow: => Kleisli[RunF[F], A, B]): Kleisli[RunF[F], A, B] =
-      ArrowDefer[Arr].defer(arrow)
+    type RealArr = Flow[RunF[F]]
+    type ReplayArr = Replayability.ReplayFlow[RunF[F]]
 
-    lazy val assembled: BusinessLogic[Arr] =
-      wired.withArrowLogging(arrowLogger[RunF[F]])
+    def cycle[A, B](arrow: => Kleisli[RunF[F], A, B]): Kleisli[RunF[F], A, B] =
+      ArrowDefer[RealArr].defer(arrow)
+
+    lazy val assembled: BusinessLogic[ReplayArr] =
+      Replayability.combine(replayWired, realWired)
+    lazy val realAssembled: BusinessLogic[RealArr] =
+      Replayability.lowerOrRaise(assembled)
+    lazy val logged: BusinessLogic[RealArr] =
+      realAssembled.withArrowLogging(arrowLogger[RunF[F]])
 
     // Evaluation is its own arrow group with its own factory; the cycle here
     // is that waiting for a user's answer ends by evaluating again.
-    lazy val evaluationArrows: EvaluationArrows[Arr] = EvaluationArrows[RunF[F]](
+    lazy val evaluationArrows: EvaluationArrows[RealArr] = EvaluationArrows[RunF[F]](
       progress = Impl.progress,
       evaluatorRunner = Impl.evaluatorRunner,
-      waitForUserInput = Impl.waitForUserInput(cycle(assembled.taskArrows.evaluateTask))
+      waitForUserInput = Impl.waitForUserInput(cycle(logged.taskArrows.evaluateTask))
     )
 
-    lazy val wired: BusinessLogic[Arr] = BusinessLogic[Arr](
-      programArrows = ProgramArrows[Arr](
+    lazy val realWired: BusinessLogic[RealArr] = BusinessLogic[RealArr](
+      programArrows = ProgramArrows[RealArr](
         resolveContext = Impl.resolveContext,
         selectTask = Impl.selectTask,
         routeEmptySelection = Impl.routeEmptySelection,
@@ -59,10 +64,10 @@ object Wiring:
         lastSummary = Impl.lastSummary,
         toProgramSays = Impl.toProgramSays
       ),
-      taskArrows = TaskArrows[Arr](
+      taskArrows = TaskArrows[RealArr](
         routeResumeOrRun = Impl.routeResumeOrRun,
-        resumeTask = ResumeTaskArrows[Arr](
-          resume = ResumePullRequestArrows[Arr](
+        resumeTask = ResumeTaskArrows[RealArr](
+          resume = ResumePullRequestArrows[RealArr](
             startResume = Impl.startResume,
             resumePullRequest = Impl.resumePullRequest,
             routeResumeFailure = Impl.routeResumeFailure,
@@ -81,21 +86,21 @@ object Wiring:
         needsUserInputSummary = Impl.needsUserInputSummary,
         splitTaskSummary = Impl.splitTaskSummary,
         markTaskInProgress = Impl.markTaskInProgress,
-        acquireWorktreeAndExecute = Impl.acquireWorktreeAndExecute(cycle(assembled.executePreparedTaskInWorktree)),
+        acquireWorktreeAndExecute = Impl.acquireWorktreeAndExecute(cycle(logged.executePreparedTaskInWorktree)),
         completedTaskSummary = Impl.completedTaskSummary
       ),
-      changeArrows = ChangeArrows[Arr](
+      changeArrows = ChangeArrows[RealArr](
         classifyAgentResultForPublication = Impl.classifyAgentResultForPublication,
         toPublishRequest = Impl.toPublishRequestOfChanged,
         reportPublicationFailure = Impl.reportPublicationFailure,
         reportUnchangedTask = Impl.reportUnchangedTask
       ),
-      publicationArrows = PublicationArrows[Arr](
+      publicationArrows = PublicationArrows[RealArr](
         classifyPublicationSource = Impl.classifyPublicationSource,
         prepareChangedPublication = Impl.prepareChangedPublication,
         prepareExistingPublication = Impl.prepareExistingPublication,
         choosePublicationTransport = Impl.choosePublicationTransport,
-        publishRemote = PublishRemoteArrows[Arr](
+        publishRemote = PublishRemoteArrows[RealArr](
           toPushRequest = Impl.toPushRequest,
           pushBranch = Impl.pushBranch,
           routePushFailure = Impl.routePushFailure,
@@ -107,9 +112,8 @@ object Wiring:
         ),
         publishLocal = Impl.publishLocal
       ),
-      executeTaskArrows = ExecuteTaskArrows[Arr](
-        runAgent = AgentRunArrows[Arr](
-          routeAlreadyImplemented = Impl.routeAlreadyImplemented,
+      executeTaskArrows = ExecuteTaskArrows[RealArr](
+        runAgent = AgentRunArrows[RealArr](
           runTaskWithRunner = Impl.runTaskWithRunner,
           routeRunnerFallback = Impl.routeRunnerFallback,
           raiseRunnerFailure = Impl.raiseK
@@ -121,25 +125,33 @@ object Wiring:
         closeTaskIssue = Impl.closeTaskIssue,
         checkParentsForCompletion = Impl.checkParentsForCompletion
       ),
-      recursiveArrows = RecursiveArrows[Arr](
+      recursiveArrows = RecursiveArrows[RealArr](
         checkIfCompleted = Impl.checkIfCompleted,
         collectPendingDependencies = Impl.collectPendingDependencies,
         recordDependencyOutcome = Impl.recordDependencyOutcome,
         routeDependencyOutcome = Impl.routeDependencyOutcome,
-        claimAndRun = Impl.claimAndRun(cycle(assembled.executeCandidate))
+        claimAndRun = Impl.claimAndRun(cycle(logged.executeCandidate))
       ),
-      traversalArrows = TraversalArrows[Arr](
+      traversalArrows = TraversalArrows[RealArr](
         routeRecursiveMode = Impl.routeRecursiveMode,
-        untilClosed = UntilClosedArrows[Arr](
+        untilClosed = UntilClosedArrows[RealArr](
           refreshRoot = Impl.refreshRoot,
-          runRootOnce = Impl.runRootOnce(cycle(assembled.executeRecursive)),
+          runRootOnce = Impl.runRootOnce(cycle(logged.executeRecursive)),
           routeContinuation = Impl.routeContinuation
         ),
-        runOnce = Impl.runOnce(cycle(assembled.executeRecursive))
+        runOnce = Impl.runOnce(cycle(logged.executeRecursive))
       )
     )
 
-    assembled
+    lazy val replayWired: BusinessLogic[ReplayArr] =
+      BusinessLogicReplay[RunF[F]](
+        progress = Impl.progress,
+        evaluatorRunner = Impl.evaluatorRunner,
+        waitForUserInput = Impl.waitForUserInput(cycle(logged.taskArrows.evaluateTask)),
+        hasOriginBranch = Impl.git[RunF[F]].hasOriginBranch
+      )
+
+    logged
 
   def arrowLogger[F[_]: Sync]: ArrowLogger[Flow[F]] =
     new ArrowLogger[Flow[F]]:
