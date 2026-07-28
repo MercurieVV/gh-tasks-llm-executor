@@ -1,6 +1,6 @@
 // Main
 //> using scala 3.6.2
-//> using options -Wunused:imports -Xmax-inlines:128
+//> using options -Wunused:imports -Xmax-inlines:2048
 
 //> using dependency com.lihaoyi::os-lib:0.11.8
 //> using dependency com.lihaoyi::ujson:4.4.3
@@ -34,5 +34,6 @@
 //> using test.dependency org.scalameta::munit:1.3.3
 //> using test.dependency org.typelevel::munit-cats-effect:2.2.0
 //> using test.dependency org.typelevel::shapeless3-deriving:3.6.0
+//> using test.dependency io.higherkindness::droste-core:0.10.0
 
 //> using test.resourceDirs app/test/resources

@@ -3,7 +3,7 @@
 // and break scala-cli when every input is a remote URL, so this file
 // mirrors only the scala-version/dependency directives it needs.
 //> using scala 3.6.2
-//> using options -Wunused:imports -Xmax-inlines:128
+//> using options -Wunused:imports -Xmax-inlines:2048
 //> using dep org.typelevel::cats-core:2.13.0
 //> using dep org.typelevel::cats-effect:3.7.0
 //> using dep io.github.mercurievv::arrowstep:0.1.1
