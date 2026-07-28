@@ -13,7 +13,7 @@ class TaskTreeSuite extends FunSuite {
       case TaskF.Branch(_, children) => children.sum + 1
     }
 
-    val tree = Fix(TaskF.Branch(
+    val tree: Fix[TaskF] = Fix(TaskF.Branch(
       "root",
       List(
         Fix(TaskF.Leaf(Some(5))),
