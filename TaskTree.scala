@@ -1,8 +1,9 @@
 package com.github.mercurievv.ghllm
 
-import higherkindness.droste._
-import higherkindness.droste.data._
+import higherkindness.droste.{Algebra, Fix}
 import higherkindness.droste.syntax.all._
+import cats.Functor
+import munit.FunSuite
 
 object TaskTree {
 
@@ -12,19 +13,16 @@ object TaskTree {
   final case class TaskF[A](label: String, children: List[A])
 
   /** Functor instance for map over children. */
-  given taskFFunctor: Functor[TaskF] = new Functor[TaskF] {
+  given Functor[TaskF] = new Functor[TaskF] {
     def map[A, B](fa: TaskF[A])(f: A => B): TaskF[B] =
       fa.copy(children = fa.children.map(f))
   }
 
   /** Fixed-point carrier. */
   type FixTaskTree = Fix[TaskF]
-
-  /** Cofree carrier – annotated node. */
-  type CofreeTask[A] = Cofree[TaskF, A]
 }
 
-class TaskTreeSuite extends munit.FunSuite {
+class TaskTreeSuite extends FunSuite {
 
   // Helper to create a leaf node.
   private def leaf(label: String): TaskTree.FixTaskTree =

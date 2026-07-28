@@ -1,6 +1,6 @@
 package com.github.mercurievv.ghllm.task
 
-import higherkindness.droste.Functor
+import cats.Functor
 
 sealed trait TaskF[+A]
 
