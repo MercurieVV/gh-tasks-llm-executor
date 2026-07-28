@@ -1,5 +1,5 @@
 // Main
-//> using scala 3.6.2
+//> using scala 3.8.4
 //> using options -Wunused:imports -Xmax-inlines:2048
 
 //> using dependency com.lihaoyi::os-lib:0.11.8
@@ -12,7 +12,7 @@
 //> using dependency org.typelevel::otel4s-oteljava:1.0.1
 //> using dependency io.opentelemetry:opentelemetry-exporter-otlp:1.64.0
 //> using dependency io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.64.0
-//> using dependency io.higherkindness::droste-core:0.9.0
+//> using dependency io.higherkindness::droste-core:0.10.0
 //> using javaOpt -Dotel.java.global-autoconfigure.enabled=true
 
 //> using resourceDir resources
@@ -35,4 +35,4 @@
 //> using test.dependency org.scalameta::munit:1.3.3
 //> using test.dependency org.typelevel::munit-cats-effect:2.2.0
 //> using test.dependency org.typelevel::shapeless3-deriving:3.6.0
-//> using test.dependency io.higherkindness::droste-core:0.9.0
+//> using test.dependency io.higherkindness::droste-core:0.10.0
