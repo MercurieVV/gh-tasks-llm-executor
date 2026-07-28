@@ -7,15 +7,17 @@ import higherkindness.droste.syntax.all._
 class TaskTreeSuite extends munit.FunSuite {
 
   test("build a 3-node tree and fold it to a node count with cata") {
-    import TaskTree._
+    import com.github.mercurievv.ghllm.TaskTree.{given, _}
 
-    val leaf: FixTaskTree = Fix(TaskF("leaf", Nil))
-    val left: FixTaskTree = Fix(TaskF("left", List(leaf)))
-    val tree: FixTaskTree = Fix(TaskF("root", List(left)))
+    val leaf: Fix[TaskF] = Fix(TaskF.Branch("leaf", Nil))
+    val left: Fix[TaskF] = Fix(TaskF.Branch("left", List(leaf)))
+    val tree: Fix[TaskF] = Fix(TaskF.Branch("root", List(left)))
 
     val countAlg: Algebra[TaskF, Int] = Algebra {
-      case TaskF(_, kids) => 1 + kids.sum
+      case TaskF.Branch(_, kids) => kids.sum + 1
+      case TaskF.Leaf(_)         => 1
     }
+
     val total = tree.cata(countAlg)
     assertEquals(total, 3)
   }
