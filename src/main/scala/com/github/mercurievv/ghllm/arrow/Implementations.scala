@@ -796,7 +796,7 @@ object Impl:
   // committed and published. Idempotent: re-runs that resumed via the
   // already-implemented short-circuit skip re-writing an identical mark.
   def markTaskImplemented[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
-    Kleisli { task =>
+    Kleisli { (task: ExecutedTask) =>
       val run = task.run
       val mark = run.branchName.value
       val store = TaskMetadataStore.commentBased[F](progress)
@@ -824,27 +824,37 @@ object Impl:
           task.parentConclusion,
           task.replayContext
         )
-      for
-        _ <- progress(
-          s"Running task #${run.task.number} with ${run.runner.display}..."
-        )
-        output <- AgentExecutor[F].run(
-          run.runner,
-          prompt,
-          run.worktreePath,
-          ImplementerAllowedTools,
-          taskNumber = Some(run.task.number),
-          metricsRoot = Some(run.context.root),
-          metricsScope = "implement"
-        )
-        _ <- Sync[F]
-          .raiseError(
-            RuntimeException(
-              s"Agent ${run.runner.display} reported it could not proceed (permission/tool wall). Output: ${output.value.trim}"
-            )
+      val execution =
+        for
+          _ <- progress(s"Running task #${run.task.number} with ${run.runner.display}...")
+          output <- AgentExecutor[F].run(
+            run.runner,
+            prompt,
+            run.worktreePath,
+            ImplementerAllowedTools,
+            taskNumber = Some(run.task.number),
+            metricsRoot = Some(run.context.root),
+            metricsScope = "implement",
+            deferMetricsOutcome = true
           )
-          .whenA(looksBlocked(output))
-      yield ExecutedTask(run, output)
+          _ <- Sync[F]
+            .raiseError(
+              RuntimeException(
+                s"Agent ${run.runner.display} reported it could not proceed (permission/tool wall). Output: ${output.value.trim}"
+              )
+            )
+            .whenA(looksBlocked(output))
+        yield ExecutedTask(run, output)
+
+      execution.handleErrorWith { error =>
+        AgentExecutor.completeTokenMetrics[F](
+          run.context.root,
+          run.task.number,
+          run.runner,
+          "implement",
+          "error"
+        ) *> Sync[F].raiseError(error)
+      }
     }
 
   // Exit code 0 only means the process returned; a stuck agent that gave up
@@ -869,10 +879,28 @@ object Impl:
     Kleisli.ask[F, ExecutedTask]
 
   def runProjectValidation[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
-    Kleisli.ask <* (
-      Kleisli.fromFunction { (t: ExecutedTask) => t.run.worktreePath } >>>
-        git[F].runProjectValidation
-    )
+    Kleisli { task =>
+      git[F].runProjectValidation.run(task.run.worktreePath).attempt.flatMap {
+        case Right(_) =>
+          AgentExecutor
+            .completeTokenMetrics[F](
+              task.run.context.root,
+              task.run.task.number,
+              task.run.runner,
+              "implement",
+              "green"
+            )
+            .as(task)
+        case Left(error) =>
+          AgentExecutor.completeTokenMetrics[F](
+            task.run.context.root,
+            task.run.task.number,
+            task.run.runner,
+            "implement",
+            "red"
+          ) *> Sync[F].raiseError(error)
+      }
+    }
 
   def classifyAgentResultForPublication[F[_]: Sync]: -->[F, ExecutedTask, Either[ChangedTask, UnchangedTask]] =
     (Kleisli.ask[F, ExecutedTask] &&& Kleisli { (task: ExecutedTask) =>
