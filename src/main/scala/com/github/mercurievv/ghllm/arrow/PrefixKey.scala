@@ -28,3 +28,7 @@ object PrefixKey:
     val md = MessageDigest.getInstance("SHA-256")
     val digestBytes = md.digest(s.getBytes("UTF-8"))
     digestBytes.map(b => f"$b%02x").mkString
+
+  @main def _prefixKeyDummy(): Unit = {
+    println("PrefixKey compiled.")
+  }
