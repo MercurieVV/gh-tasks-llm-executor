@@ -101,6 +101,105 @@ class TokenMetricsSuite extends munit.FunSuite:
     assertEquals(TokenMetrics.defaultRootForWorktree(worktree), root)
     assertEquals(TokenMetrics.defaultRootForWorktree(root), root)
 
+  // ---- T08 successRate tests ---------------------------------------------------
+
+  test("successRate returns None for sample below minSample"):
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    val phase = "plan"
+    val runner = "haiku"
+
+    for i <- 1 to 2 do
+      backend.record(
+        TokenMetrics.TokenMetricsEvent(
+          timestampMillis = 1000 + i,
+          vendor = TokenUsage.Vendor.Codex,
+          usage = TokenUsage.TokenSnapshot.Zero,
+          taskNumber = Some(TaskNumber(i)),
+          model = None,
+          scope = "agent-run",
+          phase = Some(phase),
+          runner = Some(runner),
+          outcome = Some("green")
+        )
+      )
+
+    assert(backend.successRate(phase, runner, minSample = 3).isEmpty)
+
+  test("successRate returns Some(0.2) for 8 green of 40"):
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    val phase = "implement"
+    val runner = "claude"
+
+    for i <- 1 to 40 do
+      val outcome = if i <= 8 then "green" else "red"
+      backend.record(
+        TokenMetrics.TokenMetricsEvent(
+          timestampMillis = 1000 + i,
+          vendor = TokenUsage.Vendor.Claude,
+          usage = TokenUsage.TokenSnapshot.Zero,
+          taskNumber = Some(TaskNumber(i)),
+          model = None,
+          scope = "agent-run",
+          phase = Some(phase),
+          runner = Some(runner),
+          outcome = Some(outcome)
+        )
+      )
+
+    val result = backend.successRate(phase, runner, minSample = 40)
+    assert(result.isDefined)
+    assertEquals(result.get, 0.2, 0.01)
+
+  test("events with outcome=None are excluded from successRate"):
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    val phase = "test"
+    val runner = "gpt"
+
+    // 5 events with defined outcome (2 green, 3 red) → defined‑sample = 5, green = 2 → 0.4
+    for i <- 1 to 5 do
+      val outcome = if i <= 2 then "green" else "red"
+      backend.record(
+        TokenMetrics.TokenMetricsEvent(
+          timestampMillis = 1000 + i,
+          vendor = TokenUsage.Vendor.Codex,
+          usage = TokenUsage.TokenSnapshot.Zero,
+          taskNumber = Some(TaskNumber(i)),
+          model = None,
+          scope = "agent-run",
+          phase = Some(phase),
+          runner = Some(runner),
+          outcome = Some(outcome)
+        )
+      )
+
+    // 5 events with outcome = None — they must be ignored
+    for i <- 6 to 10 do
+      backend.record(
+        TokenMetrics.TokenMetricsEvent(
+          timestampMillis = 1000 + i,
+          vendor = TokenUsage.Vendor.Codex,
+          usage = TokenUsage.TokenSnapshot.Zero,
+          taskNumber = Some(TaskNumber(i)),
+          model = None,
+          scope = "agent-run",
+          phase = Some(phase),
+          runner = Some(runner),
+          outcome = None
+        )
+      )
+
+    val result = backend.successRate(phase, runner, minSample = 5)
+    assert(result.isDefined)
+    assertEquals(result.get, 2.0 / 5.0, 0.01)
   test("jsonl round-trips measurement fields"):
     val dir = os.temp.dir()
     val path = dir / "roundtrip.jsonl"

@@ -55,6 +55,19 @@ object TokenMetrics:
     def summary(query: TokenMetricsQuery): TokenUsage.TokenSnapshot =
       this.query(query.copy(limit = None)).foldLeft(TokenUsage.TokenSnapshot.Zero)(_ + _.usage)
 
+    // Observed p: fraction of recorded runs for this (phase, runner) whose
+    // outcome was "green". None when the sample is smaller than `minSample`.
+    def successRate(phase: String, runner: String, minSample: Int = 20): Option[Double] =
+      val allEvents = this.query(TokenMetricsQuery(limit = None))
+      val relevant = allEvents.filter(e =>
+        e.phase.contains(phase) && e.runner.contains(runner) && e.outcome.isDefined
+      )
+      val total = relevant.size
+      if total < minSample then None
+      else
+        val greenCount = relevant.count(_.outcome.contains("green"))
+        Some(greenCount.toDouble / total.toDouble)
+
   final class JsonlTokenMetricsBackend(path: os.Path) extends TokenMetricsBackend:
     def destination: String = path.toString
 
