@@ -29,6 +29,7 @@ FILES=(
   src/main/scala/com/github/mercurievv/ghllm/arrow/Implementations.scala
   src/main/scala/com/github/mercurievv/ghllm/git/IssueClaim.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/ParallelArrows.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/PrefixKey.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/Replayability.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/BusinessLogicReplay.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/Retryability.scala
