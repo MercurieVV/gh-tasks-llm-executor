@@ -145,3 +145,44 @@ class TaskMetadataPhaseSuite extends munit.FunSuite:
       Monoid[TaskMetadata].combine(older, TaskMetadata()).requiredAbilities,
       Map("complex-reasoning" -> 1.0)
     )
+
+class TaskArtifactSuite extends munit.FunSuite:
+
+  test("bounded render of small artifact is unchanged and marker absent"):
+    val small = TaskArtifact(
+      decision = "use implicit for ArrowChoice",
+      filesTouched = List("ArrowCapabilities.scala"),
+      symbols = List("ArrowChoice"),
+      followUps = List("test with Kleisli")
+    )
+    val bounded = TaskArtifact.boundedRender(small)
+    val expected = TaskArtifact.render(small)
+    assertEquals(bounded, expected)
+    assert(!bounded.contains("[CONTEXT TRUNCATED]"))
+
+  test("bounded render of oversized artifact is truncated and contains marker"):
+    val largeDecision = ("A" * 2500) + " end"
+    val large = TaskArtifact(
+      decision = largeDecision,
+      filesTouched = List("big.scala"),
+      symbols = List.empty,
+      followUps = List("check")
+    )
+    val limit = TaskArtifact.DefaultMaxChars
+    val bounded = TaskArtifact.boundedRender(large, limit)
+    val raw = TaskArtifact.render(large)
+    assert(raw.length > limit)
+    assert(bounded.length <= limit)
+    assert(bounded.contains("[CONTEXT TRUNCATED]"))
+
+  test("bounded render of completely empty artifact stays under limit"):
+    val empty = TaskArtifact("")
+    val bounded = TaskArtifact.boundedRender(empty)
+    assert(bounded.length <= TaskArtifact.DefaultMaxChars)
+    assert(!bounded.contains("[CONTEXT TRUNCATED]"))
+
+  test("bounded render with a limit smaller than marker length uses marker only"):
+    val smallArtifact = TaskArtifact("hello")
+    val tinyLimit = TaskArtifact.Marker.length - 2 // less than marker length
+    val bounded = TaskArtifact.boundedRender(smallArtifact, tinyLimit)
+    assertEquals(bounded, TaskArtifact.Marker)
