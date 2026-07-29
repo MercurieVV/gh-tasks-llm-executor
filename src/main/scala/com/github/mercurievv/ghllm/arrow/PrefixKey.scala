@@ -21,8 +21,10 @@ object PrefixKey:
       layer1: String,
       layer2: String
   ): PrefixKey =
+    // The stable prefix hash is computed only from the three layers so that
+    // identical layers produce the same hash regardless of runner/model/worktree.
     val input =
-      List(runner, model.getOrElse(""), worktree.toString, layer0, layer1, layer2)
+      List(layer0, layer1, layer2)
         .mkString("|")
     val digest = MessageDigest
       .getInstance("SHA-256")
