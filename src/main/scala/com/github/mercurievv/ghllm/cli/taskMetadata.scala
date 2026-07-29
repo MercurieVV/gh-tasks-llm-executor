@@ -11,6 +11,49 @@ import cats.Monoid
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
+// Node output contract (Stage 4: T17).  Decision, touched files, referenced
+// symbols and follow-ups are the only context a child task requires —
+// carrying the full parent reasoning transcript taxes every downstream turn.
+final case class TaskArtifact(
+    decision: String,
+    filesTouched: List[String] = Nil,
+    symbols: List[String] = Nil,
+    followUps: List[String] = Nil
+)
+
+object TaskArtifact:
+  val DefaultMaxChars: Int = 2000
+  val Marker = "\n\n[CONTEXT TRUNCATED]"
+
+  /** Renders the artifact into the full structured text that a child task would
+    * receive.  No truncation — call `boundedRender` to enforce the limit.
+    */
+  def render(artifact: TaskArtifact): String =
+    val sb = new StringBuilder
+    sb.append(s"Decision: ${artifact.decision}\n")
+    if artifact.filesTouched.nonEmpty then
+      sb.append(s"Files touched: ${artifact.filesTouched.mkString(", ")}\n")
+    if artifact.symbols.nonEmpty then
+      sb.append(s"Symbols: ${artifact.symbols.mkString(", ")}\n")
+    if artifact.followUps.nonEmpty then
+      sb.append(s"Follow-ups: ${artifact.followUps.mkString(", ")}\n")
+    sb.toString
+
+  /** Returns a version of the rendered artifact that is guaranteed to fit within
+    * `limit` characters.  If the raw text exceeds the limit it is truncated and
+    * an explicit `[CONTEXT TRUNCATED]` marker is appended so the next phase can
+    * see that information was dropped.
+    */
+  def boundedRender(artifact: TaskArtifact, limit: Int = DefaultMaxChars): String =
+    val raw = render(artifact)
+    val markerLen = Marker.length
+    if limit < markerLen then Marker
+    else if raw.length <= limit then raw
+    else
+      val keepLen = limit - markerLen
+      if keepLen == 0 then Marker
+      else raw.take(keepLen) + Marker
+
 // Structured evaluator/runner state for a task. Never written into the issue
 // body directly — see TaskMetadataStore. Fields are individually mergeable so
 // a follow-up metadata comment can update just evaluation/execution without
