@@ -1,80 +1,131 @@
-package com.github.mercurievv.ghllm.tasktree
+//> using test.dependency org.scalameta::munit-scalacheck:1.3.0
 
-import munit.FunSuite
-import higherkindness.droste.scheme.cata
-import higherkindness.droste.Fix
-import higherkindness.droste.Cofree
+package com.github.mercurievv.ghllm
 
-import TaskF.Node
+import com.github.mercurievv.ghllm.TaskTree.*
+import com.github.mercurievv.ghllm.TaskTree.NodeRef
+import com.github.mercurievv.ghllm.arrow.PrefixKey
+import munit.ScalaCheckSuite
+import org.scalacheck.Gen
+import org.scalacheck.Prop.forAll
 
-class CostAlgebraSuite extends FunSuite {
+class TaskTreeSuite extends ScalaCheckSuite:
 
-  // Helper to construct a Fix[TaskF] quickly
-  private def leaf(work: Double, tier: String): Fix[TaskF] =
-    Fix(Node(work, tier, Nil))
-
-  private def branch(work: Double, tier: String, cs: Fix[TaskF]*): Fix[TaskF] =
-    Fix(Node(work, tier, cs.toList))
-
-  test("hand‑computed total cost matches algebra fold") {
-    // tree:
-    //          root (plan, work=10)
-    //          /        \
-    //  impl(5)          test(3)
-    //  work=5            work=3
-    val root = branch(10.0, "plan",
-      leaf(5.0, "implement"),
-      leaf(3.0, "test")
+  private val model =
+    CostModel(
+      inputUsdPerMillionTokens = 1.0,
+      outputUsdPerMillionTokens = 10.0
     )
-    val expected = 10.0 * 1.0 + 5.0 * 0.3 + 3.0 * 0.1 // 11.8
-    val total = cata(CostAlgebra.totalCost).apply(root)
-    assertEqualsDouble(total, expected, 0.001)
-  }
 
-  test("property: adding a sibling does NOT change a node's own cost") {
-    val baseWork  = 10.0
-    val tier      = "plan"
-    val leafA     = leaf(5.0, "implement")
-    val leafB     = leaf(3.0, "test")
+  private val zeroCoefficients =
+    Stage0Coefficients(
+      inputTokens = 0.0,
+      cachedInputTokens = 0.0,
+      cacheWriteTokens = 0.0,
+      outputTokens = 0.0,
+      turnCount = 1.0
+    )
 
-    val before    = branch(baseWork, tier, leafA, leafB)
+  private def prefix(value: String): PrefixKey =
+    PrefixKey.of(
+      runner = "test-runner",
+      model = Some("test-model"),
+      worktree = os.pwd,
+      layer0 = "system",
+      layer1 = "repo",
+      layer2 = value
+    )
 
-    def rootOwnCost(t: Fix[TaskF]): Double = t.unFix match {
-      case Node(w, tr, _) => w * CostCoefficients.tierMultiplier(tr)
+  private def profile(
+      node: NodeRef,
+      tier: String,
+      coefficients: Stage0Coefficients
+  ): (NodeRef, NodeProfile) =
+    node -> NodeProfile(prefix(node.toString), tier, coefficients)
+
+  test("a known small tree folds to the hand-computed cost"):
+    val root = branch(
+      "root",
+      List(
+        leaf(Some(1)),
+        leaf(Some(2))
+      )
+    )
+    val profiles = Map(
+      profile(
+        NodeRef.Branch("root"),
+        "plan",
+        zeroCoefficients.copy(inputTokens = 1000000.0)
+      ),
+      profile(
+        NodeRef.Leaf(Some(1)),
+        "implement",
+        zeroCoefficients.copy(outputTokens = 100000.0)
+      ),
+      profile(
+        NodeRef.Leaf(Some(2)),
+        "test",
+        zeroCoefficients.copy(cachedInputTokens = 1000000.0)
+      )
+    )
+    val fallback = NodeProfile(prefix("fallback"), "unknown", zeroCoefficients)
+    val result = estimate(root, model, node => profiles.getOrElse(node, fallback))
+
+    assertEqualsDouble(result.ownUsd, 1.0, 1e-12)
+    assertEqualsDouble(result.subtreeUsd, 2.1, 1e-12)
+    assertEquals(result.nodeCount, 3)
+    assertEqualsDouble(result.estimatedPerNodeUsd, 0.5, 1e-12)
+
+  property("adding a sibling to a fan-out never increases estimated per-node cost"):
+    forAll(Gen.choose(0.0, 10000000.0), Gen.choose(1, 100)) { (inputTokens, siblingCount) =>
+      val rootProfile =
+        NodeProfile(
+          prefix("fan-out"),
+          "implement",
+          zeroCoefficients.copy(inputTokens = inputTokens)
+        )
+      val leafProfile = NodeProfile(prefix("leaf"), "test", zeroCoefficients)
+      val profileFor: NodeRef => NodeProfile =
+        case NodeRef.Branch("fan-out") => rootProfile
+        case _                         => leafProfile
+      val siblings = List.tabulate(siblingCount)(index => leaf(Some(index)))
+      val before = branch("fan-out", siblings)
+      val after = branch("fan-out", siblings :+ leaf(Some(Int.MaxValue)))
+      val beforeCost = estimate(before, model, profileFor)
+      val afterCost = estimate(after, model, profileFor)
+
+      assert(
+        afterCost.estimatedPerNodeUsd <= beforeCost.estimatedPerNodeUsd,
+        s"${afterCost.estimatedPerNodeUsd} was greater than ${beforeCost.estimatedPerNodeUsd}"
+      )
     }
 
-    val ownBefore = rootOwnCost(before)
+  test("cata annotation carries each node's PrefixKey, tier, and cost"):
+    val child = leaf(Some(7))
+    val root = branch("root", List(child))
+    val rootProfile =
+      NodeProfile(
+        prefix("root"),
+        "plan",
+        zeroCoefficients.copy(inputTokens = 500000.0)
+      )
+    val childProfile =
+      NodeProfile(
+        prefix("child"),
+        "test",
+        zeroCoefficients.copy(outputTokens = 50000.0)
+      )
+    val profileFor: NodeRef => NodeProfile =
+      case NodeRef.Branch("root") => rootProfile
+      case _                      => childProfile
+    val annotated = annotate(root, model, profileFor)
 
-    // add an extra sibling (fan‑out grows)
-    val leafC     = leaf(4.0, "test")
-    val after     = branch(baseWork, tier, leafA, leafB, leafC)
-    val ownAfter  = rootOwnCost(after)
-
-    assertEqualsDouble(ownBefore, ownAfter, 0.0,
-      "Root's own cost must be identical after adding a sibling")
-  }
-
-  test("annotate tree yields correct per‑node cost estimates") {
-    val root = branch(10.0, "plan",
-      leaf(5.0, "implement"),
-      leaf(3.0, "test")
-    )
-
-    val annotated = CostAlgebra.annotate(root)
-
-    // root cost (own)
-    assertEqualsDouble(annotated.head.estCost, 10.0 * 1.0, 0.001)
-
-    // children
-    val childrenCofree: List[Cofree[TaskF, Attr]] =
-      annotated.tailForced match {
-        case Node(_, _, kids) => kids
-      }
-
-    assertEquals(childrenCofree.size, 2)
-
-    val Vector(c1, c2) = childrenCofree.toVector
-    assertEqualsDouble(c1.head.estCost, 5.0 * 0.3, 0.001)   // implement
-    assertEqualsDouble(c2.head.estCost, 3.0 * 0.1, 0.001)   // test
-  }
-}
+    assertEquals(annotated.head.prefixKey, rootProfile.prefixKey)
+    assertEquals(annotated.head.tier, "plan")
+    assertEqualsDouble(annotated.head.cost.subtreeUsd, 1.0, 1e-12)
+    annotated.tailForced match
+      case TaskF.Branch(_, onlyChild :: Nil) =>
+        assertEquals(onlyChild.head.prefixKey, childProfile.prefixKey)
+        assertEquals(onlyChild.head.tier, "test")
+        assertEqualsDouble(onlyChild.head.cost.ownUsd, 0.5, 1e-12)
+      case other => fail(s"expected one annotated child, got $other")
