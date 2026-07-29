@@ -182,21 +182,43 @@ final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights
   // wrote a concrete agent/model/effort/version, e.g. to reproduce a bug tied
   // to one model) always wins outright. Otherwise, when the task instead
   // carries abstract `requiredAbilities` (ability -> importance coefficient),
-  // rank every available implementor by Priority.score against them using
-  // this inventory's (possibly user-tuned) `weights` - so retuning
-  // priority-weights.json changes the pick on the next run without
-  // re-evaluating any task. With neither signal, fall back to
-  // `defaultImplementor` exactly as before.
+  // use observed phase/runner success when it is supplied and fully measured.
+  // Missing price or sample data falls back wholesale to Priority.score using
+  // this inventory's (possibly user-tuned) `weights`. With neither task signal,
+  // fall back to `defaultImplementor` exactly as before.
   def selectRunnerFor(
       requiredAbilities: Map[String, Double],
       preferred: List[TaskRunner]
   ): Option[TaskRunner] =
+    selectRunnerFor(requiredAbilities, preferred, None, None)
+
+  def selectRunnerFor(
+      requiredAbilities: Map[String, Double],
+      preferred: List[TaskRunner],
+      phase: Option[String],
+      metricsBackend: Option[TokenMetrics.TokenMetricsBackend]
+  ): Option[TaskRunner] =
     if preferred.nonEmpty then selectRunner(preferred)
     else if requiredAbilities.nonEmpty then
-      availableImplementors
+      val priorityFallback = availableImplementors
         .sortBy(tool => Priority.score(tool, requiredAbilities, weights))
         .headOption
-        .map(_.runner)
+      val measuredSelection =
+        for
+          phaseName <- phase
+          backend <- metricsBackend
+          candidate <- availableImplementors
+            .sortBy(_.cost.getOrElse(Double.PositiveInfinity))
+            .headOption
+          nextStrongerRunner <- nextStrongerImplementor(candidate.runner)
+          nextStronger <- availableImplementors.find(_.matches(nextStrongerRunner))
+          breakEvenRate <- candidate.breakEvenRateAgainst(nextStronger)
+          observedSuccessRate <- backend.successRate(phaseName, candidate.runner.display)
+        yield
+          if observedSuccessRate > breakEvenRate then candidate
+          else nextStronger
+
+      measuredSelection.orElse(priorityFallback).map(_.runner)
     else defaultImplementor
 
   def nextStrongerImplementor(runner: TaskRunner): Option[TaskRunner] =
@@ -264,31 +286,33 @@ object AgentInventory:
     if os.exists(path) then parseVendorBudgets(os.read(path)) else Map.empty
 
   private def parseVendorBudgets(value: String): Map[String, Double] =
-    scala.util.Try {
-      val json = ujson.read(value)
-      val generatedAtEpochMillis = json.obj
-        .get("generatedAtEpochMillis")
-        .flatMap(field =>
-          field.strOpt
-            .flatMap(text => scala.util.Try(text.toLong).toOption)
-            .orElse(field.numOpt.map(_.toLong))
-        )
-        .getOrElse(0L)
-      val isStale = (System.currentTimeMillis() - generatedAtEpochMillis) > MaxBudgetAgeMillis
-      if isStale then Map.empty
-      else
-        json.obj
-          .get("budgets")
-          .toList
-          .flatMap(_.arr.toList)
-          .flatMap { entry =>
-            for
-              vendor <- entry.obj.get("vendor").collect { case ujson.Str(value) => value }
-              usedFraction <- entry.obj.get("usedFraction").collect { case ujson.Num(value) => value }
-            yield vendor.toLowerCase -> usedFraction
-          }
-          .toMap
-    }.getOrElse(Map.empty)
+    scala.util
+      .Try {
+        val json = ujson.read(value)
+        val generatedAtEpochMillis = json.obj
+          .get("generatedAtEpochMillis")
+          .flatMap(field =>
+            field.strOpt
+              .flatMap(text => scala.util.Try(text.toLong).toOption)
+              .orElse(field.numOpt.map(_.toLong))
+          )
+          .getOrElse(0L)
+        val isStale = (System.currentTimeMillis() - generatedAtEpochMillis) > MaxBudgetAgeMillis
+        if isStale then Map.empty
+        else
+          json.obj
+            .get("budgets")
+            .toList
+            .flatMap(_.arr.toList)
+            .flatMap { entry =>
+              for
+                vendor <- entry.obj.get("vendor").collect { case ujson.Str(value) => value }
+                usedFraction <- entry.obj.get("usedFraction").collect { case ujson.Num(value) => value }
+              yield vendor.toLowerCase -> usedFraction
+            }
+            .toMap
+      }
+      .getOrElse(Map.empty)
 
   private def parse(
       value: String,
