@@ -129,12 +129,17 @@ class PublishRemoteArrowsSuite extends CatsEffectSuite:
 
   test("merge conflict repair prompt names unmerged files and requires staging"):
     val prompt = BusinessLogicRetry
-      .mergeConflictRepairPrompt(issue(117), "task-33", Seq(".gitignore", "build.mill"))
+      .mergeConflictRepairPrompt(issue(117), "task-35", "task-33", Seq(".gitignore", "build.mill"))
       .value
 
+    assertEquals(prompt.contains("head branch `task-35`"), true)
+    assertEquals(prompt.contains("base branch `task-33`"), true)
     assertEquals(prompt.contains("Unmerged files reported by Git:"), true)
     assertEquals(prompt.contains("- .gitignore"), true)
     assertEquals(prompt.contains("- build.mill"), true)
+    assertEquals(prompt.contains("git diff --ours -- <file>"), true)
+    assertEquals(prompt.contains("git diff --theirs -- <file>"), true)
+    assertEquals(prompt.contains("git log --oneline --decorate --graph HEAD...origin/task-33"), true)
     assertEquals(prompt.contains("git add"), true)
     assertEquals(prompt.contains("git diff --name-only --diff-filter=U"), true)
     assertEquals(prompt.contains("Do not run `git commit`"), true)

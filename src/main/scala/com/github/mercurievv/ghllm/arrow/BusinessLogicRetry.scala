@@ -271,7 +271,7 @@ object BusinessLogicRetry:
             )
             _ <- AgentExecutor[F].run(
               request.runner,
-              mergeConflictRepairPrompt(request.task, baseBranch.value, conflictedFiles),
+              mergeConflictRepairPrompt(request.task, request.branchName.value, baseBranch.value, conflictedFiles),
               request.worktreePath,
               RepairAllowedTools,
               contextFiles = conflictedFiles,
@@ -295,16 +295,23 @@ object BusinessLogicRetry:
 
   def mergeConflictRepairPrompt(
       task: Issue,
+      headBranch: String,
       baseBranch: String,
       conflictedFiles: Seq[String]
   ): AgentPrompt = AgentPrompt(
-    s"""This branch has a `git merge` in progress against `$baseBranch` that produced conflict
-       |markers (`<<<<<<<` / `=======` / `>>>>>>>`). Resolve every conflict in this worktree so
-       |the merge can complete cleanly, preserving the intended behavior of both sides, without
-       |changing the task's intended behavior.
+    s"""This worktree is on head branch `$headBranch` and has a `git merge` in progress against
+       |base branch `$baseBranch` that produced conflict markers (`<<<<<<<` / `=======` /
+       |`>>>>>>>`). Resolve every conflict so the merge can complete cleanly, preserving the
+       |intended behavior of both branches without changing the task's intended behavior.
        |
        |Unmerged files reported by Git:
        |${conflictedFiles.map(file => s"- $file").mkString("\n")}
+       |
+       |For each conflicted file, inspect both sides before editing:
+       |- `git diff --ours -- <file>` shows the head branch `$headBranch` side.
+       |- `git diff --theirs -- <file>` shows the base branch `$baseBranch` side being merged in.
+       |- `git log --oneline --decorate --graph HEAD...origin/$baseBranch` shows the divergent
+       |  branch history when you need more context.
        |
        |Run `git status --short`, resolve every unmerged path, and `git add` each resolved file
        |so `git diff --name-only --diff-filter=U` prints nothing. Do not run `git commit`,
