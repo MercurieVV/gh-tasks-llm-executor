@@ -26,7 +26,12 @@ object TokenMetrics:
       usage: TokenUsage.TokenSnapshot,
       taskNumber: Option[TaskNumber],
       model: Option[String],
-      scope: String
+      scope: String,
+      phase: Option[String] = None,
+      runner: Option[String] = None,
+      turnCount: Option[Int] = None,
+      escalated: Boolean = false,
+      outcome: Option[String] = None
   )
 
   final case class TokenMetricsQuery(
@@ -132,7 +137,12 @@ object TokenMetrics:
         Some(Attribute("scope", event.scope)),
         Some(Attribute("token_type", tokenType)),
         event.taskNumber.map(number => Attribute("task", number.value.toLong)),
-        event.model.map(model => Attribute("model", model))
+        event.model.map(model => Attribute("model", model)),
+        event.phase.map(p => Attribute("phase", p)),
+        event.runner.map(r => Attribute("runner", r)),
+        event.turnCount.map(tc => Attribute("turn_count", tc.toLong)),
+        Some(Attribute("escalated", event.escalated)),
+        event.outcome.map(o => Attribute("outcome", o))
       ).flatten
 
     private def query(query: TokenMetricsQuery, baseUrl: String): List[TokenMetricsEvent] =
@@ -299,6 +309,11 @@ object TokenMetrics:
         "taskNumber" -> event.taskNumber.map(number => ujson.Num(number.value)).getOrElse(ujson.Null),
         "model" -> event.model.map(ujson.Str(_)).getOrElse(ujson.Null),
         "scope" -> event.scope,
+        "phase" -> event.phase.map(ujson.Str(_)).getOrElse(ujson.Null),
+        "runner" -> event.runner.map(ujson.Str(_)).getOrElse(ujson.Null),
+        "turnCount" -> event.turnCount.map(t => ujson.Num(t.toDouble)).getOrElse(ujson.Null),
+        "escalated" -> ujson.Bool(event.escalated),
+        "outcome" -> event.outcome.map(ujson.Str(_)).getOrElse(ujson.Null),
         "usage" -> ujson.Obj(
           "input" -> ujson.Num(event.usage.input.toDouble),
           "output" -> ujson.Num(event.usage.output.toDouble),
@@ -317,13 +332,23 @@ object TokenMetrics:
       vendor <- obj.get("vendor").flatMap(_.strOpt).flatMap(parseVendor)
       usage <- obj.get("usage").flatMap(readSnapshot)
       scope <- obj.get("scope").flatMap(_.strOpt)
+      phase = obj.get("phase").flatMap(_.strOpt)
+      runner = obj.get("runner").flatMap(_.strOpt)
+      turnCount = obj.get("turnCount").flatMap(readLong).map(_.toInt)
+      escalated = obj.get("escalated").flatMap(_.boolOpt).getOrElse(false)
+      outcome = obj.get("outcome").flatMap(_.strOpt)
     yield TokenMetricsEvent(
       timestampMillis = timestampMillis,
       vendor = vendor,
       usage = usage,
       taskNumber = obj.get("taskNumber").flatMap(readLong).map(value => TaskNumber(value.toInt)),
       model = obj.get("model").flatMap(_.strOpt),
-      scope = scope
+      scope = scope,
+      phase = phase,
+      runner = runner,
+      turnCount = turnCount,
+      escalated = escalated,
+      outcome = outcome
     )
 
   private def readSnapshot(json: ujson.Value): Option[TokenUsage.TokenSnapshot] =
