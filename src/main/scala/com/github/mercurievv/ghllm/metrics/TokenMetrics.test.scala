@@ -177,3 +177,30 @@ class TokenMetricsSuite extends munit.FunSuite:
     assertEquals(event.turnCount, None)
     assertEquals(event.escalated, false)
     assertEquals(event.outcome, None)
+
+  test("simulated failing run records outcome red"):
+    val dir = os.temp.dir()
+    val path = dir / "failing-run.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    backend.record(
+      TokenMetrics.TokenMetricsEvent(
+        timestampMillis = 5000L,
+        vendor = TokenUsage.Vendor.Claude,
+        usage = TokenUsage.TokenSnapshot(input = 100, output = 50, cacheRead = 0, cacheWrite = 0, total = 150),
+        taskNumber = Some(TaskNumber(99)),
+        model = Some("sonnet"),
+        scope = "implement",
+        runner = Some("claude-sonnet"),
+        turnCount = Some(3),
+        outcome = Some("red")
+      )
+    )
+
+    val reloaded = TokenMetrics.JsonlTokenMetricsBackend(path)
+    val results = reloaded.query(TokenMetrics.TokenMetricsQuery())
+
+    assertEquals(results.length, 1)
+    val event = results.head
+    assertEquals(event.outcome, Some("red"))
+    assertEquals(event.turnCount, Some(3))
