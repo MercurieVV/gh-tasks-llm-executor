@@ -130,7 +130,10 @@ class AgentInventorySuite extends CatsEffectSuite:
       outputUsdPerMTok = Some(0.0001),
       asOfDate = Some("2035-01-01")
     )
-    assertEquals(cheap.breakEvenRateAgainst(strong), Some(0.05))
+    val breakEven = cheap.breakEvenRateAgainst(strong)
+    assert(breakEven.isDefined)
+    // tolerate floating‑point imprecision
+    assertEquals(breakEven.get, 0.05, 1e-9)
   }
 
   test("breakEvenRateAgainst: 2x cheaper tool yields Some(0.5)") {
