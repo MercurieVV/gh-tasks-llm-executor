@@ -1,5 +1,6 @@
 package com.github.mercurievv.ghllm.tasktree
 
+import cats.Eval
 import higherkindness.droste._
 import higherkindness.droste.syntax.all._
 
@@ -52,7 +53,9 @@ object CostAlgebra {
   }
 
   /** Annotate each node with its `PrefixKey`, tier, and estimated own cost,
-    * yielding a Cofree tree.  The cost is the same value as `ownCost`. */
+    * yielding a Cofree tree.  The cost is the same value as `ownCost`.
+    * The tail preserves the original `(work, tier, children)` so that
+    * downstream operations can still inspect the raw tree. */
   def annotate(tree: Fix[TaskF]): Cofree[TaskF, Attr] = {
     def go(t: Fix[TaskF]): Cofree[TaskF, Attr] = {
       val Node(w, tier, childrenFix) = t.unFix
@@ -61,7 +64,7 @@ object CostAlgebra {
       val pk   = s"key-$w-$tier"
       Cofree(
         head = Attr(pk, tier, cost),
-        tail = Eval.now(Node(cost, tier, childAnn))
+        tail = Eval.now(Node(w, tier, childAnn))   // preserve original work in the tail
       )
     }
     go(tree)
