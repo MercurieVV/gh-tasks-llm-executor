@@ -46,10 +46,11 @@ object TaskArtifact:
     */
   def boundedRender(artifact: TaskArtifact, limit: Int = DefaultMaxChars): String =
     val raw = render(artifact)
-    if raw.length <= limit then raw
+    val markerLen = Marker.length
+    if limit < markerLen then Marker
+    else if raw.length <= limit then raw
     else
-      val markerLen = Marker.length
-      val keepLen   = (limit - markerLen).max(0)
+      val keepLen = limit - markerLen
       if keepLen == 0 then Marker
       else raw.take(keepLen) + Marker
 
