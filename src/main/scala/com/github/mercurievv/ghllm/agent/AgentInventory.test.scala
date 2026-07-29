@@ -133,7 +133,9 @@ class AgentInventorySuite extends CatsEffectSuite:
     val breakEven = cheap.breakEvenRateAgainst(strong)
     assert(breakEven.isDefined)
     // tolerate floating‑point imprecision
-    assertEquals(breakEven.get, 0.05, 1e-9)
+    val tol = 1e-9
+    val v = breakEven.get
+    assert(math.abs(v - 0.05) < tol, s"expected 0.05 within $tol, got $v")
   }
 
   test("breakEvenRateAgainst: 2x cheaper tool yields Some(0.5)") {
