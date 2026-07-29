@@ -38,6 +38,7 @@ FILES=(
   src/main/scala/com/github/mercurievv/ghllm/metrics/TokenMetrics.scala
   src/main/scala/com/github/mercurievv/ghllm/metrics/TokenUsage.scala
   src/main/scala/com/github/mercurievv/ghllm/metrics/VendorBudgets.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/VerificationResult.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/Wiring.scala
   src/main/scala/com/github/mercurievv/ghllm/cli/taskMetadata.scala
 )
