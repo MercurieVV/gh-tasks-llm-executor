@@ -46,6 +46,18 @@ object Impl:
       .get("GH_TASKS_USER_INPUT_SOUND")
       .forall(value => !Set("0", "false", "no", "off").contains(value.toLowerCase))
 
+  // Mandates the use of scalameta tools for navigating Scala sources.
+  // This constant is appended to subagent prompts when the task touches .scala files,
+  // as defined by the token efficiency plan (T13).
+  val ScalaSemanticMandate: String =
+    """
+      |
+      |SCALA SEMANTIC NAVIGATION RULE (must be obeyed):
+      |For any question about symbols, types, signatures, hierarchy, implicits, references, or call paths in `.scala` files, use `mcp__scala-semantic__*` tools.
+      |Never use `cat`, `rg`, `sed`, `grep`, `head`, or `tail` against `.scala` files.
+      |Use `document_outline` to understand a file's API instead of reading the entire file.
+      |""".stripMargin
+
   // TTL-gated, not per-task: refreshing means shelling out to codex/gemini/
   // deepseek/ccusage probes, so it only runs once per process invocation
   // (here, before AgentInventory reads the snapshot) and only when the
@@ -1019,6 +1031,8 @@ Replay rules:
 - If the previous implementation was already merged, create the minimal follow-up fix in this task branch.
 """).getOrElse("")
 
+    val scalaMandate = if (task.body.value.toLowerCase.contains(".scala")) s"\n\n$ScalaSemanticMandate" else ""
+
     AgentPrompt(s"""Task ID: #${task.number}
 Title: ${task.title}
 Agent: ${runner.agent}
@@ -1063,6 +1077,7 @@ Final answer contract:
 - Include a proposed commit title.
 - Include a proposed pull request body when useful.
 - Include a one-line "Conclusion:" summary for tasks that depend on this one (what changed, what's now available to build on).
+$scalaMandate
 """)
 
   // Implementer runs unattended (`-p`, stdin closed) with zero tool grants
