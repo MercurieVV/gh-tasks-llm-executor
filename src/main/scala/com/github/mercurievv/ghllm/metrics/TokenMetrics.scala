@@ -311,7 +311,7 @@ object TokenMetrics:
         "scope" -> event.scope,
         "phase" -> event.phase.map(ujson.Str(_)).getOrElse(ujson.Null),
         "runner" -> event.runner.map(ujson.Str(_)).getOrElse(ujson.Null),
-        "turnCount" -> event.turnCount.map(t => ujson.Num(t.toDouble)).getOrElse(ujson.Null),
+        "turnCount" -> event.turnCount.map(count => ujson.Num(count.toDouble)).getOrElse(ujson.Null),
         "escalated" -> ujson.Bool(event.escalated),
         "outcome" -> event.outcome.map(ujson.Str(_)).getOrElse(ujson.Null),
         "usage" -> ujson.Obj(

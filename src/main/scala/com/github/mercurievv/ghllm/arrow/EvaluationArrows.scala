@@ -423,6 +423,8 @@ object EvaluationArrows:
       else if strongDescription(task.body) then "strong"
       else "weak"
 
+    val scalaMandate = if (task.body.value.toLowerCase.contains(".scala")) s"\n\n${Impl.ScalaSemanticMandate}" else ""
+
     AgentPrompt(s"""Evaluate and prepare this GitHub task before implementation.
 
 Return only JSON, with this shape:
@@ -496,7 +498,7 @@ Description state: $descriptionState
 
 Current Task Description:
 ${task.body}
-$dependencyConclusionStr$userAnswerStr""")
+$dependencyConclusionStr$userAnswerStr$scalaMandate""")
 
   def splitTaskPrompt(
       task: Issue,
@@ -506,6 +508,8 @@ $dependencyConclusionStr$userAnswerStr""")
     val dependencyConclusionStr = dependencyConclusion
       .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
       .getOrElse("")
+
+    val scalaMandate = if (task.body.value.toLowerCase.contains(".scala")) s"\n\n${Impl.ScalaSemanticMandate}" else ""
 
     AgentPrompt(
       s"""Create missing GitHub subtasks for an already-evaluated split task.
@@ -535,6 +539,7 @@ Rules:
 - Use only GitHub issue creation/comment commands for the split side effects.
 - Do not implement code changes.
 - Return a short plain-text summary listing the child issue numbers you created.
+$scalaMandate
 """
     )
 
