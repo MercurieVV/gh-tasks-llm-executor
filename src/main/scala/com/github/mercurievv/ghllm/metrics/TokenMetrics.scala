@@ -26,7 +26,9 @@ object TokenMetrics:
       usage: TokenUsage.TokenSnapshot,
       taskNumber: Option[TaskNumber],
       model: Option[String],
-      scope: String
+      scope: String,
+      phase: Option[String] = None,
+      runner: Option[String] = None
   )
 
   final case class TokenMetricsQuery(
@@ -299,6 +301,8 @@ object TokenMetrics:
         "taskNumber" -> event.taskNumber.map(number => ujson.Num(number.value)).getOrElse(ujson.Null),
         "model" -> event.model.map(ujson.Str(_)).getOrElse(ujson.Null),
         "scope" -> event.scope,
+        "phase" -> event.phase.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
+        "runner" -> event.runner.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
         "usage" -> ujson.Obj(
           "input" -> ujson.Num(event.usage.input.toDouble),
           "output" -> ujson.Num(event.usage.output.toDouble),
@@ -323,7 +327,9 @@ object TokenMetrics:
       usage = usage,
       taskNumber = obj.get("taskNumber").flatMap(readLong).map(value => TaskNumber(value.toInt)),
       model = obj.get("model").flatMap(_.strOpt),
-      scope = scope
+      scope = scope,
+      phase = obj.get("phase").flatMap(_.strOpt),
+      runner = obj.get("runner").flatMap(_.strOpt)
     )
 
   private def readSnapshot(json: ujson.Value): Option[TokenUsage.TokenSnapshot] =

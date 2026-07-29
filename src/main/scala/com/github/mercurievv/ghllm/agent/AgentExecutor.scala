@@ -329,7 +329,9 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
             usage = usage,
             taskNumber = taskNumber,
             model = runner.model,
-            scope = metricsScope
+            scope = metricsScope,
+            phase = Some(metricsScope),
+            runner = Some(runner.display)
           )
           metricsBackend.record(event)
           TaskLogger.unsafeTrace(
