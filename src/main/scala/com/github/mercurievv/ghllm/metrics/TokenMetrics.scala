@@ -317,9 +317,9 @@ object TokenMetrics:
         "taskNumber" -> event.taskNumber.map(number => ujson.Num(number.value)).getOrElse(ujson.Null),
         "model" -> event.model.map(ujson.Str(_)).getOrElse(ujson.Null),
         "scope" -> event.scope,
-        "phase" -> event.phase.map(ujson.Str(_)).getOrElse(ujson.Null),
-        "runner" -> event.runner.map(ujson.Str(_)).getOrElse(ujson.Null),
-        "turnCount" -> event.turnCount.map(n => ujson.Num(n.toDouble)).getOrElse(ujson.Null),
+        "phase" -> event.phase.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
+        "runner" -> event.runner.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
+        "turnCount" -> event.turnCount.map(count => ujson.Num(count.toDouble)).getOrElse(ujson.Null),
         "escalated" -> ujson.Bool(event.escalated),
         "outcome" -> event.outcome.map(ujson.Str(_)).getOrElse(ujson.Null),
         "usage" -> ujson.Obj(

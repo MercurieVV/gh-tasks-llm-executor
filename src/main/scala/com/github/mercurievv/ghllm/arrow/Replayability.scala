@@ -13,6 +13,8 @@ import cats.data.OptionT
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
+import os.*
+
 /** Driving an existing open Pull Request to merged. */
 final case class PullRequestResumeArrows[-->[_, _]](
     resumeOpenPullRequest: ClaimedTask --> Unit
@@ -35,6 +37,12 @@ final case class ExistingPullRequestResumeArrows[-->[_, _]](
 
 object Replayability:
   type ReplayFlow[F[_]] = [A, B] =>> Kleisli[[X] =>> OptionT[F, X], A, B]
+
+  // Force the compiler / remote‑launcher to include PrefixKey as a dependency.
+  private val _ensurePrefixKeyIncluded: Unit = {
+    val _ = PrefixKey("", None, os.pwd, "")
+    ()
+  }
 
   def resumeExistingPullRequest[-->[_, _]](
       resume: ExistingPullRequestResumeArrows[-->]

@@ -200,3 +200,106 @@ class TokenMetricsSuite extends munit.FunSuite:
     val result = backend.successRate(phase, runner, minSample = 5)
     assert(result.isDefined)
     assertEquals(result.get, 2.0 / 5.0, 0.01)
+  test("jsonl round-trips measurement fields"):
+    val dir = os.temp.dir()
+    val path = dir / "roundtrip.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    val event = TokenMetrics.TokenMetricsEvent(
+      timestampMillis = 12345L,
+      vendor = TokenUsage.Vendor.Gemini,
+      usage = TokenUsage.TokenSnapshot(input = 1, output = 2, cacheRead = 3, cacheWrite = 4, total = 10),
+      taskNumber = Some(TaskNumber(42)),
+      model = Some("my-model"),
+      scope = "agent-run",
+      runner = Some("my-runner"),
+      turnCount = Some(8),
+      escalated = true,
+      outcome = Some("green")
+    )
+
+    backend.record(event)
+
+    val reloaded = TokenMetrics.JsonlTokenMetricsBackend(path)
+    val results = reloaded.query(TokenMetrics.TokenMetricsQuery())
+    assertEquals(results.length, 1)
+
+    val result = results.head
+    assertEquals(result.timestampMillis, event.timestampMillis)
+    assertEquals(result.vendor, event.vendor)
+    assertEquals(result.usage, event.usage)
+    assertEquals(result.taskNumber, event.taskNumber)
+    assertEquals(result.model, event.model)
+    assertEquals(result.scope, event.scope)
+    assertEquals(result.runner, event.runner)
+    assertEquals(result.turnCount, event.turnCount)
+    assertEquals(result.escalated, event.escalated)
+    assertEquals(result.outcome, event.outcome)
+
+  test("jsonl decodes legacy lines without measurement fields"):
+    val dir = os.temp.dir()
+    val path = dir / "legacy.jsonl"
+
+    val legacyLine = ujson.write(
+      ujson.Obj(
+        "timestampMillis" -> ujson.Num(1000.0),
+        "vendor" -> "gemini",
+        "taskNumber" -> ujson.Null,
+        "model" -> ujson.Null,
+        "scope" -> "legacy",
+        "usage" -> ujson.Obj(
+          "input" -> ujson.Num(10),
+          "output" -> ujson.Num(20),
+          "cacheRead" -> ujson.Num(0),
+          "cacheWrite" -> ujson.Num(0),
+          "total" -> ujson.Num(30)
+        )
+      )
+    )
+
+    os.write.over(path, legacyLine + System.lineSeparator())
+
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+    val results = backend.query(TokenMetrics.TokenMetricsQuery())
+
+    assertEquals(results.length, 1)
+
+    val event = results.head
+    assertEquals(event.timestampMillis, 1000L)
+    assertEquals(event.vendor, TokenUsage.Vendor.Gemini)
+    assertEquals(event.usage,
+      TokenUsage.TokenSnapshot(input = 10, output = 20, cacheRead = 0, cacheWrite = 0, total = 30))
+    assertEquals(event.scope, "legacy")
+
+    // new fields must decode to defaults
+    assertEquals(event.runner, None)
+    assertEquals(event.turnCount, None)
+    assertEquals(event.escalated, false)
+    assertEquals(event.outcome, None)
+
+  test("simulated failing run records outcome red"):
+    val dir = os.temp.dir()
+    val path = dir / "failing-run.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    backend.record(
+      TokenMetrics.TokenMetricsEvent(
+        timestampMillis = 5000L,
+        vendor = TokenUsage.Vendor.Claude,
+        usage = TokenUsage.TokenSnapshot(input = 100, output = 50, cacheRead = 0, cacheWrite = 0, total = 150),
+        taskNumber = Some(TaskNumber(99)),
+        model = Some("sonnet"),
+        scope = "implement",
+        runner = Some("claude-sonnet"),
+        turnCount = Some(3),
+        outcome = Some("red")
+      )
+    )
+
+    val reloaded = TokenMetrics.JsonlTokenMetricsBackend(path)
+    val results = reloaded.query(TokenMetrics.TokenMetricsQuery())
+
+    assertEquals(results.length, 1)
+    val event = results.head
+    assertEquals(event.outcome, Some("red"))
+    assertEquals(event.turnCount, Some(3))
