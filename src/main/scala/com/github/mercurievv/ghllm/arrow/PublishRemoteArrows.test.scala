@@ -138,3 +138,11 @@ class PublishRemoteArrowsSuite extends CatsEffectSuite:
     assertEquals(prompt.contains("git add"), true)
     assertEquals(prompt.contains("git diff --name-only --diff-filter=U"), true)
     assertEquals(prompt.contains("Do not run `git commit`"), true)
+
+  test("GitHub mergePullRequest conflict is repairable"):
+    val error = RuntimeException(
+      """Command failed with exit code 1: "gh" "pr" "merge" "71" "--merge"
+        |stderr: GraphQL: Pull Request has merge conflicts (mergePullRequest)""".stripMargin
+    )
+
+    assertEquals(BusinessLogicRetry.isMergeConflictError(error), true)

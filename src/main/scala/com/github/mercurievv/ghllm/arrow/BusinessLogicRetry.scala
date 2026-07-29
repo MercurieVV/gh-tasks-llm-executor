@@ -212,9 +212,12 @@ object BusinessLogicRetry:
     }
 
   def isMergeConflictError(error: Throwable): Boolean =
-    Option(error.getMessage).exists(
-      _.contains("has merge conflicts with its base branch")
-    )
+    Option(error.getMessage).exists { message =>
+      val normalized = message.toLowerCase
+      normalized.contains("has merge conflicts with its base branch") ||
+      normalized.contains("pull request has merge conflicts") ||
+      normalized.contains("mergepullrequest")
+    }
 
   def resolveMergeConflict[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
@@ -229,55 +232,66 @@ object BusinessLogicRetry:
             request.worktreePath,
             baseBranch.value
           )
-        resolved <-
+        _ <-
           if autoMerged then
             progress(
               s"Automatically merged $baseBranch into ${request.branchName} for task #${request.task.number}."
-            ) *> repairablePush(progress).run(pushRequest).as(true)
+            ) *> repairablePush(progress).run(pushRequest)
           else
-            for
-              conflictedFiles <- Impl
+            repairMergeConflictsUntilClean(progress)(request, baseBranch) *>
+              Impl
                 .git[F]
-                .unresolvedConflictFiles(
-                  request.worktreePath
-                )
-              conflictedFilesText = conflictedFiles.mkString(", ")
-              _ <- progress(
-                s"Automatic merge failed for task #${request.task.number}; running repair agent (${request.runner.display}) on $conflictedFilesText..."
-              )
-              _ <- AgentExecutor[F].run(
-                request.runner,
-                mergeConflictRepairPrompt(request.task, baseBranch.value, conflictedFiles),
-                request.worktreePath,
-                RepairAllowedTools,
-                contextFiles = conflictedFiles,
-                taskNumber = Some(request.task.number),
-                metricsRoot = Some(request.root),
-                metricsScope = "merge-repair"
-              )
-              stillConflicted <- Impl
-                .git[F]
-                .hasUnresolvedConflicts(
-                  request.worktreePath
-                )
-              resolved <-
-                if stillConflicted then
-                  progress(
-                    s"Repair agent left unresolved conflicts for task #${request.task.number}; aborting merge."
-                  ) *> Impl.git[F].abortMerge(request.worktreePath).as(false)
-                else
-                  Impl
-                    .git[F]
-                    .commitAll(
-                      request.worktreePath,
-                      request.task,
-                      Some(
-                        s"Merge $baseBranch into ${request.branchName}, resolve conflicts"
-                      )
-                    ) *> repairablePush(progress).run(pushRequest).as(true)
-            yield resolved
-      yield resolved
+                .commitAll(
+                  request.worktreePath,
+                  request.task,
+                  Some(
+                    s"Merge $baseBranch into ${request.branchName}, resolve conflicts"
+                  )
+                ) *>
+              repairablePush(progress).run(pushRequest)
+      yield true
     }
+
+  private def repairMergeConflictsUntilClean[F[_]](
+      progress: String => F[Unit]
+  )(request: PublishRequest, baseBranch: BranchName)(using F: Sync[F]): F[Unit] =
+    for
+      conflictedFiles <- Impl
+        .git[F]
+        .unresolvedConflictFiles(
+          request.worktreePath
+        )
+      _ <-
+        if conflictedFiles.isEmpty then F.unit
+        else
+          val conflictedFilesText = conflictedFiles.mkString(", ")
+          for
+            _ <- progress(
+              s"Automatic merge failed for task #${request.task.number}; running repair agent (${request.runner.display}) on $conflictedFilesText..."
+            )
+            _ <- AgentExecutor[F].run(
+              request.runner,
+              mergeConflictRepairPrompt(request.task, baseBranch.value, conflictedFiles),
+              request.worktreePath,
+              RepairAllowedTools,
+              contextFiles = conflictedFiles,
+              taskNumber = Some(request.task.number),
+              metricsRoot = Some(request.root),
+              metricsScope = "merge-repair"
+            )
+            stillConflicted <- Impl
+              .git[F]
+              .hasUnresolvedConflicts(
+                request.worktreePath
+              )
+            _ <-
+              if stillConflicted then
+                progress(
+                  s"Repair agent left unresolved conflicts for task #${request.task.number}; retrying merge repair..."
+                ) *> Sync[F].defer(repairMergeConflictsUntilClean(progress)(request, baseBranch))
+              else F.unit
+          yield ()
+    yield ()
 
   def mergeConflictRepairPrompt(
       task: Issue,
