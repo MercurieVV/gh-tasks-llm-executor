@@ -56,12 +56,25 @@ final case class BusinessLogic[-->[_, _]](
       traverse: ArrowTraverse[-->],
       attempt: ArrowAttempt[-->]
   ): TaskSelection --> RunSummary =
-    val candidates = arrow.lift((selection: TaskSelection) => selection.candidates)
     val isolated = runCandidateIsolated
+
     programArrows.loadOpenIssues >>>
       programArrows.routeParallelExecution >>>
-      ((candidates >>> traverse.parAll(isolated)) |||
-        (candidates >>> traverse.all(isolated))) >>>
+      Kleisli { (selection: TaskSelection) =>
+        val batchSize = selection.candidates.size
+        Impl.setCurrentBatchSize(batchSize)
+
+        val candidates = selection.candidates
+        val isolatedWithBatch = isolated.lmap[TaskCandidate] { candidate =>
+          Impl.setCurrentBatchSize(batchSize)
+          candidate
+        }
+
+        if (selection.context.parallelExecution.value)
+          traverse.parAll(isolatedWithBatch).run(candidates)
+        else
+          traverse.all(isolatedWithBatch).run(candidates)
+      } >>>
       programArrows.lastSummary
 
   def runCandidate(using ArrowChoice[-->], ArrowDefer[-->]): TaskCandidate --> RunSummary =
@@ -162,6 +175,10 @@ final case class BusinessLogic[-->[_, _]](
       executeTaskArrows.verifyRelatedPullRequestCi >>>
       executeTaskArrows.closeTaskIssue >>>
       executeTaskArrows.checkParentsForCompletion
+
+  // Kleisli convenience
+  private def Kleisli[F]: cats.data.Kleisli = cats.data.Kleisli
+  private type Kleisli[F, A, B] = cats.data.Kleisli[F, A, B]
 
 object BusinessLogic:
   given Functor2K[BusinessLogic] = Functor2K.derived
