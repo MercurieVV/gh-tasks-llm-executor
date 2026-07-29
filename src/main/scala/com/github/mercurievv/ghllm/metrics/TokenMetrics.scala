@@ -28,7 +28,10 @@ object TokenMetrics:
       model: Option[String],
       scope: String,
       phase: Option[String] = None,
-      runner: Option[String] = None
+      runner: Option[String] = None,
+      turnCount: Option[Int] = None,
+      escalated: Boolean = false,
+      outcome: Option[String] = None
   )
 
   final case class TokenMetricsQuery(
@@ -303,6 +306,9 @@ object TokenMetrics:
         "scope" -> event.scope,
         "phase" -> event.phase.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
         "runner" -> event.runner.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
+        "turnCount" -> event.turnCount.map(count => ujson.Num(count.toDouble)).getOrElse(ujson.Null),
+        "escalated" -> ujson.Bool(event.escalated),
+        "outcome" -> event.outcome.map(ujson.Str(_)).getOrElse(ujson.Null),
         "usage" -> ujson.Obj(
           "input" -> ujson.Num(event.usage.input.toDouble),
           "output" -> ujson.Num(event.usage.output.toDouble),
@@ -329,7 +335,10 @@ object TokenMetrics:
       model = obj.get("model").flatMap(_.strOpt),
       scope = scope,
       phase = obj.get("phase").flatMap(_.strOpt),
-      runner = obj.get("runner").flatMap(_.strOpt)
+      runner = obj.get("runner").flatMap(_.strOpt),
+      turnCount = obj.get("turnCount").flatMap(readLong).map(_.toInt),
+      escalated = obj.get("escalated").flatMap(_.boolOpt).getOrElse(false),
+      outcome = obj.get("outcome").flatMap(_.strOpt)
     )
 
   private def readSnapshot(json: ujson.Value): Option[TokenUsage.TokenSnapshot] =
