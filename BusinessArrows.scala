@@ -6,6 +6,37 @@ import arrowstep.core.ProgramSays
 import cats.arrow.ArrowChoice
 import cats.syntax.all.*
 
+/** T23 runtime task-tree traversal mapping (Issue #72)
+  *
+  * The runtime traversals in this file are:
+  *  1. `RecursiveArrows.executeRecursive` – dependency‑first recursion
+  *     that short‑circuits on the first incomplete dependency, mutates
+  *     `RunEnv.openIssues`, and discovers dependencies dynamically
+  *     (including split children created between root passes).
+  *  2. `UntilClosedArrows.runUntilClosed` – repeat‑until‑closed loop
+  *     that repeats the whole root walk until no further progress is made.
+  *  3. `TraversalArrows.runCandidate` – selects the single‑pass or
+  *     repeat‑until‑closed path.
+  *
+  * None of these call sites can be ported to the shared `TaskF`/`TaskTree.Tree`
+  * Droste algebra without breaking behaviour:
+  *  - The dependency tree is not static; its members and order are computed
+  *    at runtime and may change mid‑run when a task splits.
+  *  - The short‑circuiting fold `ArrowTraverse.untilLeft` is list‑based
+  *    and does not correspond to a pure fold over a statically‑known `Branch`.
+  *  - The `runUntilClosed` loop is a temporal control loop, not a structural
+  *    recursion over a tree node.
+  *
+  * Therefore all T23 call sites are classified as **intentionally outside
+  * the task‑tree algebra**.  Future implementation leaves must not replace
+  * them with Droste‑based walks against the existing `TaskF` without first
+  * making the dependency computations static and removing the temporal repeat
+  * — changes that would alter the observed behaviour and break existing tests.
+  *
+  * This conclusion preserves dependency order, first‑incomplete‑child
+  * short‑circuiting, `RunEnv.openIssues` mutations, split‑parent replay,
+  * and dynamic child discovery semantics.
+  */
 /** Top-level arrows that turn application input into a user-visible run summary.
   *
   * Leaves only. Every composition that spans more than this record lives on `BusinessLogic`, so that no arrow here has
