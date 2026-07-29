@@ -1,6 +1,8 @@
 package com.github.mercurievv.ghllm.arrow
 
-import os.Path
+import os.*
+
+import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 
 final case class PrefixKey(
@@ -11,8 +13,6 @@ final case class PrefixKey(
 )
 
 object PrefixKey:
-
-  /** Compute a stable hash from the three stable prompt layers (0,1,2). */
   def of(
       runner: String,
       model: Option[String],
@@ -21,14 +21,11 @@ object PrefixKey:
       layer1: String,
       layer2: String
   ): PrefixKey =
-    val hash = sha256(s"${layer0}\n${layer1}\n${layer2}")
+    val input =
+      List(runner, model.getOrElse(""), worktree.toString, layer0, layer1, layer2)
+        .mkString("|")
+    val digest = MessageDigest
+      .getInstance("SHA-256")
+      .digest(input.getBytes(StandardCharsets.UTF_8))
+    val hash = digest.map(b => f"$b%02x").mkString
     PrefixKey(runner, model, worktree, hash)
-
-  private def sha256(s: String): String =
-    val md = MessageDigest.getInstance("SHA-256")
-    val digestBytes = md.digest(s.getBytes("UTF-8"))
-    digestBytes.map(b => f"$b%02x").mkString
-
-  @main def _prefixKeyDummy(): Unit = {
-    println("PrefixKey compiled.")
-  }
