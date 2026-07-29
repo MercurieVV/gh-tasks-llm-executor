@@ -1816,6 +1816,12 @@ This parent task will not be implemented directly. Run child tasks first; when a
       runner.version.map(value => s"version: $value")
     ).flatten
 
+  private[git] val InProgressStatusLabels: List[String] =
+    List("status: in progress", "in progress")
+
+  private[git] val CompletedStatusLabels: List[String] =
+    List("status: completed", "completed")
+
   def setIssueStatus[F[_]](progress: String => F[Unit])(using
       Sync[F]
   ): Kleisli[F, (os.Path, TaskNumber, String), Unit] =
@@ -1830,19 +1836,17 @@ This parent task will not be implemented directly. Run child tasks first; when a
       val (toAdd, toRemove) =
         if status === "in progress" then
           (
-            List("status: in progress", "in progress") ++ runner.toList.flatMap(runnerLabels),
-            List("status: completed", "completed")
+            InProgressStatusLabels ++ runner.toList.flatMap(runnerLabels),
+            CompletedStatusLabels
           )
         else
           (
-            List("status: completed", "completed"),
-            List("status: in progress", "in progress")
+            CompletedStatusLabels,
+            InProgressStatusLabels
           )
 
       val addFlags = toAdd.flatMap(label => Seq("--add-label", label))
-      val removeFlags = toRemove.flatMap(label => Seq("--remove-label", label))
       val addCmd = Seq("gh", "issue", "edit", taskId.toString) ++ addFlags
-      val removeCmd = Seq("gh", "issue", "edit", taskId.toString) ++ removeFlags
 
       def run(cmd: Seq[String]): F[Unit] =
         call(root, cmd*).handleErrorWith { error =>
@@ -1863,7 +1867,14 @@ This parent task will not be implemented directly. Run child tasks first; when a
           "--force"
         ).handleErrorWith(_ => Sync[F].unit)
 
-      toAdd.traverse_(ensureLabel) *> run(addCmd) *> run(removeCmd)
+      val removeExistingLabels =
+        removeIssueLabels(root, taskId, toRemove).handleErrorWith { error =>
+          progress(
+            s"Warning: Failed to update GitHub labels for task #$taskId: ${error.getMessage}"
+          )
+        }
+
+      toAdd.traverse_(ensureLabel) *> run(addCmd) *> removeExistingLabels
     }
 
   // Best-effort rollback for `markTaskInProgress` when task processing stops
@@ -1877,16 +1888,41 @@ This parent task will not be implemented directly. Run child tasks first; when a
       Sync[F]
   ): Kleisli[F, (os.Path, TaskNumber), Unit] =
     Kleisli.apply { case (root, taskId) =>
-      val labels =
-        List("status: in progress", "in progress") ++ runner.toList.flatMap(runnerLabels)
-      val removeFlags = labels.flatMap(label => Seq("--remove-label", label))
-      val removeCmd = Seq("gh", "issue", "edit", taskId.toString) ++ removeFlags
-      call(root, removeCmd*).handleErrorWith { error =>
+      removeIssueLabels(root, taskId, InProgressStatusLabels).handleErrorWith { error =>
         progress(
           s"Warning: Failed to clear in-progress labels for task #$taskId: ${error.getMessage}"
         )
       }
     }
+
+  private[git] def labelsToRemove(expected: List[String], current: List[String]): List[String] =
+    val currentSet = current.toSet
+    expected.distinct.filter(currentSet.contains)
+
+  private def removeIssueLabels[F[_]: Sync](
+      root: os.Path,
+      taskId: TaskNumber,
+      labels: List[String]
+  ): F[Unit] =
+    currentIssueLabels(root, taskId).flatMap { current =>
+      val existingLabels = labelsToRemove(labels, current)
+      val removeFlags = existingLabels.flatMap(label => Seq("--remove-label", label))
+      val removeCmd = Seq("gh", "issue", "edit", taskId.toString) ++ removeFlags
+      if existingLabels.isEmpty then Sync[F].unit else call(root, removeCmd*)
+    }
+
+  private def currentIssueLabels[F[_]: Sync](root: os.Path, taskId: TaskNumber): F[List[String]] =
+    callOutput(
+      root,
+      "gh",
+      "issue",
+      "view",
+      taskId.toString,
+      "--json",
+      "labels",
+      "--jq",
+      ".labels[].name"
+    ).map(_.linesIterator.map(_.trim).filter(_.nonEmpty).toList)
 
   private def call[F[_]: Sync](cwd: os.Path, command: String*): F[Unit] =
     TaskLogger.trace[F](s"command cwd=$cwd args=${formatCommand(command)}") *>

@@ -31,3 +31,10 @@ class GitHubMergeIntegrationBranchSuite extends munit.FunSuite:
     os.proc("git", "add", "change.txt").call(cwd = root)
     os.proc("git", "commit", "-q", "-m", "subtask change").call(cwd = root)
     assertEquals(GitHub.commitsAhead(root, BranchName("task-4")), 1)
+
+  test("in-progress cleanup only removes task status labels"):
+    val current = List("status: in progress", "in progress", "agent: aider", "model: haiku")
+    assertEquals(
+      GitHub.labelsToRemove(GitHub.InProgressStatusLabels, current),
+      List("status: in progress", "in progress")
+    )
