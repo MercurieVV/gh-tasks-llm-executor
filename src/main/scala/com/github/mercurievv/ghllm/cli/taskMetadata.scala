@@ -23,7 +23,7 @@ final case class TaskArtifact(
 
 object TaskArtifact:
   val DefaultMaxChars: Int = 2000
-  private val Marker = "\n\n[CONTEXT TRUNCATED]"
+  val Marker = "\n\n[CONTEXT TRUNCATED]"
 
   /** Renders the artifact into the full structured text that a child task would
     * receive.  No truncation — call `boundedRender` to enforce the limit.
