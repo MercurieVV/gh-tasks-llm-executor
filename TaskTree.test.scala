@@ -5,6 +5,7 @@ package com.github.mercurievv.ghllm
 import com.github.mercurievv.ghllm.TaskTree.*
 import com.github.mercurievv.ghllm.TaskTree.NodeRef
 import com.github.mercurievv.ghllm.arrow.PrefixKey
+import higherkindness.droste.data.Fix
 import munit.ScalaCheckSuite
 import org.scalacheck.Gen
 import org.scalacheck.Prop.forAll
@@ -129,3 +130,27 @@ class TaskTreeSuite extends ScalaCheckSuite:
         assertEquals(onlyChild.head.tier, "test")
         assertEqualsDouble(onlyChild.head.cost.ownUsd, 0.5, 1e-12)
       case other => fail(s"expected one annotated child, got $other")
+
+  test("cata over a simple tree"):
+    val countAlg: Algebra[TaskF, Int] = Algebra {
+      case TaskF.Leaf(_)             => 1
+      case TaskF.Branch(_, children) => children.sum + 1
+    }
+
+    val tree: Fix[TaskF] = Fix(
+      TaskF.Branch(
+        "root",
+        List(
+          Fix(TaskF.Leaf(Some(5))),
+          Fix(
+            TaskF.Branch(
+              "inner",
+              List(Fix(TaskF.Leaf(Some(10))))
+            )
+          )
+        )
+      )
+    )
+
+    val result = scheme.cata(countAlg).apply(tree)
+    assertEquals(result, 4) // root + inner branch + 2 leaves = 4 nodes
