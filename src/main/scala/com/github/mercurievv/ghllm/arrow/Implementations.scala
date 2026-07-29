@@ -8,6 +8,7 @@ import com.github.mercurievv.ghllm.git.*
 import com.github.mercurievv.ghllm.metrics.*
 
 import cats.data.Kleisli
+import cats.effect.Deferred
 import cats.effect.Resource
 import cats.effect.kernel.Async
 import cats.effect.kernel.Sync
@@ -18,6 +19,12 @@ import cats.arrow.Arrow
 
 import scala.concurrent.duration.*
 import scala.util.Try
+
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.util.Base64
+import java.util.concurrent.CancellationException
 
 /** Leaf implementations: every arrow that actually talks to git, GitHub, the filesystem or an agent process.
   *
@@ -45,6 +52,18 @@ object Impl:
     sys.env
       .get("GH_TASKS_USER_INPUT_SOUND")
       .forall(value => !Set("0", "false", "no", "off").contains(value.toLowerCase))
+
+  // Mandates the use of scalameta tools for navigating Scala sources.
+  // This constant is appended to subagent prompts when the task touches .scala files,
+  // as defined by the token efficiency plan (T13).
+  val ScalaSemanticMandate: String =
+    """
+      |
+      |SCALA SEMANTIC NAVIGATION RULE (must be obeyed):
+      |For any question about symbols, types, signatures, hierarchy, implicits, references, or call paths in `.scala` files, use `mcp__scala-semantic__*` tools.
+      |Never use `cat`, `rg`, `sed`, `grep`, `head`, or `tail` against `.scala` files.
+      |Use `document_outline` to understand a file's API instead of reading the entire file.
+      |""".stripMargin
 
   // TTL-gated, not per-task: refreshing means shelling out to codex/gemini/
   // deepseek/ccusage probes, so it only runs once per process invocation
@@ -784,7 +803,7 @@ object Impl:
   // committed and published. Idempotent: re-runs that resumed via the
   // already-implemented short-circuit skip re-writing an identical mark.
   def markTaskImplemented[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
-    Kleisli { task =>
+    Kleisli { (task: ExecutedTask) =>
       val run = task.run
       val mark = run.branchName.value
       val store = TaskMetadataStore.commentBased[F](progress)
@@ -802,8 +821,8 @@ object Impl:
       }
     }
 
-  def runTaskWithRunner[F[_]: Sync]: -->[F, PreparedTask, ExecutedTask] =
-    Kleisli { task =>
+  def runTaskWithRunner[F[_]: Async]: -->[RunF[F], PreparedTask, ExecutedTask] =
+    RunEnv.read { (env, task) =>
       val run = task.claimedTask
       val prompt =
         taskPrompt(
@@ -812,27 +831,118 @@ object Impl:
           task.parentConclusion,
           task.replayContext
         )
-      for
-        _ <- progress(
-          s"Running task #${run.task.number} with ${run.runner.display}..."
-        )
-        output <- AgentExecutor[F].run(
-          run.runner,
-          prompt,
-          run.worktreePath,
-          ImplementerAllowedTools,
-          taskNumber = Some(run.task.number),
-          metricsRoot = Some(run.context.root),
-          metricsScope = "implement"
-        )
-        _ <- Sync[F]
-          .raiseError(
-            RuntimeException(
-              s"Agent ${run.runner.display} reported it could not proceed (permission/tool wall). Output: ${output.value.trim}"
-            )
+      val execution =
+        for
+          _ <- refreshSemanticDbBeforeDispatch(env, run.task, run.worktreePath)
+          _ <- progress(
+            s"Running task #${run.task.number} with ${run.runner.display}..."
           )
-          .whenA(looksBlocked(output))
-      yield ExecutedTask(run, output)
+          output <- AgentExecutor[F].run(
+            run.runner,
+            prompt,
+            run.worktreePath,
+            ImplementerAllowedTools,
+            taskNumber = Some(run.task.number),
+            metricsRoot = Some(run.context.root),
+            metricsScope = "implement",
+            deferMetricsOutcome = true
+          )
+          _ <- Sync[F]
+            .raiseError(
+              RuntimeException(
+                s"Agent ${run.runner.display} reported it could not proceed (permission/tool wall). Output: ${output.value.trim}"
+              )
+            )
+            .whenA(looksBlocked(output))
+        yield ExecutedTask(run, output)
+
+      execution.handleErrorWith { error =>
+        AgentExecutor.completeTokenMetrics[F](
+          run.context.root,
+          run.task.number,
+          run.runner,
+          "implement",
+          "error"
+        ) *> Sync[F].raiseError(error)
+      }
+    }
+
+  def taskTouchesScala(task: Issue): Boolean =
+    s"${task.title.value}\n${task.body.value}".toLowerCase.contains(".scala")
+
+  def scalaSourceHash(root: os.Path): String =
+    val ignoredDirectories =
+      Set(".bsp", ".git", ".scala-build", ".semanticdb", ".worktrees", "out", "target")
+    val digest = MessageDigest.getInstance("SHA-256")
+
+    def update(bytes: Array[Byte]): Unit =
+      digest.update(ByteBuffer.allocate(java.lang.Long.BYTES).putLong(bytes.length.toLong).array())
+      digest.update(bytes)
+
+    os.walk(root)
+      .filter(path =>
+        os.isFile(path) &&
+          path.ext.equalsIgnoreCase("scala") &&
+          !path.relativeTo(root).segments.exists(ignoredDirectories)
+      )
+      .sortBy(_.relativeTo(root).toString)
+      .foreach { path =>
+        update(path.relativeTo(root).toString.getBytes(StandardCharsets.UTF_8))
+        update(os.read.bytes(path))
+      }
+
+    Base64.getUrlEncoder.withoutPadding().encodeToString(digest.digest())
+
+  def refreshSemanticDbBeforeDispatch[F[_]: Async](
+      env: RunEnv[F],
+      task: Issue,
+      root: os.Path
+  ): F[Unit] =
+    if taskTouchesScala(task) then
+      Async[F]
+        .blocking(scalaSourceHash(root))
+        .flatMap(hash =>
+          refreshSemanticDbIfNeeded(env, SemanticDbSource(root, hash))(
+            Async[F].blocking {
+              os.proc((root / "scripts" / "refresh-semanticdb.sh").toString)
+                .call(cwd = root, stdout = os.Inherit, stderr = os.Inherit)
+              ()
+            }
+          )
+        )
+    else Async[F].unit
+
+  def refreshSemanticDbIfNeeded[F[_]: Async](
+      env: RunEnv[F],
+      source: SemanticDbSource
+  )(refresh: F[Unit]): F[Unit] =
+    Deferred[F, Either[Throwable, Unit]].flatMap { fresh =>
+      env.semanticDbRefreshes.modify { refreshes =>
+        refreshes.get(source) match
+          case Some(existing) =>
+            refreshes -> existing.get.flatMap(_.liftTo[F])
+          case None =>
+            val removeFailed = env.semanticDbRefreshes.update(_ - source)
+            val run =
+              Async[F].onCancel(
+                refresh.attempt.flatMap { result =>
+                  result.fold(_ => removeFailed, _ => Async[F].unit) *>
+                    fresh.complete(result).void *>
+                    result.liftTo[F]
+                },
+                removeFailed *>
+                  fresh
+                    .complete(
+                      Left(
+                        CancellationException(
+                          s"SemanticDB refresh canceled for ${source.root}"
+                        )
+                      )
+                    )
+                    .void
+              )
+            refreshes.updated(source, fresh) -> run
+      }.flatten
     }
 
   // Exit code 0 only means the process returned; a stuck agent that gave up
@@ -857,10 +967,28 @@ object Impl:
     Kleisli.ask[F, ExecutedTask]
 
   def runProjectValidation[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
-    Kleisli.ask <* (
-      Kleisli.fromFunction { (t: ExecutedTask) => t.run.worktreePath } >>>
-        git[F].runProjectValidation
-    )
+    Kleisli { task =>
+      git[F].runProjectValidation.run(task.run.worktreePath).attempt.flatMap {
+        case Right(_) =>
+          AgentExecutor
+            .completeTokenMetrics[F](
+              task.run.context.root,
+              task.run.task.number,
+              task.run.runner,
+              "implement",
+              "green"
+            )
+            .as(task)
+        case Left(error) =>
+          AgentExecutor.completeTokenMetrics[F](
+            task.run.context.root,
+            task.run.task.number,
+            task.run.runner,
+            "implement",
+            "red"
+          ) *> Sync[F].raiseError(error)
+      }
+    }
 
   def classifyAgentResultForPublication[F[_]: Sync]: -->[F, ExecutedTask, Either[ChangedTask, UnchangedTask]] =
     (Kleisli.ask[F, ExecutedTask] &&& Kleisli { (task: ExecutedTask) =>
@@ -1019,6 +1147,8 @@ Replay rules:
 - If the previous implementation was already merged, create the minimal follow-up fix in this task branch.
 """).getOrElse("")
 
+    val scalaMandate = if (task.body.value.toLowerCase.contains(".scala")) s"\n\n$ScalaSemanticMandate" else ""
+
     AgentPrompt(s"""Task ID: #${task.number}
 Title: ${task.title}
 Agent: ${runner.agent}
@@ -1063,6 +1193,7 @@ Final answer contract:
 - Include a proposed commit title.
 - Include a proposed pull request body when useful.
 - Include a one-line "Conclusion:" summary for tasks that depend on this one (what changed, what's now available to build on).
+$scalaMandate
 """)
 
   // Implementer runs unattended (`-p`, stdin closed) with zero tool grants
