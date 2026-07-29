@@ -50,6 +50,11 @@ object TokenMetrics:
     def summary(query: TokenMetricsQuery): TokenUsage.TokenSnapshot =
       this.query(query.copy(limit = None)).foldLeft(TokenUsage.TokenSnapshot.Zero)(_ + _.usage)
 
+    def cacheHitRatio(query: TokenMetricsQuery): Double =
+      val s = summary(query)
+      val denom = s.input + s.cacheRead
+      if denom == 0L then 0.0 else s.cacheRead.toDouble / denom.toDouble
+
   final class JsonlTokenMetricsBackend(path: os.Path) extends TokenMetricsBackend:
     def destination: String = path.toString
 
