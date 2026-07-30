@@ -56,7 +56,19 @@ final case class BusinessLogic[-->[_, _]](
       traverse: ArrowTraverse[-->],
       attempt: ArrowAttempt[-->]
   ): TaskSelection --> RunSummary =
-    val candidates = arrow.lift((selection: TaskSelection) => selection.candidates)
+    val candidates = arrow.lift { (selection: TaskSelection) =>
+      val cachePeers =
+        selection.candidates
+          .groupMapReduce(candidate => (candidate.runner.agent, candidate.runner.model))(_ => 1)(_ + _)
+      selection.candidates.map { candidate =>
+        val extendedCacheTtl =
+          selection.context.parallelExecution.value &&
+            cachePeers((candidate.runner.agent, candidate.runner.model)) >= 3
+        candidate.copy(
+          runner = candidate.runner.copy(extendedCacheTtl = extendedCacheTtl)
+        )
+      }
+    }
     val isolated = runCandidateIsolated
     programArrows.loadOpenIssues >>>
       programArrows.routeParallelExecution >>>
