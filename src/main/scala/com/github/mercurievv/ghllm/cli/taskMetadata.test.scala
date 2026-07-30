@@ -181,6 +181,16 @@ class TaskArtifactSuite extends munit.FunSuite:
     assert(bounded.length <= TaskArtifact.DefaultMaxChars)
     assert(!bounded.contains("[CONTEXT TRUNCATED]"))
 
+  test("bound leaves free-form text under the limit alone"):
+    val text = "Added the parser and wired it into the evaluator."
+    assertEquals(TaskArtifact.bound(text), text)
+
+  test("bound truncates free-form text to exactly the limit, marker included"):
+    val text = "y" * 5000
+    val bounded = TaskArtifact.bound(text, 100)
+    assertEquals(bounded.length, 100)
+    assert(bounded.endsWith(TaskArtifact.Marker))
+
   test("bounded render with a limit smaller than marker length uses marker only"):
     val smallArtifact = TaskArtifact("hello")
     val tinyLimit = TaskArtifact.Marker.length - 2 // less than marker length

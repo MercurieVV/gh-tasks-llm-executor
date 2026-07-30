@@ -351,13 +351,22 @@ object GitHub:
     Kleisli.apply { case (root, task) =>
       getDependencies(task.body).distinct
         .traverse(id => singleDependencyConclusion(progress).run((root, id)))
-        .map { conclusions =>
-          val rendered = conclusions.flatten.map { case (id, comment) =>
-            s"- #$id: $comment"
-          }
-          Option.when(rendered.nonEmpty)(rendered.mkString("\n"))
-        }
+        .map(conclusions => renderDependencyConclusions(conclusions.flatten))
     }
+
+  /** Joins dependency conclusions into the block pasted into a child's prompt.
+    *
+    * Bounded per dependency, not over the joined block: with several
+    * dependencies a single verbose parent would otherwise consume the whole
+    * budget and silently truncate its siblings away entirely.
+    */
+  def renderDependencyConclusions(
+      conclusions: List[(TaskNumber, String)]
+  ): Option[String] =
+    val rendered = conclusions.map { case (id, comment) =>
+      s"- #$id: ${TaskArtifact.bound(comment)}"
+    }
+    Option.when(rendered.nonEmpty)(rendered.mkString("\n"))
 
   private def singleDependencyConclusion[F[_]](progress: String => F[Unit])(using
       F: Sync[F]

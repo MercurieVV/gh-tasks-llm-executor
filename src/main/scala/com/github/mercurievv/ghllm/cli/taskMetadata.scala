@@ -45,14 +45,24 @@ object TaskArtifact:
     * see that information was dropped.
     */
   def boundedRender(artifact: TaskArtifact, limit: Int = DefaultMaxChars): String =
-    val raw = render(artifact)
+    bound(render(artifact), limit)
+
+  /** The same bound applied to text that did not come from a `TaskArtifact`.
+    *
+    * Runners write their conclusion as free-form prose, so the contract cannot be
+    * enforced at the point it is produced without also constraining what they
+    * emit. It is enforced where the text becomes someone else's context instead —
+    * an unbounded "summary" pasted into every dependent task's prompt is the
+    * transcript-shaped cost this contract exists to prevent.
+    */
+  def bound(text: String, limit: Int = DefaultMaxChars): String =
     val markerLen = Marker.length
     if limit < markerLen then Marker
-    else if raw.length <= limit then raw
+    else if text.length <= limit then text
     else
       val keepLen = limit - markerLen
       if keepLen == 0 then Marker
-      else raw.take(keepLen) + Marker
+      else text.take(keepLen) + Marker
 
 // Structured evaluator/runner state for a task. Never written into the issue
 // body directly — see TaskMetadataStore. Fields are individually mergeable so
