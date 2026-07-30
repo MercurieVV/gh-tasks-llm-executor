@@ -122,14 +122,13 @@ def readGeminiBudget(): Option[VendorBudget] =
     entries <- json.arrOpt
     fractions = entries.toList.flatMap(entryUsedFraction)
     if fractions.nonEmpty
-  yield
-    VendorBudget(
-      vendor = "gemini",
-      usedFraction = fractions.max,
-      estimate = false,
-      scope = "gcp-quota (tightest metric)",
-      source = s"gcloud alpha services quota list (project=$project)"
-    )
+  yield VendorBudget(
+    vendor = "gemini",
+    usedFraction = fractions.max,
+    estimate = false,
+    scope = "gcp-quota (tightest metric)",
+    source = s"gcloud alpha services quota list (project=$project)"
+  )
 
 private def entryUsedFraction(entry: ujson.Value): Option[Double] =
   for
@@ -165,9 +164,12 @@ def readDeepseekBudget(previous: Option[ujson.Value]): Option[VendorBudget] =
       }
       .getOrElse((currentBalance, true))
     val spent = math.max(0.0, monthStartBalance - currentBalance)
+    val usedFraction =
+      if currentBalance <= 0.0 then 1.0
+      else math.min(1.0, spent / capEur)
     VendorBudget(
       vendor = "deepseek",
-      usedFraction = math.min(1.0, spent / capEur),
+      usedFraction = usedFraction,
       estimate = false,
       scope = s"monthly-self-cap ($monthKey, cap=$capEur EUR)",
       source = "deepseek /user/balance + self-imposed monthly cap",

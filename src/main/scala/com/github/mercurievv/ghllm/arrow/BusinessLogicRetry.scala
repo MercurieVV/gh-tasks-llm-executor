@@ -255,6 +255,21 @@ object BusinessLogicRetry:
   private def repairMergeConflictsUntilClean[F[_]](
       progress: String => F[Unit]
   )(request: PublishRequest, baseBranch: BranchName)(using F: Sync[F]): F[Unit] =
+    repairMergeConflictsUntilClean(progress)(
+      request,
+      baseBranch,
+      request.runner,
+      attemptedRunners = Nil
+    )
+
+  private def repairMergeConflictsUntilClean[F[_]](
+      progress: String => F[Unit]
+  )(
+      request: PublishRequest,
+      baseBranch: BranchName,
+      runner: TaskRunner,
+      attemptedRunners: List[TaskRunner]
+  )(using F: Sync[F]): F[Unit] =
     for
       conflictedFiles <- Impl
         .git[F]
@@ -267,31 +282,69 @@ object BusinessLogicRetry:
           val conflictedFilesText = conflictedFiles.mkString(", ")
           for
             _ <- progress(
-              s"Automatic merge failed for task #${request.task.number}; running repair agent (${request.runner.display}) on $conflictedFilesText..."
+              s"Automatic merge failed for task #${request.task.number}; running repair agent (${runner.display}) on $conflictedFilesText..."
             )
-            _ <- AgentExecutor[F].run(
-              request.runner,
-              mergeConflictRepairPrompt(request.task, request.branchName.value, baseBranch.value, conflictedFiles),
-              request.worktreePath,
-              RepairAllowedTools,
-              contextFiles = conflictedFiles,
-              taskNumber = Some(request.task.number),
-              metricsRoot = Some(request.root),
-              metricsScope = "merge-repair"
-            )
-            stillConflicted <- Impl
-              .git[F]
-              .hasUnresolvedConflicts(
-                request.worktreePath
+            repairResult <- AgentExecutor[F]
+              .run(
+                runner,
+                mergeConflictRepairPrompt(request.task, request.branchName.value, baseBranch.value, conflictedFiles),
+                request.worktreePath,
+                RepairAllowedTools,
+                contextFiles = conflictedFiles,
+                taskNumber = Some(request.task.number),
+                metricsRoot = Some(request.root),
+                metricsScope = "merge-repair"
               )
+              .attempt
             _ <-
-              if stillConflicted then
-                progress(
-                  s"Repair agent left unresolved conflicts for task #${request.task.number}; retrying merge repair..."
-                ) *> Sync[F].defer(repairMergeConflictsUntilClean(progress)(request, baseBranch))
-              else F.unit
+              repairResult match
+                case Left(error) =>
+                  continueMergeRepair(
+                    progress,
+                    request,
+                    baseBranch,
+                    runner,
+                    attemptedRunners,
+                    Some(error)
+                  )
+                case Right(_) =>
+                  for
+                    stillConflicted <- Impl
+                      .git[F]
+                      .hasUnresolvedConflicts(
+                        request.worktreePath
+                      )
+                    _ <-
+                      if stillConflicted then
+                        continueMergeRepair(progress, request, baseBranch, runner, attemptedRunners, None)
+                      else F.unit
+                  yield ()
           yield ()
     yield ()
+
+  private def continueMergeRepair[F[_]](
+      progress: String => F[Unit],
+      request: PublishRequest,
+      baseBranch: BranchName,
+      runner: TaskRunner,
+      attemptedRunners: List[TaskRunner],
+      error: Option[Throwable]
+  )(using F: Sync[F]): F[Unit] =
+    val nextAttempted = runner :: attemptedRunners
+    val inventory = AgentInventory.load(request.root)
+    inventory.alternateImplementor(runner, attemptedRunners) match
+      case Some(fallbackRunner) =>
+        val reason = error.fold("left unresolved conflicts")(e => s"failed: ${e.getMessage}")
+        progress(
+          s"Repair agent ${runner.display} $reason for task #${request.task.number}; retrying merge repair with ${fallbackRunner.display}..."
+        ) *> Sync[F].defer(
+          repairMergeConflictsUntilClean(progress)(request, baseBranch, fallbackRunner, nextAttempted)
+        )
+      case None =>
+        val suffix = error.fold("left unresolved conflicts")(e => s"failed: ${e.getMessage}")
+        RuntimeException(
+          s"Merge repair for task #${request.task.number} could not complete: ${runner.display} $suffix and no alternate implementor is available."
+        ).raiseError[F, Unit]
 
   def mergeConflictRepairPrompt(
       task: Issue,

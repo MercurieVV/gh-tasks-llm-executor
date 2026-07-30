@@ -100,3 +100,63 @@ class AgentInventorySuite extends CatsEffectSuite:
       )
     )
   }
+
+  test("alternate implementor skips vendors marked exhausted by budget pressure") {
+    val root = os.temp.dir()
+    os.makeDir.all(root / ".gh-tasks-llm-executor")
+    os.write.over(
+      root / ".gh-tasks-llm-executor" / "vendor-budgets.json",
+      ujson.write(
+        ujson.Obj(
+          "schemaVersion" -> 1,
+          "generatedAtEpochMillis" -> System.currentTimeMillis().toString,
+          "budgets" -> ujson.Arr(
+            ujson.Obj(
+              "vendor" -> "deepseek",
+              "usedFraction" -> 0.50,
+              "extra" -> ujson.Obj("currentBalanceEur" -> -0.12)
+            ),
+            ujson.Obj("vendor" -> "codex", "usedFraction" -> 0.10)
+          )
+        )
+      )
+    )
+    os.write.over(
+      root / ".gh-tasks-llm-executor" / "agent-runners.json",
+      ujson.write(
+        ujson.Obj(
+          "tools" -> ujson.Arr(
+            ujson.Obj(
+              "id" -> "aider-deepseek",
+              "agent" -> "aider",
+              "model" -> "deepseek/deepseek-reasoner",
+              "roles" -> ujson.Arr("implementor"),
+              "jobTypes" -> ujson.Arr("implement"),
+              "strengths" -> ujson.Arr("focused-fixes"),
+              "available" -> true,
+              "inputUsdPerMTok" -> 0.1,
+              "outputUsdPerMTok" -> 1.0
+            ),
+            ujson.Obj(
+              "id" -> "codex-low",
+              "agent" -> "codex",
+              "model" -> "gpt-5",
+              "effort" -> "low",
+              "roles" -> ujson.Arr("implementor"),
+              "jobTypes" -> ujson.Arr("implement"),
+              "strengths" -> ujson.Arr("focused-fixes"),
+              "available" -> true,
+              "inputUsdPerMTok" -> 1.25,
+              "outputUsdPerMTok" -> 10.0
+            )
+          )
+        )
+      )
+    )
+
+    val inventory = AgentInventory.load(root)
+    val failed = TaskRunner(AgentBinary("aider"), Some("deepseek/deepseek-reasoner"), None, None)
+
+    assertEquals(inventory.defaultImplementor.map(_.agent.value), Some("codex"))
+    assertEquals(inventory.alternateImplementor(failed).map(_.agent.value), Some("codex"))
+  }

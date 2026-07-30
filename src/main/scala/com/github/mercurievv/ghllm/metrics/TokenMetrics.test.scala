@@ -79,6 +79,11 @@ class TokenMetricsSuite extends munit.FunSuite:
       Some(TokenUsage.TokenSnapshot(input = 12, output = 34, cacheRead = 0, cacheWrite = 0, total = 46))
     )
 
+  test("DeepSeek zero or negative prepaid balance is hard exhausted"):
+    assertEquals(VendorBudgets.deepseekUsedFraction(currentBalance = -0.01, spent = 10.0, capEur = 20.0), 1.0)
+    assertEquals(VendorBudgets.deepseekUsedFraction(currentBalance = 0.0, spent = 10.0, capEur = 20.0), 1.0)
+    assertEquals(VendorBudgets.deepseekUsedFraction(currentBalance = 1.0, spent = 10.0, capEur = 20.0), 0.5)
+
   test("CLI parses metrics command filters"):
     val root = os.temp.dir()
     val command = Cli.parseMetricsCommand(

@@ -189,14 +189,13 @@ object VendorBudgets:
       entries <- json.arrOpt
       fractions = entries.toList.flatMap(entryUsedFraction)
       if fractions.nonEmpty
-    yield
-      Budget(
-        vendor = "gemini",
-        usedFraction = fractions.max,
-        estimate = false,
-        scope = "gcp-quota (tightest metric)",
-        source = s"gcloud alpha services quota list (project=$project)"
-      )
+    yield Budget(
+      vendor = "gemini",
+      usedFraction = fractions.max,
+      estimate = false,
+      scope = "gcp-quota (tightest metric)",
+      source = s"gcloud alpha services quota list (project=$project)"
+    )
 
   private def entryUsedFraction(entry: ujson.Value): Option[Double] =
     for
@@ -232,9 +231,10 @@ object VendorBudgets:
         }
         .getOrElse((currentBalance, true))
       val spent = math.max(0.0, monthStartBalance - currentBalance)
+      val usedFraction = deepseekUsedFraction(currentBalance, spent, capEur)
       Budget(
         vendor = "deepseek",
-        usedFraction = math.min(1.0, spent / capEur),
+        usedFraction = usedFraction,
         estimate = false,
         scope = s"monthly-self-cap ($monthKey, cap=$capEur EUR)",
         source = "deepseek /user/balance + self-imposed monthly cap",
@@ -245,6 +245,14 @@ object VendorBudgets:
           "resetForNewMonth" -> ujson.Bool(isNewMonth)
         )
       )
+
+  private[metrics] def deepseekUsedFraction(
+      currentBalance: Double,
+      spent: Double,
+      capEur: Double
+  ): Double =
+    if currentBalance <= 0.0 then 1.0
+    else math.min(1.0, math.max(0.0, spent / capEur))
 
   private def toJson(budget: Budget): ujson.Obj =
     ujson.Obj(

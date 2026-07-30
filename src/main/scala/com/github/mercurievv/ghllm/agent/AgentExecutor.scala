@@ -95,8 +95,16 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       _ <- TaskLogger.llm(
         s"Agent execution finished with exit code ${result.exitCode}."
       )
+      reason = terminationReason(output.value)
       value <-
-        if result.exitCode === 0 then output.pure[F]
+        if reason.nonEmpty then
+          reason.traverse_(r => TaskLogger.llm(s"!!! Termination reason: $r")) *>
+            RuntimeException(
+              reason.fold(
+                s"${runner.agent} stopped with a known fatal error"
+              )(r => s"${runner.agent} stopped with a known fatal error: $r")
+            ).raiseError[F, Output]
+        else if result.exitCode === 0 then output.pure[F]
         else if attempt < MaxTransientAttempts && isTransientAgentFailure(
             output.value
           )
@@ -117,14 +125,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
               metricsScope,
               attempt + 1
             )
-        else
-          val reason = terminationReason(output.value)
-          reason.traverse_(r => TaskLogger.llm(s"!!! Termination reason: $r")) *>
-            RuntimeException(
-              reason.fold(
-                s"${runner.agent} exited with ${result.exitCode}"
-              )(r => s"${runner.agent} exited with ${result.exitCode}: $r")
-            ).raiseError[F, Output]
+        else RuntimeException(s"${runner.agent} exited with ${result.exitCode}").raiseError[F, Output]
     yield value
 
   private val TerminationReasonPatterns: List[String] = List(
@@ -135,17 +136,24 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     "please run /login",
     "invalid api key",
     "authentication_error",
+    "insufficient balance",
     "permission denied",
     "out of memory",
     "context length exceeded",
     "context_length_exceeded"
   )
 
-  private def terminationReason(output: String): Option[String] =
+  private[agent] def terminationReason(output: String): Option[String] =
     val lower = output.toLowerCase
+    val normalizedLower = lower.split("\\s+").mkString(" ")
     TerminationReasonPatterns
-      .find(lower.contains)
+      .find(pattern => lower.contains(pattern) || normalizedLower.contains(pattern))
       .flatMap(pattern => output.linesIterator.find(_.toLowerCase.contains(pattern)))
+      .orElse(
+        TerminationReasonPatterns
+          .find(normalizedLower.contains)
+          .map(pattern => s"matched fatal agent output pattern: $pattern")
+      )
       .map(_.trim)
 
   private def isTransientAgentFailure(output: String): Boolean =

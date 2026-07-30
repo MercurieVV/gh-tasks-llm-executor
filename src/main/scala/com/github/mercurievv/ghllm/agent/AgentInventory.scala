@@ -201,6 +201,16 @@ final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights
           .map(_.runner)
       )
 
+  def alternateImplementor(
+      runner: TaskRunner,
+      alsoExclude: List[TaskRunner] = Nil
+  ): Option[TaskRunner] =
+    val excluded = runner :: alsoExclude
+    availableImplementors
+      .filterNot(tool => excluded.exists(tool.matches))
+      .headOption
+      .map(_.runner)
+
   def promptBlock: String =
     val lines = availableTools.map(_.promptLine)
     if lines.isEmpty then
@@ -254,31 +264,42 @@ object AgentInventory:
     if os.exists(path) then parseVendorBudgets(os.read(path)) else Map.empty
 
   private def parseVendorBudgets(value: String): Map[String, Double] =
-    scala.util.Try {
-      val json = ujson.read(value)
-      val generatedAtEpochMillis = json.obj
-        .get("generatedAtEpochMillis")
-        .flatMap(field =>
-          field.strOpt
-            .flatMap(text => scala.util.Try(text.toLong).toOption)
-            .orElse(field.numOpt.map(_.toLong))
-        )
-        .getOrElse(0L)
-      val isStale = (System.currentTimeMillis() - generatedAtEpochMillis) > MaxBudgetAgeMillis
-      if isStale then Map.empty
-      else
-        json.obj
-          .get("budgets")
-          .toList
-          .flatMap(_.arr.toList)
-          .flatMap { entry =>
-            for
-              vendor <- entry.obj.get("vendor").collect { case ujson.Str(value) => value }
-              usedFraction <- entry.obj.get("usedFraction").collect { case ujson.Num(value) => value }
-            yield vendor.toLowerCase -> usedFraction
-          }
-          .toMap
-    }.getOrElse(Map.empty)
+    scala.util
+      .Try {
+        val json = ujson.read(value)
+        val generatedAtEpochMillis = json.obj
+          .get("generatedAtEpochMillis")
+          .flatMap(field =>
+            field.strOpt
+              .flatMap(text => scala.util.Try(text.toLong).toOption)
+              .orElse(field.numOpt.map(_.toLong))
+          )
+          .getOrElse(0L)
+        val isStale = (System.currentTimeMillis() - generatedAtEpochMillis) > MaxBudgetAgeMillis
+        if isStale then Map.empty
+        else
+          json.obj
+            .get("budgets")
+            .toList
+            .flatMap(_.arr.toList)
+            .flatMap { entry =>
+              for
+                vendor <- entry.obj.get("vendor").collect { case ujson.Str(value) => value }
+                usedFraction <- entry.obj.get("usedFraction").collect { case ujson.Num(value) => value }
+              yield vendor.toLowerCase -> effectiveUsedFraction(entry, usedFraction)
+            }
+            .toMap
+      }
+      .getOrElse(Map.empty)
+
+  private def effectiveUsedFraction(entry: ujson.Value, usedFraction: Double): Double =
+    entry.obj
+      .get("extra")
+      .flatMap(_.objOpt)
+      .flatMap(_.get("currentBalanceEur"))
+      .flatMap(_.numOpt)
+      .filter(_ <= 0.0)
+      .fold(usedFraction)(_ => 1.0)
 
   private def parse(
       value: String,
