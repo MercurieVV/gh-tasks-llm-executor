@@ -149,16 +149,24 @@ object Impl:
               .traverse_(why => TaskLogger.trace(s"selectTask excluding #${task.number}: $why"))
               .as(!excluded)
         }
-        notAlreadyClaimed <- filteredByDeps.filterA { task =>
-          val claimed = task.labels.exists(label => label === "status: in progress" || label === "in progress")
-          Option
-            .when(claimed)(
-              "already labeled in progress (claimed by another run)"
-            )
-            .traverse_(why => TaskLogger.trace(s"selectTask excluding #${task.number}: $why"))
-            .as(!claimed)
+        notActivelyClaimed <- filteredByDeps.filterA { task =>
+          val labeledInProgress =
+            task.labels.exists(label => label === "status: in progress" || label === "in progress")
+          IssueClaim.hasActiveClaim(context.root, task.number, progress).flatMap { claimed =>
+            if claimed then
+              TaskLogger
+                .trace(s"selectTask excluding #${task.number}: active claim ref exists")
+                .as(false)
+            else if labeledInProgress then
+              TaskLogger.trace(
+                s"selectTask allowing #${task.number}: clearing stale in-progress labels with no active claim ref"
+              ) *> GitHub
+                .clearInProgressStatus(progress)(None)((context.root, task.number))
+                .as(true)
+            else true.pure[F]
+          }
         }
-        notAlreadyCompleted <- notAlreadyClaimed.filterA { task =>
+        notAlreadyCompleted <- notActivelyClaimed.filterA { task =>
           if GitHub.hasCompletedLabel(task) then
             TaskLogger
               .trace(
@@ -249,7 +257,7 @@ object Impl:
         }
         _ <- progress(
           context.taskNumber.fold(
-            s"Found ${candidates.size} runnable open tasks with preferred runner metadata."
+            s"Found ${candidates.size} runnable open tasks after dependency, child-task, needs-input, completion, and claim filters."
           )(number => s"Found ${candidates.size} runnable open tasks matching #$number.")
         )
       yield TaskSelection(context, candidates)
@@ -537,7 +545,7 @@ object Impl:
     Kleisli { noTask =>
       val context = noTask.context
       val message = context.taskNumber.fold(
-        "No tasks found without unresolved dependencies, open child tasks, or another process already claiming them."
+        "No runnable open tasks found after dependency, child-task, needs-input, completion, and claim filters."
       )(number =>
         s"No runnable open task found for #$number. It may be closed, blocked by dependencies or open child tasks, marked needs-input, or already claimed by another process."
       )

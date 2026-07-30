@@ -32,6 +32,21 @@ object IssueClaim:
 
   private val StaleThresholdSeconds = 4 * 60 * 60 // 4 hours
 
+  def hasActiveClaim[F[_]: Sync](
+      root: os.Path,
+      taskNumber: TaskNumber,
+      progress: String => F[Unit]
+  ): F[Boolean] =
+    checkAndReleaseIfStale[F](progress).run((root, taskNumber)).flatMap {
+      case true => false.pure[F]
+      case false =>
+        Sync[F].blocking {
+          os.proc("git", "ls-remote", "--exit-code", "origin", refName(taskNumber))
+            .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+            .exitCode == 0
+        }
+    }
+
   private def checkAndReleaseIfStale[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
   ): Kleisli[F, (os.Path, TaskNumber), Boolean] =

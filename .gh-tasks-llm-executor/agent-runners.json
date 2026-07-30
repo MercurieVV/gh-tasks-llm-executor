@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedBy": "AgentRunnersDiscovery.collectAndWrite (in-process auto-refresh)",
-  "generatedAtEpochMillis": "1785358342369",
+  "generatedAtEpochMillis": "1785404741085",
   "metadataFormat": "preferred llms/models/efforts/versions",
   "tools": [
     {

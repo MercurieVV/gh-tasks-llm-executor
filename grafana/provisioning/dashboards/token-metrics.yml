@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: gh-tasks-llm-executor
+    orgId: 1
+    folder: Local
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/json

@@ -10,5 +10,20 @@ services:
     volumes:
       - victoria-metrics-data:/victoria-metrics-data
 
+  grafana:
+    image: grafana/grafana-oss:12.1.0
+    depends_on:
+      - victoria-metrics
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+
 volumes:
   victoria-metrics-data:
+  grafana-data:

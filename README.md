@@ -113,16 +113,17 @@ gemini/Vertex probe).
 ### Local token metrics
 
 Token metrics are exported with otel4s/OpenTelemetry to VictoriaMetrics by default.
-Start the local backend with:
+Grafana is provisioned as the local metrics UI, using VictoriaMetrics as a
+Prometheus-compatible datasource. Start the local metrics stack with:
 
 ```bash
-docker compose up victoria-metrics
+docker compose up grafana
 ```
 
 The local VictoriaMetrics OTLP endpoint is
-`http://localhost:8428/opentelemetry/v1/metrics`. VMUI is available at
-`http://localhost:8428/vmui`, and the metrics explorer is at
-`http://localhost:8428/vmui/#/metrics`.
+`http://localhost:8428/opentelemetry/v1/metrics`. Grafana is available at
+`http://localhost:3000` with anonymous local admin access and a provisioned
+`Token Metrics` dashboard.
 
 The local viewer queries VictoriaMetrics unless `--backend=jsonl` or
 `GH_TASKS_TOKEN_METRICS_BACKEND=jsonl` is used:
