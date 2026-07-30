@@ -57,14 +57,25 @@ object Impl:
   // Mandates the use of scalameta tools for navigating Scala sources.
   // This constant is appended to subagent prompts when the task touches .scala files,
   // as defined by the token efficiency plan (T13).
+  // The one wording. TaskRunner.effectivePrompt injects the same constant on a
+  // different trigger (MCP config present, rather than the task touching Scala),
+  // and both triggers fire on a Scala task in a configured worktree. While the
+  // two texts were separate, TaskRunner's "already present?" check looked only
+  // for its own header, so such a task got two overlapping mandate blocks —
+  // paying twice, in the prompt whose token count this whole stage measures.
+  val ScalaSemanticMandateHeader: String =
+    "SCALA SEMANTIC NAVIGATION RULE (must be obeyed):"
+
   val ScalaSemanticMandate: String =
-    """
-      |
-      |SCALA SEMANTIC NAVIGATION RULE (must be obeyed):
-      |For any question about symbols, types, signatures, hierarchy, implicits, references, or call paths in `.scala` files, use `mcp__scala-semantic__*` tools.
-      |Never use `cat`, `rg`, `sed`, `grep`, `head`, or `tail` against `.scala` files.
-      |Use `document_outline` to understand a file's API instead of reading the entire file.
-      |""".stripMargin
+    s"""
+       |
+       |$ScalaSemanticMandateHeader
+       |For any question about symbols, types, signatures, hierarchy, implicits, references, or call paths in `.scala` files, use `mcp__scala-semantic__*` tools.
+       |Never use `cat`, `rg`, `sed`, `grep`, `head`, or `tail` against `.scala` files.
+       |Use `document_outline` to understand a file's API instead of reading the entire file.
+       |Call `set_workspace_root` for the current worktree first, and `annotated_source` to read a `.scala` file.
+       |If ScalaSemantic MCP is unavailable or failing, say so in your final answer before falling back to shell text tools.
+       |""".stripMargin
 
   // TTL-gated, not per-task: refreshing means shelling out to codex/gemini/
   // deepseek/ccusage probes, so it only runs once per process invocation

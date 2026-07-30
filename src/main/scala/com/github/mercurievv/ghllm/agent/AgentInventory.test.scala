@@ -385,6 +385,8 @@ class AgentInventorySuite extends CatsEffectSuite:
 
     override def record(event: TokenMetrics.TokenMetricsEvent): Unit = ()
 
+    override def record(event: TokenMetrics.ScalaTextToolCallEvent): Unit = ()
+
     override def query(
         query: TokenMetrics.TokenMetricsQuery
     ): List[TokenMetrics.TokenMetricsEvent] = Nil

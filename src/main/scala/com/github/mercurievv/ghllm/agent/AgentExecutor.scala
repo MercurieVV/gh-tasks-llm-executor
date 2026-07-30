@@ -336,7 +336,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       TokenMetrics.recordScalaTextToolCalls(
         transcript,
         runner.display,
-        phase.getOrElse("unknown")
+        phase.getOrElse("unknown"),
+        metricsBackend
       )
     if scalaTextToolCalls > 0 then
       TaskLogger.unsafeTrace(

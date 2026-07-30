@@ -1,6 +1,7 @@
 package com.github.mercurievv.ghllm
 
 import com.github.mercurievv.ghllm.agent.*
+import com.github.mercurievv.ghllm.arrow.Impl
 
 import scala.util.Try
 
@@ -128,16 +129,17 @@ final case class TaskRunner(
   private def tomlStringArray(values: Seq[String]): String =
     values.map(tomlString).mkString("[", ",", "]")
 
-  private val ScalaSemanticInstructionHeader =
-    "ScalaSemantic MCP requirement:"
+  // Shared with Impl, which appends the same text on a different trigger. The
+  // header is what makes the two triggers idempotent: whichever fires first,
+  // the second sees it and stays out.
+  //
+  // `def`, not `val`: Impl's own initialiser constructs a TaskRunner
+  // (`Impl.evaluatorRunner`), so a val here reads Impl mid-clinit and gets null.
+  private def ScalaSemanticInstructionHeader: String =
+    Impl.ScalaSemanticMandateHeader
 
-  private val ScalaSemanticInstruction =
-    s"""$ScalaSemanticInstructionHeader
-       |- Before inspecting or editing Scala source, call the ScalaSemantic MCP tools.
-       |- Use `set_workspace_root` for the current worktree first.
-       |- Use `annotated_source` to read `.scala` files and semantic tools such as `find_symbol`, `find_usages`, `type_at_position`, `method_signature`, `members`, `class_hierarchy`, `resolve_implicits`, or `call_path` for Scala code questions.
-       |- Do not use shell text tools such as `cat`, `sed`, `rg`, or `grep` to inspect `.scala` source unless ScalaSemantic MCP is unavailable or failing; if that happens, state the failure in your final answer.
-       |""".stripMargin
+  private def ScalaSemanticInstruction: String =
+    Impl.ScalaSemanticMandate.trim
 
   private val ScalaSemanticClaudeTools = Seq(
     "mcp__scala-semantic__annotated_source",

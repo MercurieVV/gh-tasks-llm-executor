@@ -402,3 +402,56 @@ class TokenMetricsSuite extends munit.FunSuite:
 
     assertEquals(events.length, 2)
     assertEquals(events.flatMap(_.outcome).sorted, List("green", "red"))
+
+class ScalaTextToolCallMetricsSuite extends munit.FunSuite:
+
+  private val transcript =
+    """$ cat src/main/scala/Foo.scala
+      |rg "def bar" src/main/scala/Foo.scala
+      |""".stripMargin
+
+  test("the mandate counter reaches the configured backend, not always VictoriaMetrics"):
+    // The bug this pins: recordScalaTextToolCalls wrote to VictoriaMetrics
+    // unconditionally and swallowed the failure, so under the jsonl backend
+    // the count was computed and then dropped with no trace.
+    val dir = os.temp.dir()
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(dir / "metrics.jsonl")
+
+    val count = TokenMetrics.recordScalaTextToolCalls(transcript, "codex/mini", "implement", backend)
+
+    assertEquals(count, 2L)
+    val recorded = backend.scalaTextToolCalls
+    assertEquals(recorded.map(_.count), List(2L))
+    assertEquals(recorded.map(_.runner), List("codex/mini"))
+    assertEquals(recorded.map(_.phase), List("implement"))
+
+  test("mandate counts never land in the token stream that feeds cost means"):
+    // A zero-usage event filed alongside token events would pull every
+    // per-run mean in NodeProfiles toward zero.
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    TokenMetrics.recordScalaTextToolCalls(transcript, "codex/mini", "implement", backend)
+
+    assertEquals(backend.query(TokenMetrics.TokenMetricsQuery(limit = None)), Nil)
+    assert(!os.exists(path), "token metrics file should not exist")
+
+  test("a clean transcript records nothing at all"):
+    val dir = os.temp.dir()
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(dir / "metrics.jsonl")
+
+    assertEquals(TokenMetrics.recordScalaTextToolCalls("no tool calls here", "codex/mini", "test", backend), 0L)
+    assertEquals(backend.scalaTextToolCalls, Nil)
+
+  test("counts accumulate across runs and survive a reload"):
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    TokenMetrics.recordScalaTextToolCalls(transcript, "codex/mini", "implement", backend)
+    TokenMetrics.recordScalaTextToolCalls(transcript, "claude/opus", "test", backend)
+
+    val reloaded = TokenMetrics.JsonlTokenMetricsBackend(path)
+    assertEquals(reloaded.scalaTextToolCalls.map(event => event.runner -> event.count).toSet,
+      Set("codex/mini" -> 2L, "claude/opus" -> 2L))

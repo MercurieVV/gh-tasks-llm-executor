@@ -47,10 +47,27 @@ object TokenMetrics:
         sinceMillis.forall(event.timestampMillis >= _) &&
         untilMillis.forall(event.timestampMillis <= _)
 
+  /** One run's count of shell text-tool calls that targeted Scala source —
+    * the Stage 3 measure of whether the ScalaSemantic mandate is obeyed.
+    */
+  final case class ScalaTextToolCallEvent(
+      timestampMillis: Long,
+      runner: String,
+      phase: String,
+      count: Long
+  )
+
   trait TokenMetricsBackend:
     def destination: String
     def record(event: TokenMetricsEvent): Unit
     def query(query: TokenMetricsQuery): List[TokenMetricsEvent]
+
+    /** Kept off `record` because a run can produce this count without producing
+      * any token usage — gemini and a failed aider parse both do — and folding
+      * it into a `TokenMetricsEvent` would lose it in exactly those runs, or
+      * else file a zero-usage event that drags every cost mean down.
+      */
+    def record(event: ScalaTextToolCallEvent): Unit
 
     def summary(query: TokenMetricsQuery): TokenUsage.TokenSnapshot =
       this.query(query.copy(limit = None)).foldLeft(TokenUsage.TokenSnapshot.Zero)(_ + _.usage)
@@ -87,9 +104,25 @@ object TokenMetrics:
       val matching = events.filter(query.matches)
       query.limit.fold(matching)(limit => matching.takeRight(limit.max(0))).toList
 
+    /** Written to a sibling file, not to `path`: `query` there feeds the cost
+      * means, and these carry no tokens.
+      */
+    def record(event: ScalaTextToolCallEvent): Unit =
+      val target = JsonlTokenMetricsBackend.scalaTextToolCallPath(path)
+      os.makeDir.all(target / os.up)
+      os.write.append(target, writeScalaTextToolCall(event) + System.lineSeparator(), createFolders = true)
+
+    def scalaTextToolCalls: List[ScalaTextToolCallEvent] =
+      val target = JsonlTokenMetricsBackend.scalaTextToolCallPath(path)
+      if os.exists(target) then Try(os.read.lines(target)).getOrElse(Nil).flatMap(readScalaTextToolCall).toList
+      else Nil
+
   object JsonlTokenMetricsBackend:
     def defaultPath(root: os.Path = os.pwd): os.Path =
       root / ".gh-tasks-llm-executor" / "token-metrics.jsonl"
+
+    def scalaTextToolCallPath(tokenMetricsPath: os.Path): os.Path =
+      tokenMetricsPath / os.up / "scala-text-tool-calls.jsonl"
 
   final class VictoriaMetricsBackend(baseUrl: String = VictoriaMetricsBackend.defaultBaseUrl)
       extends TokenMetricsBackend:
@@ -100,6 +133,13 @@ object TokenMetrics:
 
     def query(query: TokenMetricsQuery): List[TokenMetricsEvent] =
       VictoriaMetricsBackend.query(query, baseUrl)
+
+    def record(event: ScalaTextToolCallEvent): Unit =
+      Try(
+        VictoriaMetricsBackend
+          .recordScalaTextToolCalls(event.count, event.runner, event.phase, baseUrl)
+          .unsafeRunSync()
+      ).fold(_ => (), identity)
 
   object VictoriaMetricsBackend:
     val MetricName = "gh_tasks_llm_executor_token_usage"
@@ -336,18 +376,23 @@ object TokenMetrics:
         case "jsonl" | "file"                                    => Some(Jsonl)
         case _                                                   => None
 
+  /** Counts the run's Scala text-tool calls and files them with whichever
+    * backend is configured. It used to write to VictoriaMetrics unconditionally,
+    * so under the jsonl backend the number was computed and then dropped —
+    * silently, because the write failure was swallowed.
+    */
   def recordScalaTextToolCalls(
       transcript: String,
       runner: String,
       phase: String,
-      baseUrl: String = VictoriaMetricsBackend.defaultBaseUrl
+      backend: TokenMetricsBackend
   ): Long =
     val count = TaskLogger.scalaTextToolCallCount(transcript)
     if count > 0 then
       Try(
-        VictoriaMetricsBackend
-          .recordScalaTextToolCalls(count, runner, phase, baseUrl)
-          .unsafeRunSync()
+        backend.record(
+          ScalaTextToolCallEvent(System.currentTimeMillis(), runner, phase, count)
+        )
       ).fold(_ => (), identity)
     count
 
@@ -423,6 +468,26 @@ object TokenMetrics:
         )
       )
     )
+
+  private def writeScalaTextToolCall(event: ScalaTextToolCallEvent): String =
+    ujson.write(
+      ujson.Obj(
+        "timestampMillis" -> ujson.Num(event.timestampMillis.toDouble),
+        "runner" -> event.runner,
+        "phase" -> event.phase,
+        "count" -> ujson.Num(event.count.toDouble)
+      )
+    )
+
+  private def readScalaTextToolCall(line: String): Option[ScalaTextToolCallEvent] =
+    for
+      json <- Try(ujson.read(line)).toOption
+      obj <- json.objOpt
+      timestampMillis <- obj.get("timestampMillis").flatMap(readLong)
+      runner <- obj.get("runner").flatMap(_.strOpt)
+      phase <- obj.get("phase").flatMap(_.strOpt)
+      count <- obj.get("count").flatMap(readLong)
+    yield ScalaTextToolCallEvent(timestampMillis, runner, phase, count)
 
   private def readEvent(line: String): Option[TokenMetricsEvent] =
     for

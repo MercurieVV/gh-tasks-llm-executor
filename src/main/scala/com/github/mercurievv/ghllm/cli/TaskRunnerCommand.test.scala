@@ -25,8 +25,8 @@ class TaskRunnerCommandSuite extends munit.FunSuite:
     assert(command.contains("Read"))
     assert(command.contains("mcp__scala-semantic__annotated_source"))
     assert(command.contains("mcp__scala-semantic__find_symbol"))
-    assert(command.last.contains("ScalaSemantic MCP requirement:"))
-    assert(command.last.contains("Use `set_workspace_root` for the current worktree first."))
+    assert(command.last.contains("SCALA SEMANTIC NAVIGATION RULE (must be obeyed):"))
+    assert(command.last.contains("Call `set_workspace_root` for the current worktree first"))
     assert(command.last.contains(prompt.value))
 
   test("claude command does not add MCP args without workspace MCP config"):
@@ -38,7 +38,7 @@ class TaskRunnerCommandSuite extends munit.FunSuite:
 
     assert(!command.contains("--mcp-config"))
     assert(!command.contains("mcp__scala-semantic__annotated_source"))
-    assert(!command.exists(_.contains("ScalaSemantic MCP requirement:")))
+    assert(!command.exists(_.contains("SCALA SEMANTIC NAVIGATION RULE (must be obeyed):")))
     assertEquals(command, Seq("claude", "--allowedTools", "Read", "-p", prompt.value))
 
   test("codex command maps workspace MCP JSON to config overrides and injects ScalaSemantic prompt"):
@@ -56,8 +56,8 @@ class TaskRunnerCommandSuite extends munit.FunSuite:
     assert(command.contains("--config"))
     assert(command.contains("mcp_servers.scala-semantic.command=\"/repo/scalasemantic-mcp.sh\""))
     assert(command.contains("""mcp_servers.scala-semantic.args=["serve","."]"""))
-    assert(command.last.contains("ScalaSemantic MCP requirement:"))
-    assert(command.last.contains("Do not use shell text tools"))
+    assert(command.last.contains("SCALA SEMANTIC NAVIGATION RULE (must be obeyed):"))
+    assert(command.last.contains("before falling back to shell text tools"))
     assert(command.last.contains(prompt.value))
 
   test("ScalaSemantic prompt injection is idempotent"):
@@ -70,6 +70,24 @@ class TaskRunnerCommandSuite extends munit.FunSuite:
     val twice = runner.effectivePrompt(once, allowedTools = Seq("Read"), cwd = Some(root))
 
     assertEquals(twice.value, once.value)
+
+  test("a prompt that already carries Impl's mandate is not given a second one"):
+    // Both injections fire on a Scala task in an MCP-configured worktree: Impl
+    // appends on `taskTouchesScala`, TaskRunner prepends on `mcp_config.json`.
+    // They must share one wording, or the agent pays for the rule twice.
+    val root = os.temp.dir()
+    os.makeDir.all(root / ".agents")
+    os.write(root / ".agents" / "mcp_config.json", """{"mcpServers":{}}""")
+    val runner = TaskRunner(AgentBinary("claude"), Some("sonnet"), None, None)
+
+    val fromImpl = AgentPrompt(s"${prompt.value}\n\n${Impl.ScalaSemanticMandate}")
+    val injected = runner.effectivePrompt(fromImpl, allowedTools = Seq("Read"), cwd = Some(root))
+
+    assertEquals(injected.value, fromImpl.value)
+    assertEquals(
+      injected.value.sliding(Impl.ScalaSemanticMandateHeader.length).count(_ == Impl.ScalaSemanticMandateHeader),
+      1
+    )
 
   test("aider command appends explicit context files"):
     val command =
