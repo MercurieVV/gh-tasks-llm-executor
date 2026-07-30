@@ -48,5 +48,9 @@ object PlanEstimate:
       case other                       => other.toString
     val own = f"$$${attr.cost.ownUsd}%.4f"
     val subtree = f"$$${attr.cost.subtreeUsd}%.4f"
-    val line = s"${"  " * depth}$label  own=$own subtree=$subtree tier=${attr.tier}"
+    // Printed because it is the only number that shows whether the plan's fan-out
+    // actually shares a cached prefix: when it equals `own`, no child does.
+    val perNode = f"$$${attr.cost.estimatedPerNodeUsd}%.4f"
+    val line =
+      s"${"  " * depth}$label  own=$own per-node=$perNode subtree=$subtree tier=${attr.tier}"
     line :: TaskF.childrenOf(node).flatMap(child => lines(child, depth + 1))

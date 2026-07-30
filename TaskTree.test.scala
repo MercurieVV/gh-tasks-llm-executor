@@ -72,13 +72,44 @@ class TaskTreeSuite extends ScalaCheckSuite:
     assertEqualsDouble(result.ownUsd, 1.0, 1e-12)
     assertEqualsDouble(result.subtreeUsd, 2.1, 1e-12)
     assertEquals(result.nodeCount, 3)
-    assertEqualsDouble(result.estimatedPerNodeUsd, 0.5, 1e-12)
+    // `profile` gives every node a PrefixKey of its own, so neither child shares
+    // the root's cached prefix and the root amortises across nobody.
+    assertEqualsDouble(result.estimatedPerNodeUsd, 1.0, 1e-12)
+
+  test("only the children sharing the prefix divide the parent's cost"):
+    val root = branch("root", List(leaf(Some(1)), leaf(Some(2)), leaf(Some(3))))
+    val shared = prefix("shared")
+    val rootProfile =
+      NodeProfile(shared, "plan", zeroCoefficients.copy(inputTokens = 1000000.0))
+    val profileFor: NodeRef => NodeProfile =
+      case NodeRef.Branch("root") => rootProfile
+      // Two of the three leaves route to the root's runner; the third does not,
+      // so it re-sends the prefix and cannot be counted as amortising it.
+      case NodeRef.Leaf(Some(3))  => NodeProfile(prefix("other"), "test", zeroCoefficients)
+      case _                      => NodeProfile(shared, "implement", zeroCoefficients)
+
+    val cost = estimate(root, model, profileFor)
+    assertEqualsDouble(cost.ownUsd, 1.0, 1e-12)
+    assertEqualsDouble(cost.estimatedPerNodeUsd, 0.5, 1e-12)
+
+  test("a fan-out that shares nothing is priced as if it were serial"):
+    // The defect this replaced: dividing by the raw fan-out made a plan look
+    // cheaper for spreading work across runners, which is when it shares least.
+    val root = branch("root", List(leaf(Some(1)), leaf(Some(2))))
+    val rootProfile =
+      NodeProfile(prefix("root"), "plan", zeroCoefficients.copy(inputTokens = 1000000.0))
+    val profileFor: NodeRef => NodeProfile =
+      case NodeRef.Branch("root") => rootProfile
+      case ref                    => NodeProfile(prefix(ref.toString), "implement", zeroCoefficients)
+
+    val cost = estimate(root, model, profileFor)
+    assertEqualsDouble(cost.estimatedPerNodeUsd, cost.ownUsd, 1e-12)
 
   // The property this replaces asserted that adding a sibling never increases
   // estimated per-node cost. That holds by construction and cannot fail:
-  // estimatedPerNodeUsd is ownUsd / fanOut, and ownUsd does not read children
-  // at all, so the numerator is fixed while the denominator only grows. The
-  // properties below can fail, and each one names a specific way the fold
+  // estimatedPerNodeUsd is ownUsd / the sharing count, and ownUsd does not read
+  // children at all, so the numerator is fixed while the denominator only grows.
+  // The properties below can fail, and each one names a specific way the fold
   // could be wrong.
 
   /** Random trees, so the properties are not tested only against fan-outs. */
@@ -148,12 +179,20 @@ class TaskTreeSuite extends ScalaCheckSuite:
 
   property("per-node allocation neither invents nor loses cost"):
     // The real content of estimatedPerNodeUsd: it splits *this node's* cost
-    // across its fan-out. Fails if allocation ever starts folding in children.
+    // across the children that share its prefix. Fails if allocation ever starts
+    // folding in children's own cost, and fails if it goes back to dividing by
+    // the raw fan-out - `pricing` keys every node differently, so nothing shares.
     forAll(genTree(3), Gen.choose(1, 5)) { (tree, seed) =>
-      val cost = estimate(tree, model, pricing(seed))
-      val fanOut = TaskF.childrenOf(Mu.un(tree)).size.max(1)
+      val profileFor = pricing(seed)
+      val cost = estimate(tree, model, profileFor)
+      val rootKey = profileFor(TaskF.payloadOf(Mu.un(tree))).prefixKey
+      val sharing =
+        TaskF
+          .childrenOf(Mu.un(tree))
+          .count(child => profileFor(TaskF.payloadOf(Mu.un(child))).prefixKey == rootKey)
+          .max(1)
 
-      assertEqualsDouble(cost.estimatedPerNodeUsd * fanOut, cost.ownUsd, 1e-9)
+      assertEqualsDouble(cost.estimatedPerNodeUsd * sharing, cost.ownUsd, 1e-9)
     }
 
   property("garbage coefficients cannot produce a garbage estimate"):
@@ -193,12 +232,12 @@ class TaskTreeSuite extends ScalaCheckSuite:
       case _                      => childProfile
     val annotated = annotate(root, model, profileFor)
 
-    assertEquals(annotated.head.prefixKey, rootProfile.prefixKey)
+    assertEquals(annotated.head.cost.prefixKey, rootProfile.prefixKey)
     assertEquals(annotated.head.tier, "plan")
     assertEqualsDouble(annotated.head.cost.subtreeUsd, 1.0, 1e-12)
     annotated.tailForced match
       case TaskF.Branch(_, onlyChild :: Nil) =>
-        assertEquals(onlyChild.head.prefixKey, childProfile.prefixKey)
+        assertEquals(onlyChild.head.cost.prefixKey, childProfile.prefixKey)
         assertEquals(onlyChild.head.tier, "test")
         assertEqualsDouble(onlyChild.head.cost.ownUsd, 0.5, 1e-12)
       case other => fail(s"expected one annotated child, got $other")

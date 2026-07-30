@@ -80,19 +80,30 @@ object TaskTree:
 
   /** Result of folding one subtree.
     *
-    * `subtreeUsd` is additive and is used for whole-plan comparisons. `estimatedPerNodeUsd` allocates only this node's
-    * shared-prefix cost over its immediate fan-out. Consequently, adding a sibling cannot make the estimate for any
-    * node more expensive.
+    * `subtreeUsd` is additive and is used for whole-plan comparisons.
+    * `estimatedPerNodeUsd` allocates only this node's shared-prefix cost over the
+    * children that actually share that prefix.
+    *
+    * `prefixKey` rides on the fold result rather than only on the annotation
+    * because the allocation needs it: a child's cost is already folded away by
+    * the time its parent is priced, so without carrying the key upward the
+    * parent cannot tell which children reuse its cached prefix and which pay
+    * for their own.
     */
   final case class Cost(
+      prefixKey: PrefixKey,
       ownUsd: Double,
       subtreeUsd: Double,
       nodeCount: Int,
       estimatedPerNodeUsd: Double
   )
 
-  /** Attributes attached to every node by [[annotate]]. */
-  final case class Attr(prefixKey: PrefixKey, tier: String, cost: Cost)
+  /** Attributes attached to every node by [[annotate]].
+    *
+    * The node's `PrefixKey` is on `cost`, not repeated here: two copies of one
+    * value that must always agree is a way for them to stop agreeing.
+    */
+  final case class Attr(tier: String, cost: Cost)
 
   def branch(name: String, children: List[Tree]): Tree =
     Mu[Node](TaskF.Branch(NodeRef.Branch(name), children))
@@ -139,7 +150,7 @@ object TaskTree:
       val costNode = summon[Functor[Node]].map(node)(_.head.cost)
       val profile = profileFor(TaskF.payloadOf(node))
       Cofree(
-        Attr(profile.prefixKey, profile.tier, foldNode(costNode, costModel, profileFor)),
+        Attr(profile.tier, foldNode(costNode, costModel, profileFor)),
         Eval.now(node)
       )
     }
@@ -159,13 +170,21 @@ object TaskTree:
       profileFor: NodeRef => NodeProfile
   ): Cost =
     val children = TaskF.childrenOf(node)
-    val ownUsd = costModel.estimate(profileFor(TaskF.payloadOf(node)).coefficients)
-    val fanOut = children.size.max(1)
+    val profile = profileFor(TaskF.payloadOf(node))
+    val ownUsd = costModel.estimate(profile.coefficients)
+    // Only children that share this node's PrefixKey read its cached prefix; a
+    // child routed to another runner or model re-sends everything and amortises
+    // nothing. Dividing by the raw fan-out assumed every sibling shared, which
+    // under-prices exactly the plans that fan out across runners. `.max(1)`
+    // keeps a childless node, and a node none of whose children share its key,
+    // carrying its own full cost rather than dividing by zero.
+    val sharingChildren = children.count(_.prefixKey == profile.prefixKey).max(1)
     Cost(
+      prefixKey = profile.prefixKey,
       ownUsd = ownUsd,
       subtreeUsd = ownUsd + children.map(_.subtreeUsd).sum,
       nodeCount = 1 + children.map(_.nodeCount).sum,
-      estimatedPerNodeUsd = ownUsd / fanOut
+      estimatedPerNodeUsd = ownUsd / sharingChildren
     )
 
   private def nonNegative(value: Double): Double =
