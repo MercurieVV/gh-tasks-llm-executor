@@ -191,8 +191,15 @@ final case class PublishRequest(
     runner: TaskRunner
 )
 
-/** Remote branch push request. */
+/** Remote branch push request.
+  *
+  * `root` is the repo root, not the worktree: a push failure is repaired by an
+  * agent, and choosing an alternate runner for that repair needs the inventory,
+  * which is discovered per repo (`AgentInventory.load`). Without it the repair
+  * loop could only re-run the runner that had already failed.
+  */
 final case class PushRequest(
+    root: os.Path,
     worktreePath: os.Path,
     branchName: BranchName,
     task: Issue,

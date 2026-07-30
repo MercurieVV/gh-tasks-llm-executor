@@ -38,7 +38,7 @@ class PublishRemoteArrowsSuite extends CatsEffectSuite:
   private val request =
     PublishRequest(os.pwd, os.pwd, BranchName("task-1"), None, issue(1), AgentFinalization(None, None), runner)
   private val remote = RemotePublication(request)
-  private val pushRequest = PushRequest(os.pwd, BranchName("task-1"), issue(1), runner)
+  private val pushRequest = PushRequest(os.pwd, os.pwd, BranchName("task-1"), issue(1), runner)
   private val boom = RuntimeException("rejected")
 
   private def arrows(

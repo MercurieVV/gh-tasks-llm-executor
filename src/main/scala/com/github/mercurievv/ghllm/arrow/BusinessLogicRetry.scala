@@ -212,10 +212,11 @@ object BusinessLogicRetry:
             run.task,
             run.runner,
             prCheckRepairPrompt(run.task, error),
-            s"Repair failing Pull Request check for task #${run.task.number}"
+            s"Repair failing Pull Request check for task #${run.task.number}",
+            run.context.agentInventory
           )
           _ <- repairablePush(progress).run(
-            PushRequest(run.worktreePath, run.branchName, run.task, run.runner)
+            PushRequest(run.context.root, run.worktreePath, run.branchName, run.task, run.runner)
           )
         yield Right(
           resume.copy(checksRepairAttemptsRemaining = resume.checksRepairAttemptsRemaining - 1)
@@ -249,10 +250,11 @@ object BusinessLogicRetry:
             request.task,
             request.runner,
             prCheckRepairPrompt(request.task, error),
-            s"Repair failing Pull Request check for task #${request.task.number}"
+            s"Repair failing Pull Request check for task #${request.task.number}",
+            AgentInventory.load(request.root)
           )
           _ <- repairablePush(progress).run(
-            PushRequest(request.worktreePath, request.branchName, request.task, request.runner)
+            PushRequest(request.root, request.worktreePath, request.branchName, request.task, request.runner)
           )
         yield Right(request)
       else Left(error).pure[F]
@@ -271,7 +273,8 @@ object BusinessLogicRetry:
   ): Kleisli[F, PublishRequest, Boolean] =
     Kleisli.apply { request =>
       val baseBranch = request.baseBranch.getOrElse(BranchName("master"))
-      val pushRequest = PushRequest(request.worktreePath, request.branchName, request.task, request.runner)
+      val pushRequest =
+        PushRequest(request.root, request.worktreePath, request.branchName, request.task, request.runner)
       for
         autoMerged <- Impl
           .git[F]
@@ -433,7 +436,7 @@ object BusinessLogicRetry:
           s"Push failed for task #${request.task.number}: ${error.getMessage}"
         )
         _ <- repairAndCommit(progress)(
-          (request.worktreePath, request.task, request.runner, error)
+          (request.root, request.worktreePath, request.task, request.runner, error)
         )
       yield Right(request)
     }
@@ -483,25 +486,55 @@ object BusinessLogicRetry:
 
   def repairAndCommit[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
-  ): Kleisli[F, (os.Path, Issue, TaskRunner, Throwable), Unit] =
-    Kleisli.apply { case (worktreePath, task, runner, pushError) =>
+  ): Kleisli[F, (os.Path, os.Path, Issue, TaskRunner, Throwable), Unit] =
+    Kleisli.apply { case (root, worktreePath, task, runner, pushError) =>
       repairAndCommitWith(progress)(
         worktreePath,
         task,
         runner,
         repairPrompt(task, pushError),
-        s"Repair prePush failure for task #${task.number}"
+        s"Repair prePush failure for task #${task.number}",
+        AgentInventory.load(root)
       )
     }
+
+  /** Run a repair agent until the project validates, rotating runners on red.
+    *
+    * The retry was previously the same runner three times over. That is the
+    * defect `routeRunnerFallback` exists to avoid, on a second route: a runner
+    * that could not fix the build on attempt one is not more likely to fix it on
+    * attempt three, and each identical re-run is paid for. `alternateImplementor`
+    * with the attempted list is exactly what `repairMergeConflictsUntilClean`
+    * already does one function below - the two repair paths now agree.
+    *
+    * The sequence is precomputed rather than chosen inside the loop because it
+    * does not depend on the error - which makes it a pure function, and the only
+    * part of this effect-heavy loop that can be tested without a live agent.
+    */
+  def repairRunnerSequence(
+      inventory: AgentInventory,
+      first: TaskRunner,
+      attempts: Int
+  ): List[TaskRunner] =
+    def build(current: TaskRunner, attempted: List[TaskRunner], remaining: Int): List[TaskRunner] =
+      if remaining <= 0 then Nil
+      else
+        // No alternate left: repeat the current runner rather than abandon the
+        // repair. That is what this loop did for every attempt before rotation.
+        val next = inventory.alternateImplementor(current, attempted).getOrElse(current)
+        current :: build(next, current :: attempted, remaining - 1)
+
+    build(first, Nil, attempts.max(1))
 
   def repairAndCommitWith[F[_]](progress: String => F[Unit])(
       worktreePath: os.Path,
       task: Issue,
       runner: TaskRunner,
       prompt: AgentPrompt,
-      commitMessage: String
+      commitMessage: String,
+      inventory: AgentInventory
   )(using F: Sync[F]): F[Unit] =
-    def loop(attemptsRemaining: Int): F[Unit] =
+    def loop(runner: TaskRunner, remainingRunners: List[TaskRunner]): F[Unit] =
       for
         _ <- progress(
           s"Running repair agent (${runner.display}) for task #${task.number}..."
@@ -530,17 +563,21 @@ object BusinessLogicRetry:
             Impl.git[F].runProjectValidation(worktreePath).attempt.flatMap {
               case Right(_) =>
                 Impl.git[F].commitAll(worktreePath, task, Some(commitMessage))
-              case Left(error) if attemptsRemaining > 0 =>
+              case Left(error) if remainingRunners.nonEmpty =>
                 progress(
-                  s"Repair build checks failed for task #${task.number}: ${error.getMessage}. Retrying repair (${attemptsRemaining} attempt(s) left)..."
-                ) *> loop(attemptsRemaining - 1)
+                  s"Repair build checks failed for task #${task.number}: ${error.getMessage}. Retrying repair with ${remainingRunners.head.display} (${remainingRunners.size} attempt(s) left)..."
+                ) *> loop(remainingRunners.head, remainingRunners.tail)
               case Left(error) =>
                 F.raiseError(error)
             }
           else progress(s"Repair agent made no file changes for task #${task.number}.")
       yield ()
 
-    loop(MaxRepairBuildCheckAttempts)
+    // +1: MaxRepairBuildCheckAttempts counts RETRIES after the first run, so the
+    // sequence is one longer than the retry budget.
+    repairRunnerSequence(inventory, runner, MaxRepairBuildCheckAttempts + 1) match
+      case head :: tail => loop(head, tail)
+      case Nil          => loop(runner, Nil)
 
   private def repairContextFiles(worktreePath: os.Path): Seq[String] =
     Seq(

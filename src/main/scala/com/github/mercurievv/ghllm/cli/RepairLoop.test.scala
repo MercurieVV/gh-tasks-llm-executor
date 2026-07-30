@@ -253,3 +253,45 @@ class AgentRunArrowsSuite extends CatsEffectSuite:
     route(onLadder(weak), VerificationResult.Green).map { case (routed, _) =>
       assertEquals(routed, Left(VerificationResult.Green))
     }
+
+class RepairRunnerSequenceSuite extends munit.FunSuite:
+  private def tool(agent: String) =
+    AgentTool(
+      id = AgentToolId(agent),
+      agent = Agent(agent),
+      model = None,
+      effort = None,
+      version = None,
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = Nil,
+      available = Available(true)
+    )
+
+  private val cheap = TaskRunner(AgentBinary("cheap"), None, None, None)
+
+  private def sequence(inventory: AgentInventory, attempts: Int) =
+    BusinessLogicRetry.repairRunnerSequence(inventory, cheap, attempts).map(_.agent.value)
+
+  test("a failed repair moves to a different runner, never the same one twice"):
+    // The build-check retry used to re-run the runner that had just failed to
+    // fix the build, up to MaxRepairBuildCheckAttempts times. Each of those
+    // re-runs is paid for and none of them has new information.
+    val inventory = AgentInventory(List(tool("cheap"), tool("mid"), tool("strong")))
+    assertEquals(sequence(inventory, 3), List("cheap", "mid", "strong"))
+
+  test("the alternates run out before the budget does, and the last one repeats"):
+    // Abandoning the repair because the inventory is short would be worse than
+    // the behaviour this replaced. Once exhausted it stays on the last runner
+    // chosen rather than cycling back to one that already failed earlier.
+    val inventory = AgentInventory(List(tool("cheap"), tool("mid")))
+    assertEquals(sequence(inventory, 4), List("cheap", "mid", "mid", "mid"))
+
+  test("a lone implementor degrades to the old same-runner retry"):
+    val inventory = AgentInventory(List(tool("cheap")))
+    assertEquals(sequence(inventory, 3), List("cheap", "cheap", "cheap"))
+
+  test("an empty inventory still runs the runner it was handed"):
+    // AgentInventory.load on a repo with no discovered runners must not silence
+    // the repair entirely.
+    assertEquals(sequence(AgentInventory(Nil), 2), List("cheap", "cheap"))

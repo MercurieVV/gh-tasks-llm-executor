@@ -1453,6 +1453,7 @@ ${task.body}
   def toPushRequest[F[_]: Sync]: -->[F, RemotePublication, PushRequest] =
     Kleisli.fromFunction { remote =>
       PushRequest(
+        remote.request.root,
         remote.request.worktreePath,
         remote.request.branchName,
         remote.request.task,
