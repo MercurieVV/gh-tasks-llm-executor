@@ -22,7 +22,7 @@ around them is older than the code.
 | T17 | done | `TaskArtifact.bound` enforced in `GitHub.renderDependencyConclusions` — the contract existed unused until it was wired there |
 | T18 | done as data only | `PrefixKey` is built in `NodeProfiles` for cost attribution; nothing caches on it |
 | T19 | done | `Impl.taskPrompt` is ordered most-stable-first; `PromptSegmentOrderSuite` pins it |
-| T20 | **blocked, not merely unstarted** | the TTL is an API parameter and this executor invokes vendor CLIs as subprocesses, so there is nowhere to set it — see the task for what remains salvageable. An earlier audit called this done on the strength of a `FanOutCacheTest.scala` string inside a `TestEditGuard` test fixture — that file does not exist |
+| T20 | done for `claude` root batches; untested until now | `markCachePeers` (≥3 peers + `--parallel`) → `ENABLE_PROMPT_CACHING_1H` in the subprocess env. Not applied to a split's children, and a no-op for non-`claude` agents |
 | T21–T22 | done | `TaskF`, `TaskGraph.coalgebra`, `TaskTree.costAlgebra`, `annotate` |
 | T23 | partial | the fold is reachable from the `estimate` CLI path (`PlanEstimate`), but execution routing still does not consume it — the cost model informs a human, not the scheduler |
 
@@ -506,27 +506,25 @@ single-child edge.
 
 **Do NOT.** Launch siblings staggered — they must start together or the window is lost.
 
-**Blocked as written — read before starting.** The TTL is an API-level parameter
-(`cache_control: {type: "ephemeral", ttl: "1h"}` on a content block). This executor
-never speaks to the API: `TaskRunner.command` builds an argv for a vendor CLI
-(`claude -p`, `codex exec`, `aider --message`, `gemini -p`, `agy --print`) and
-`AgentExecutor` runs it as a subprocess. The CLI constructs its own request, and none
-of the five exposes a TTL flag. There is nowhere to set this without either a vendor
-CLI flag that does not exist or replacing the subprocess transport with a direct API
-client — a far larger change than "medium" implies, and one that would have to be
-re-done per vendor.
+**Already implemented — for `claude`, at root-candidate level.**
+`BusinessLogic.markCachePeers` sets `TaskRunner.extendedCacheTtl` when at least 3
+selected candidates share the same `(agent, model)` and `--parallel` is on;
+`TaskRunner.invocationEnvironment` turns that into `ENABLE_PROMPT_CACHING_1H=1`, which
+`AgentExecutor` puts into the subprocess environment. The env var is how a vendor CLI
+exposes what is otherwise an API-level `cache_control` field — there is no argv flag,
+which is why grepping the command builders suggests the feature is absent.
 
-Two things are salvageable from this task without that:
+Limits worth knowing before extending it:
 
-1. **Launch siblings together.** The prefix would then be shared inside the provider's
-   *default* (5-minute) cache window, which needs no flag. This half is genuinely not
-   done: `ParallelArrows.parAll` is wired for independent ROOT candidates under
-   `--parallel`, not for the children of one fan-out, which still run sequentially
-   through `RecursiveArrows`.
-2. **Note the cap interaction first.** `ParallelArrows.MaxParallelism = 2`, so even
-   once siblings run concurrently, a 3-child fan-out has at most 2 concurrent readers
-   of the prefix. The ≥3-reads break-even above and that cap were chosen independently
-   and currently contradict each other — decide which moves before building on either.
+- **`claude` only.** `invocationEnvironment` is empty for every other agent, so marking
+  a `codex`/`gemini`/`aider` peer group is a silent no-op rather than a saving.
+- **Root candidates, not fan-out children.** The peer group is the selected root batch.
+  A task's dependencies still run sequentially through `RecursiveArrows.untilLeft`, so
+  the children of one split never form a peer group at all. That is the remaining half
+  of this task.
+- **Concurrency is not required.** A 1-hour window is precisely what decouples readers
+  from the writer, so `ParallelArrows.MaxParallelism = 2` does not undercut the ≥3
+  threshold — the third peer reads the prefix later, not simultaneously.
 
 ---
 

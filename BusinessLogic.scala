@@ -56,19 +56,7 @@ final case class BusinessLogic[-->[_, _]](
       traverse: ArrowTraverse[-->],
       attempt: ArrowAttempt[-->]
   ): TaskSelection --> RunSummary =
-    val candidates = arrow.lift { (selection: TaskSelection) =>
-      val cachePeers =
-        selection.candidates
-          .groupMapReduce(candidate => (candidate.runner.agent, candidate.runner.model))(_ => 1)(_ + _)
-      selection.candidates.map { candidate =>
-        val extendedCacheTtl =
-          selection.context.parallelExecution.value &&
-            cachePeers((candidate.runner.agent, candidate.runner.model)) >= 3
-        candidate.copy(
-          runner = candidate.runner.copy(extendedCacheTtl = extendedCacheTtl)
-        )
-      }
-    }
+    val candidates = arrow.lift(BusinessLogic.markCachePeers)
     val isolated = runCandidateIsolated
     programArrows.loadOpenIssues >>>
       programArrows.routeParallelExecution >>>
@@ -176,6 +164,27 @@ final case class BusinessLogic[-->[_, _]](
       executeTaskArrows.checkParentsForCompletion
 
 object BusinessLogic:
+  /** Marks the candidates that should write their shared prefix with the extended (1-hour) cache TTL — T20.
+    *
+    * The TTL costs roughly 2x to write and pays back over about 3 reads, so it is set only where at least 3 candidates
+    * share the same (agent, model): a peer group of 2 would pay the premium and never earn it back. Note that the
+    * peers do not have to run at the same time — a 1-hour window is exactly what decouples the readers from the writer,
+    * which is why `ParallelArrows.MaxParallelism = 2` does not undercut the >= 3 threshold.
+    *
+    * Gated on `--parallel` because that is the mode in which a batch of same-runner candidates is actually expected;
+    * a sequential run of unrelated roots has no shared prefix worth paying for.
+    */
+  def markCachePeers(selection: TaskSelection): List[TaskCandidate] =
+    val cachePeers =
+      selection.candidates
+        .groupMapReduce(candidate => (candidate.runner.agent, candidate.runner.model))(_ => 1)(_ + _)
+    selection.candidates.map { candidate =>
+      val extendedCacheTtl =
+        selection.context.parallelExecution.value &&
+          cachePeers((candidate.runner.agent, candidate.runner.model)) >= 3
+      candidate.copy(runner = candidate.runner.copy(extendedCacheTtl = extendedCacheTtl))
+    }
+
   given Functor2K[BusinessLogic] = Functor2K.derived
   given Apply2K[BusinessLogic] = Apply2K.derived
   given Monoid2K[BusinessLogic] = Monoid2K.derived
