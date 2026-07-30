@@ -8,8 +8,11 @@ import com.github.mercurievv.ghllm.git.*
 import com.github.mercurievv.ghllm.metrics.*
 
 import cats.data.Kleisli
+import cats.effect.Deferred
 import cats.effect.Ref
 import cats.effect.kernel.Sync
+
+final case class SemanticDbSource(root: os.Path, hash: String)
 
 /** Ambient state every arrow in a run may read, supplied once when the assembled program is finally applied to its
   * input.
@@ -24,10 +27,23 @@ import cats.effect.kernel.Sync
   * to build at run time.
   */
 final case class RunEnv[F[_]](
-    openIssues: Ref[F, Map[TaskNumber, Issue]]
+    openIssues: Ref[F, Map[TaskNumber, Issue]],
+    semanticDbRefreshes: Ref[F, Map[SemanticDbSource, Deferred[F, Either[Throwable, Unit]]]]
 )
 
 object RunEnv:
+  def apply[F[_]: Sync](
+      openIssues: Ref[F, Map[TaskNumber, Issue]]
+  ): RunEnv[F] =
+    new RunEnv(openIssues, Ref.unsafe(Map.empty))
+
+  def create[F[_]: Sync](
+      openIssues: Ref[F, Map[TaskNumber, Issue]]
+  ): F[RunEnv[F]] =
+    Sync[F].map(Ref.of(Map.empty[SemanticDbSource, Deferred[F, Either[Throwable, Unit]]]))(
+      new RunEnv(openIssues, _)
+    )
+
   /** Leaf that needs the ambient env in addition to its own input. */
   def read[F[_]: Sync, A, B](use: (RunEnv[F], A) => F[B]): -->[RunF[F], A, B] =
     Kleisli(input => Kleisli(env => use(env, input)))

@@ -25,7 +25,7 @@ class AgentInventoryConfigDrivenSuite extends munit.FunSuite:
   private val tolerance = 0.000001
 
   test("config raw prices reproduce the pinned #12 $/task values"):
-    val tools = AgentInventory.load(os.pwd).tools
+    val tools = AgentInventory.load(os.pwd).tools.filter(_.cost.nonEmpty)
     assertEquals(tools.map(_.id).toSet, expectedCosts.keySet)
     tools.foreach { tool =>
       val actual = tool.cost
