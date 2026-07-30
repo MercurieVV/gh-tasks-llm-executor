@@ -117,6 +117,56 @@ class TokenMetricsSuite extends munit.FunSuite:
     // 6 dimensioned events clears minSample for cost; only 4 carry an outcome.
     assert(rendered.contains("implement claude/haiku 6 yes 4 no (1 more)"), rendered)
 
+  test("the JSON encoding carries every field the event has"):
+    // Derived from the case class rather than listed, so a field added to
+    // TokenMetricsEvent and forgotten here fails instead of going unnoticed -
+    // which is exactly how the CLI's hand-rolled copy came to be missing five.
+    val event = TokenMetrics.TokenMetricsEvent(
+      timestampMillis = 1000,
+      vendor = TokenUsage.Vendor.Claude,
+      usage = TokenUsage.TokenSnapshot(input = 1, output = 2, cacheRead = 3, cacheWrite = 4, total = 10),
+      taskNumber = Some(TaskNumber(4)),
+      model = Some("haiku"),
+      scope = "agent-run",
+      phase = Some("implement"),
+      runner = Some("claude/haiku"),
+      turnCount = Some(6),
+      escalated = true,
+      outcome = Some("green")
+    )
+    val json = TokenMetrics.eventJson(event)
+
+    val expected = event.productElementNames.toSet - "usage" + "usage"
+    assertEquals(json.value.keys.toSet, expected)
+    assertEquals(json("phase").str, "implement")
+    assertEquals(json("runner").str, "claude/haiku")
+    assertEquals(json("turnCount").num.toInt, 6)
+    assertEquals(json("escalated").bool, true)
+    assertEquals(json("outcome").str, "green")
+
+  test("the jsonl backend and the --json view cannot drift apart"):
+    // One encoder, two callers. Reading back what the backend wrote must give
+    // the same JSON the CLI prints for the same event.
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+    val event = TokenMetrics.TokenMetricsEvent(
+      timestampMillis = 2000,
+      vendor = TokenUsage.Vendor.Codex,
+      usage = TokenUsage.TokenSnapshot(input = 5, output = 6, cacheRead = 0, cacheWrite = 0, total = 11),
+      taskNumber = Some(TaskNumber(9)),
+      model = Some("gpt-5"),
+      scope = "agent-run",
+      phase = Some("test"),
+      runner = Some("codex/gpt-5"),
+      turnCount = Some(2),
+      outcome = Some("red")
+    )
+    backend.record(event)
+
+    val reloaded = TokenMetrics.JsonlTokenMetricsBackend(path).query(TokenMetrics.TokenMetricsQuery())
+    assertEquals(reloaded.map(TokenMetrics.eventJson), List(TokenMetrics.eventJson(event)))
+
   test("readiness says so when nothing is measured, rather than printing an empty table"):
     val events = List(
       TokenMetrics.TokenMetricsEvent(

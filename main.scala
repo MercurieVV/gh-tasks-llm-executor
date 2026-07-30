@@ -115,21 +115,8 @@ object Main extends IOApp:
       case Cli.MetricsView.Readiness =>
         TokenMetrics.renderReadiness(backend.query(command.query))
       case Cli.MetricsView.Json =>
+        // Delegated, not restated: this branch used to carry its own copy of the
+        // encoding, and that copy silently lacked every field added after it.
         ujson.write(
-          ujson.Obj(
-            "events" -> backend.query(command.query).map { event =>
-              ujson.Obj(
-                "timestampMillis" -> event.timestampMillis,
-                "vendor" -> event.vendor.toString.toLowerCase,
-                "taskNumber" -> event.taskNumber.map(number => ujson.Num(number.value)).getOrElse(ujson.Null),
-                "model" -> event.model.map(ujson.Str(_)).getOrElse(ujson.Null),
-                "scope" -> event.scope,
-                "input" -> event.usage.input,
-                "output" -> event.usage.output,
-                "cacheRead" -> event.usage.cacheRead,
-                "cacheWrite" -> event.usage.cacheWrite,
-                "total" -> event.usage.total
-              )
-            }
-          )
+          ujson.Obj("events" -> backend.query(command.query).map(TokenMetrics.eventJson))
         )

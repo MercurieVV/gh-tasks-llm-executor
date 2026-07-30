@@ -543,28 +543,38 @@ object TokenMetrics:
         }
       (preamble :: header :: rows).mkString(System.lineSeparator())
 
-  private def writeEvent(event: TokenMetricsEvent): String =
-    ujson.write(
-      ujson.Obj(
-        "timestampMillis" -> ujson.Num(event.timestampMillis.toDouble),
-        "vendor" -> event.vendor.toString.toLowerCase,
-        "taskNumber" -> event.taskNumber.map(number => ujson.Num(number.value)).getOrElse(ujson.Null),
-        "model" -> event.model.map(ujson.Str(_)).getOrElse(ujson.Null),
-        "scope" -> event.scope,
-        "phase" -> event.phase.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
-        "runner" -> event.runner.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
-        "turnCount" -> event.turnCount.map(count => ujson.Num(count.toDouble)).getOrElse(ujson.Null),
-        "escalated" -> ujson.Bool(event.escalated),
-        "outcome" -> event.outcome.map(ujson.Str(_)).getOrElse(ujson.Null),
-        "usage" -> ujson.Obj(
-          "input" -> ujson.Num(event.usage.input.toDouble),
-          "output" -> ujson.Num(event.usage.output.toDouble),
-          "cacheRead" -> ujson.Num(event.usage.cacheRead.toDouble),
-          "cacheWrite" -> ujson.Num(event.usage.cacheWrite.toDouble),
-          "total" -> ujson.Num(event.usage.total.toDouble)
-        )
+  /** The one JSON encoding of an event, shared by the JSONL backend and the
+    * `metrics --json` view.
+    *
+    * `main.scala` hand-rolled its own copy of this, and that copy was missing
+    * `phase`, `runner`, `turnCount`, `escalated` and `outcome` — the same five
+    * fields `renderEvents` was missing, for the same reason: a second
+    * serialiser that nobody updates when the event grows. Two encodings of one
+    * record is a way for them to disagree, so there is now one.
+    */
+  def eventJson(event: TokenMetricsEvent): ujson.Obj =
+    ujson.Obj(
+      "timestampMillis" -> ujson.Num(event.timestampMillis.toDouble),
+      "vendor" -> event.vendor.toString.toLowerCase,
+      "taskNumber" -> event.taskNumber.map(number => ujson.Num(number.value)).getOrElse(ujson.Null),
+      "model" -> event.model.map(ujson.Str(_)).getOrElse(ujson.Null),
+      "scope" -> event.scope,
+      "phase" -> event.phase.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
+      "runner" -> event.runner.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
+      "turnCount" -> event.turnCount.map(count => ujson.Num(count.toDouble)).getOrElse(ujson.Null),
+      "escalated" -> ujson.Bool(event.escalated),
+      "outcome" -> event.outcome.map(ujson.Str(_)).getOrElse(ujson.Null),
+      "usage" -> ujson.Obj(
+        "input" -> ujson.Num(event.usage.input.toDouble),
+        "output" -> ujson.Num(event.usage.output.toDouble),
+        "cacheRead" -> ujson.Num(event.usage.cacheRead.toDouble),
+        "cacheWrite" -> ujson.Num(event.usage.cacheWrite.toDouble),
+        "total" -> ujson.Num(event.usage.total.toDouble)
       )
     )
+
+  private def writeEvent(event: TokenMetricsEvent): String =
+    ujson.write(eventJson(event))
 
   private def writeScalaTextToolCall(event: ScalaTextToolCallEvent): String =
     ujson.write(

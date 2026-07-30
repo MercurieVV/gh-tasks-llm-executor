@@ -131,11 +131,30 @@ The local viewer queries VictoriaMetrics unless `--backend=jsonl` or
 ```bash
 scala-cli run /path/to/gh-tasks-llm-executor -- metrics
 scala-cli run /path/to/gh-tasks-llm-executor -- metrics summary --vendor=codex
+scala-cli run /path/to/gh-tasks-llm-executor -- metrics readiness
 scala-cli run /path/to/gh-tasks-llm-executor -- metrics --task=123 --json
+```
+
+`metrics readiness` answers whether runner selection has anything to work with.
+`AgentInventory.selectRunnerFor` needs 20 recorded runs per `(phase, runner)`
+before `successRate` and `meanUsage` return a figure; below that it falls back to
+`Priority.score`, which is correct but looks identical to the ladder economics
+being switched off. This view reports how many events carry no phase/runner at
+all, and how many more each measured pair needs:
+
+```
+50 event(s), 50 without a phase/runner (invisible to runner selection), minSample=20
+No (phase, runner) pair is measured. Runner selection is falling back to Priority.score
+for every phase - the cost ratio and success rate are not being consulted at all.
 ```
 
 Supported filters: `--vendor`, `--task`/`--issue`, `--since`, `--until`,
 `--limit`, `--backend`, `--victoria-url`, and `--path` for the JSONL fallback.
+
+`--json` emits the same encoding the JSONL backend writes (`TokenMetrics.eventJson`),
+so token counts are nested under `usage` and every measurement dimension —
+`phase`, `runner`, `turnCount`, `escalated`, `outcome` — is present. It was a
+separate flat encoding until 2026-07-31, and that copy had none of those five.
 
 Metrics can still be persisted locally as JSONL at
 `.gh-tasks-llm-executor/token-metrics.jsonl` through
