@@ -16,3 +16,11 @@ class VerificationResultSuite extends munit.FunSuite:
       VerificationResult.Failed(RuntimeException("error")).escalationSeed,
       Some("error")
     )
+
+  test("asThrowable round-trips the original throwable for Failed"):
+    val original = RuntimeException("boom")
+    assertEquals(VerificationResult.Failed(original).asThrowable, original)
+    assertEquals(
+      VerificationResult.Red("summary", "detail").asThrowable.getMessage,
+      "summary\ndetail"
+    )

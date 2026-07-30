@@ -60,21 +60,25 @@ object BusinessLogicRetry:
     retryRunTaskWithRunner(routeRunnerFallback(progress), raiseK)(runTaskWithRunner)
 
   def retryRunTaskWithRunner[F[_]: Sync](
-      routeFallback: Flow[F][(PreparedTask, Throwable), Either[Throwable, PreparedTask]],
+      routeFallback: Flow[F][(PreparedTask, VerificationResult), Either[VerificationResult, PreparedTask]],
       raiseFailure: Flow[F][Throwable, ExecutedTask]
   )(
       runTaskWithRunner: Flow[F][PreparedTask, ExecutedTask]
   ): Flow[F][PreparedTask, ExecutedTask] =
-    Kleisli { task =>
-      runTaskWithRunner.run(task).attempt.flatMap {
-        case Right(result) => result.pure[F]
-        case Left(error) =>
-          routeFallback.run((task, error)).flatMap {
-            case Left(finalError) => raiseFailure.run(finalError)
-            case Right(fallbackTask) =>
-              runTaskWithRunner.run(fallbackTask)
-          }
-      }
+    Kleisli { initial =>
+      // A loop, not a single retry: the ladder can have more than two rungs, and
+      // `routeFallback` is what bounds it (see routeRunnerFallback's depth cap).
+      def loop(task: PreparedTask): F[ExecutedTask] =
+        runTaskWithRunner.run(task).attempt.flatMap {
+          case Right(result) => result.pure[F]
+          case Left(error) =>
+            routeFallback.run((task, VerificationResult.fromThrowable(error))).flatMap {
+              case Left(verdict)       => raiseFailure.run(verdict.asThrowable)
+              case Right(fallbackTask) => Sync[F].defer(loop(fallbackTask))
+            }
+        }
+
+      loop(initial)
     }
 
   def retryWithRepair[F[_]: Sync, A](
@@ -95,22 +99,50 @@ object BusinessLogicRetry:
       loop(initial)
     }
 
+  val MaxEscalationDepth = 2
+
   def routeRunnerFallback[F[_]: Sync](
       progress: String => F[Unit]
-  ): Flow[F][(PreparedTask, Throwable), Either[Throwable, PreparedTask]] =
-    Kleisli { case (task, error) =>
-      task.claimedTask.context.agentInventory
-        .nextStrongerImplementor(task.claimedTask.runner) match
-        case Some(fallbackRunner) =>
-          progress(
-            s"Runner ${task.claimedTask.runner.display} failed after retries: ${error.getMessage}. Retrying task #${task.claimedTask.task.number} with stronger fallback ${fallbackRunner.display}..."
-          ).as(
-            Right(task.copy(claimedTask = task.claimedTask.copy(runner = fallbackRunner)))
-          )
-        case None =>
-          progress(
-            s"Runner ${task.claimedTask.runner.display} failed after retries and no stronger fallback runner is available."
-          ).as(Left(error))
+  ): Flow[F][(PreparedTask, VerificationResult), Either[VerificationResult, PreparedTask]] =
+    Kleisli { case (task, verdict) =>
+      val claimed = task.claimedTask
+      val reason = verdict.escalationSeed.getOrElse("no detail reported")
+      if verdict.isGreen then
+        // Green must never reach this arrow. Return it unchanged rather than
+        // escalating a success into a paid re-run.
+        Left(verdict).pure[F]
+      else if task.escalationDepth >= MaxEscalationDepth then
+        progress(
+          s"Task #${claimed.task.number} still failing after $MaxEscalationDepth escalation(s): $reason. Giving up so a human can look at it."
+        ).as(Left(verdict))
+      else
+        claimed.context.agentInventory.nextStrongerImplementor(claimed.runner) match
+          case Some(fallbackRunner) =>
+            for
+              _ <- progress(
+                s"Runner ${claimed.runner.display} failed after retries: $reason. Retrying task #${claimed.task.number} with stronger fallback ${fallbackRunner.display}..."
+              )
+              // Before, not after: the stronger runner must start from HEAD, not
+              // from the cheap runner's half-finished edits.
+              _ <- Git[F](progress).resetWorktree(claimed.worktreePath).attempt.flatMap {
+                case Right(_) => Sync[F].unit
+                case Left(error) =>
+                  // A worktree we cannot clean is not a reason to abandon the
+                  // task — escalate anyway and say so.
+                  progress(
+                    s"Could not reset worktree ${claimed.worktreePath} before escalating: ${error.getMessage}"
+                  )
+              }
+            yield Right(
+              task.copy(
+                claimedTask = claimed.copy(runner = fallbackRunner),
+                escalationDepth = task.escalationDepth + 1
+              )
+            )
+          case None =>
+            progress(
+              s"Runner ${claimed.runner.display} failed after retries and no stronger fallback runner is available."
+            ).as(Left(verdict))
     }
 
   val MaxPullRequestChecksRepairAttempts = 2

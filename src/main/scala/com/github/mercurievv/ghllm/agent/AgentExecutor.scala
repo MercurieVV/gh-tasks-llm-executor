@@ -343,7 +343,14 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     )
     timedOut match
       case Some(reason) => throw RuntimeException(reason)
-      case None         => AgentResult(process.exitValue(), reportedOutput.output)
+      case None         =>
+        // Raised only after the metrics above are recorded: the over-budget turn
+        // count is exactly the sample the escalation ladder needs to learn from.
+        TurnCap.exceeded(reportedOutput.turnCount, TurnCap.load(metricsRootResolved)) match
+          case Some(breach) =>
+            TaskLogger.unsafeLlm(breach.getMessage)
+            throw breach
+          case None => AgentResult(process.exitValue(), reportedOutput.output)
 
   private def tokenUsageSource(
       runner: TaskRunner,

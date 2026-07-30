@@ -134,7 +134,12 @@ final case class ClaimedTask(
 final case class PreparedTask(
     claimedTask: ClaimedTask,
     parentConclusion: Option[String],
-    replayContext: Option[String]
+    replayContext: Option[String],
+    // How many times this leaf has already been escalated to a stronger runner.
+    // Bounded by BusinessLogicRetry.MaxEscalationDepth: past that, a task that
+    // keeps failing is a task no runner in the ladder can do, and further
+    // escalation only burns the most expensive tool available.
+    escalationDepth: Int = 0
 )
 
 /** Task after agent execution has produced terminal output to inspect and publish.

@@ -496,6 +496,33 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       call(worktreePath, "git", "merge", "--abort").attempt.void
     }
 
+  // Escalation hygiene: a failed cheap attempt leaves partial edits behind, and
+  // without discarding them the stronger runner inherits garbage and pays to
+  // untangle it (TOKEN_EFFICIENCY_PLAN.md §2 Stage 1, risk 2). Committed work is
+  // kept — this resets to HEAD, it does not rewind history.
+  def resetWorktree: Kleisli[F, os.Path, Unit] =
+    Kleisli.apply { worktreePath =>
+      requireLinkedWorktree(worktreePath) *>
+        progress(s"Discarding uncommitted changes in worktree $worktreePath") *>
+        call(worktreePath, "git", "reset", "--hard") *>
+        call(worktreePath, "git", "clean", "-fd")
+    }
+
+  // A guard, not politeness: `reset --hard` plus `clean -fd` aimed at the user's
+  // primary checkout would destroy their uncommitted work. A linked worktree has
+  // `.git` as a FILE (a `gitdir:` pointer); a primary checkout has it as a
+  // DIRECTORY, so that is the discriminator, and anything else fails loudly.
+  private def requireLinkedWorktree(worktreePath: os.Path): F[Unit] =
+    F.blocking(os.isFile(worktreePath / ".git")).flatMap {
+      case true => F.unit
+      case false =>
+        F.raiseError(
+          RuntimeException(
+            s"Refusing to reset $worktreePath: not a linked git worktree (no `.git` pointer file)."
+          )
+        )
+    }
+
   def cleanupWorktree: Kleisli[F, (os.Path, os.Path, BranchName), Unit] =
     Kleisli.apply { case (root, worktreePath, branchName) =>
       F.blocking(os.exists(worktreePath)).flatMap {

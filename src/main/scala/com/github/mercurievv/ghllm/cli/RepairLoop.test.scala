@@ -149,8 +149,65 @@ class AgentRunArrowsSuite extends CatsEffectSuite:
 
   test("with no stronger runner the failure propagates"):
     val retryingRunTask = BusinessLogicRetry.retryRunTaskWithRunner[IO](
-      routeFallback = Kleisli { case (_, error) => IO.pure(Left(error)) },
+      routeFallback = Kleisli { case (_, verdict) => IO.pure(Left(verdict)) },
       raiseFailure = Kleisli(IO.raiseError)
     )(Kleisli(_ => IO.raiseError(boom)))
 
+    // `Failed` must hand back the original throwable, not a rewrapped one.
     retryingRunTask.run(prepared(weak)).attempt.map(result => assertEquals(result, Left(boom)))
+
+  // A ladder needs both rungs available for nextStrongerImplementor to find one.
+  private def tool(agent: String) =
+    AgentTool(
+      id = AgentToolId(agent),
+      agent = Agent(agent),
+      model = None,
+      effort = None,
+      version = None,
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = Nil,
+      available = Available(true)
+    )
+
+  private val ladder = RunContext(os.pwd, AgentInventory(List(tool("cheap"), tool("strong"))), None)
+
+  private def onLadder(runner: TaskRunner, escalationDepth: Int = 0) =
+    PreparedTask(
+      ClaimedTask(ladder, issue, runner, os.pwd, BranchName("task-1"), None),
+      None,
+      None,
+      escalationDepth
+    )
+
+  private def route(task: PreparedTask, verdict: VerificationResult) =
+    Ref[IO].of(List.empty[String]).flatMap { messages =>
+      BusinessLogicRetry
+        .routeRunnerFallback[IO](message => messages.update(_ :+ message))
+        .run((task, verdict))
+        .flatMap(routed => messages.get.map(routed -> _))
+    }
+
+  test("a Red verdict escalates to a stronger runner and records the depth"):
+    route(onLadder(weak), VerificationResult.Red("turn cap exceeded", "26 turns")).map {
+      case (Right(escalated), seen) =>
+        assertEquals(escalated.claimedTask.runner.agent.value, "strong")
+        assertEquals(escalated.escalationDepth, 1)
+        // The Red's summary, not a throwable's message, is what reaches the log.
+        assert(seen.exists(_.contains("turn cap exceeded")))
+      case (Left(verdict), _) => fail(s"expected escalation, got $verdict")
+    }
+
+  test("escalation stops at depth 2"):
+    val verdict = VerificationResult.Red("still failing", "third attempt")
+    route(onLadder(weak, escalationDepth = BusinessLogicRetry.MaxEscalationDepth), verdict).map {
+      case (Left(returned), seen) =>
+        assertEquals(returned, verdict)
+        assert(seen.exists(_.contains("Giving up")))
+      case (Right(task), _) => fail(s"expected the cap to stop escalation, got ${task.claimedTask.runner.display}")
+    }
+
+  test("a Green verdict is returned unchanged rather than escalated"):
+    route(onLadder(weak), VerificationResult.Green).map { case (routed, _) =>
+      assertEquals(routed, Left(VerificationResult.Green))
+    }

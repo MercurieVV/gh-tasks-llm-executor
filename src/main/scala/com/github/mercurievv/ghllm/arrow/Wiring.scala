@@ -195,8 +195,8 @@ object Wiring:
       case ClaimedTask(_, task, runner, worktreePath, branchName, baseBranch) =>
         s"ClaimedTask(issue=#${task.number},runner=${runner.display},worktree=$worktreePath,branch=$branchName,base=${baseBranch
             .getOrElse("default")})"
-      case PreparedTask(run, parentConclusion, replayContext) =>
-        s"PreparedTask(issue=#${run.task.number},hasDependencyConclusion=${parentConclusion.nonEmpty},hasReplayContext=${replayContext.nonEmpty})"
+      case PreparedTask(run, parentConclusion, replayContext, escalationDepth) =>
+        s"PreparedTask(issue=#${run.task.number},hasDependencyConclusion=${parentConclusion.nonEmpty},hasReplayContext=${replayContext.nonEmpty},escalationDepth=$escalationDepth)"
       case ExecutedTask(run, output) =>
         s"ExecutedTask(issue=#${run.task.number},outputChars=${output.value.length})"
       case NeedsUserInput(run, questions) =>

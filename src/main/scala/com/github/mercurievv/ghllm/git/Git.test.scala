@@ -35,6 +35,40 @@ class GitSuite extends CatsEffectSuite:
     os.proc("git", "add", file).call(cwd = root)
     os.proc("git", "commit", "-q", "-m", message).call(cwd = root)
 
+  test("resetWorktree discards uncommitted and untracked work in a linked worktree"):
+    val (root, _) = repoWithOrigin()
+    val worktree = os.temp.dir(prefix = "git-reset-worktree") / "task-1"
+    os.proc("git", "worktree", "add", "-q", "-b", "task-1", worktree.toString).call(cwd = root)
+    os.write.over(worktree / "README.md", "modified\n")
+    os.write(worktree / "junk.txt", "left behind by a failed attempt\n")
+
+    Ref[IO].of(List.empty[String]).flatMap { messages =>
+      Git[IO](message => messages.update(_ :+ message))
+        .resetWorktree(worktree)
+        .map { _ =>
+          val status = os.proc("git", "status", "--porcelain").call(cwd = worktree).out.text().trim
+          assertEquals(status, "")
+          assertEquals(os.read(worktree / "README.md"), "seed\n")
+          assert(!os.exists(worktree / "junk.txt"))
+        }
+    }
+
+  test("resetWorktree refuses to touch a primary checkout"):
+    val (root, _) = repoWithOrigin()
+    os.write.over(root / "README.md", "uncommitted work the user cares about\n")
+
+    Ref[IO].of(List.empty[String]).flatMap { messages =>
+      Git[IO](message => messages.update(_ :+ message))
+        .resetWorktree(root)
+        .attempt
+        .map { result =>
+          assert(result.isLeft)
+          assert(result.left.toOption.exists(_.getMessage.contains("not a linked git worktree")))
+          // The guard must fail before doing anything, not after.
+          assertEquals(os.read(root / "README.md"), "uncommitted work the user cares about\n")
+        }
+    }
+
   test("pre-push hook failures are not mistaken for remote-moved branches"):
     val (root, _) = repoWithOrigin()
     val branch = BranchName("task-1")
