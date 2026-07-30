@@ -4,6 +4,9 @@ import cats.Applicative
 import cats.Eval
 import cats.Traverse
 import cats.syntax.all.*
+import higherkindness.droste.Algebra
+import higherkindness.droste.data.Mu
+import higherkindness.droste.scheme
 
 /** Pattern functor for a task tree.
   *
@@ -33,6 +36,26 @@ object TaskF:
   def childrenOf[P, A](node: TaskF[P, A]): List[A] = node match
     case Branch(_, children) => children
     case Leaf(_)             => Nil
+
+  /** Maps the payload of a single node. `A` is untouched — this is the other
+    * half of the bifunctor, the half `Traverse` cannot express.
+    */
+  def mapPayload[P, Q, A](node: TaskF[P, A])(f: P => Q): TaskF[Q, A] = node match
+    case Branch(payload, children) => Branch(f(payload), children)
+    case Leaf(payload)             => Leaf(f(payload))
+
+  /** Lifts [[mapPayload]] to a whole fixpoint tree.
+    *
+    * This is what lets one unfold feed differently-payloaded folds: the graph is
+    * discovered once at `TaskNode` and retagged to whatever identity a given
+    * analysis folds over, without re-walking GitHub.
+    */
+  def retag[P, Q](tree: Mu[[A] =>> TaskF[P, A]])(f: P => Q): Mu[[A] =>> TaskF[Q, A]] =
+    scheme
+      .cata[[A] =>> TaskF[P, A], Mu[[A] =>> TaskF[P, A]], Mu[[A] =>> TaskF[Q, A]]](
+        Algebra(node => Mu[[A] =>> TaskF[Q, A]](mapPayload(node)(f)))
+      )
+      .apply(tree)
 
   given [P]: Traverse[[A] =>> TaskF[P, A]] with
     def traverse[G[_]: Applicative, A, B](fa: TaskF[P, A])(f: A => G[B]): G[TaskF[P, B]] =

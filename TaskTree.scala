@@ -3,7 +3,9 @@ package com.github.mercurievv.ghllm
 import cats.{Eval, Functor}
 import cats.free.Cofree
 import com.github.mercurievv.ghllm.arrow.PrefixKey
+import com.github.mercurievv.ghllm.cli.TaskMetadata
 import com.github.mercurievv.ghllm.task.TaskF
+import com.github.mercurievv.ghllm.task.TaskGraph
 import higherkindness.droste.data.Mu
 
 object TaskTree:
@@ -54,10 +56,19 @@ object TaskTree:
         nonNegative(coefficients.outputTokens) * nonNegative(outputUsdPerMillionTokens)
       (inputCost + cachedInputCost + cacheWriteCost + outputCost) / TokensPerMillion
 
-  /** Stable identity of the raw node used to look up its measured profile. */
+  /** Stable identity of the raw node used to look up its measured profile.
+    *
+    * `Task` is deliberately shape-blind: a real issue is a branch when it still
+    * has open dependencies and a leaf when it does not, and that changes as work
+    * lands. Keying the profile on shape would make the same task price
+    * differently depending on when it was estimated. `phase` rides along because
+    * it is the fallback key — a task nobody has run yet has no measurement of its
+    * own, only its phase's.
+    */
   enum NodeRef:
     case Branch(name: String)
     case Leaf(task: Option[Int])
+    case Task(number: Int, phase: Option[String])
 
   /** Inputs that are inherited from measurement and prompt assembly, not invented by the fold.
     */
@@ -88,6 +99,20 @@ object TaskTree:
 
   def leaf(task: Option[Int]): Tree =
     Mu[Node](TaskF.Leaf(NodeRef.Leaf(task)))
+
+  /** Retags a tree unfolded from live issues into the identity the cost fold
+    * reads. The shape is preserved exactly — including the fact that a diamond
+    * dependency appears on both paths, so `subtreeUsd` is work-if-run rather
+    * than a deduplicated total.
+    */
+  def ofTaskGraph(tree: TaskGraph.Tree): Tree =
+    TaskF.retag(tree)(nodeRefOf)
+
+  def nodeRefOf(node: TaskNode): NodeRef =
+    NodeRef.Task(
+      node.issue.number.value,
+      TaskMetadata.parse(node.issue.body.value).phase.map(_.trim.toLowerCase).filter(_.nonEmpty)
+    )
 
   /** The plan's decision algebra: `TaskF[Cost] => Cost`. */
   def costAlgebra(

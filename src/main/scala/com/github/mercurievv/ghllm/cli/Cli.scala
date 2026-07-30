@@ -25,6 +25,54 @@ object Cli:
       view: MetricsView
   )
 
+  /** `estimate --task=N` — prices a plan before running it.
+    *
+    * Prices are flags rather than a built-in table: a wrong hardcoded price
+    * would still print a confident dollar figure. The rendered report repeats
+    * the prices it used.
+    */
+  final case class EstimateCommand(
+      task: TaskNumber,
+      path: os.Path,
+      backend: TokenMetrics.BackendKind,
+      victoriaUrl: String,
+      costModel: TaskTree.CostModel
+  )
+
+  val DefaultInputUsdPerMillionTokens = 3.0
+  val DefaultOutputUsdPerMillionTokens = 15.0
+
+  def parseEstimateCommand(args: List[String], root: os.Path = os.pwd): Option[EstimateCommand] =
+    args match
+      case "estimate" :: rest =>
+        parseTaskNumber(rest).map { task =>
+          EstimateCommand(
+            task = task,
+            path = optionValue(rest, "--path")
+              .map(value => os.Path(value, root))
+              .getOrElse(TokenMetrics.JsonlTokenMetricsBackend.defaultPath(root)),
+            backend = optionValue(rest, "--backend")
+              .flatMap(TokenMetrics.BackendKind.parse)
+              .orElse(
+                sys.env.get("GH_TASKS_TOKEN_METRICS_BACKEND").flatMap(TokenMetrics.BackendKind.parse)
+              )
+              .getOrElse(TokenMetrics.BackendKind.VictoriaMetrics),
+            victoriaUrl = optionValue(rest, "--victoria-url")
+              .orElse(sys.env.get("GH_TASKS_METRICS_VICTORIA_URL"))
+              .getOrElse(TokenMetrics.VictoriaMetricsBackend.defaultBaseUrl),
+            costModel = TaskTree.CostModel(
+              inputUsdPerMillionTokens = positiveDouble(rest, "--input-usd-per-mtok")
+                .getOrElse(DefaultInputUsdPerMillionTokens),
+              outputUsdPerMillionTokens = positiveDouble(rest, "--output-usd-per-mtok")
+                .getOrElse(DefaultOutputUsdPerMillionTokens)
+            )
+          )
+        }
+      case _ => None
+
+  private def positiveDouble(args: List[String], name: String): Option[Double] =
+    optionValue(args, name).flatMap(_.toDoubleOption).filter(value => value.isFinite && value >= 0.0)
+
   def parseTaskNumber(args: List[String]): Option[TaskNumber] =
     args
       .collectFirst {
@@ -74,7 +122,7 @@ object Cli:
           loop(tail, clean)
         case "--parallel" :: tail =>
           loop(tail, clean)
-        case "metrics" :: _ =>
+        case ("metrics" | "estimate") :: _ =>
           loop(Nil, clean)
         case head :: tail =>
           loop(tail, head :: clean)

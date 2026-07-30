@@ -77,28 +77,103 @@ class TaskTreeSuite extends ScalaCheckSuite:
     assertEquals(result.nodeCount, 3)
     assertEqualsDouble(result.estimatedPerNodeUsd, 0.5, 1e-12)
 
-  property("adding a sibling to a fan-out never increases estimated per-node cost"):
-    forAll(Gen.choose(0.0, 10000000.0), Gen.choose(1, 100)) { (inputTokens, siblingCount) =>
-      val rootProfile =
-        NodeProfile(
-          prefix("fan-out"),
-          "implement",
-          zeroCoefficients.copy(inputTokens = inputTokens)
-        )
-      val leafProfile = NodeProfile(prefix("leaf"), "test", zeroCoefficients)
-      val profileFor: NodeRef => NodeProfile =
-        case NodeRef.Branch("fan-out") => rootProfile
-        case _                         => leafProfile
-      val siblings = List.tabulate(siblingCount)(index => leaf(Some(index)))
-      val before = branch("fan-out", siblings)
-      val after = branch("fan-out", siblings :+ leaf(Some(Int.MaxValue)))
-      val beforeCost = estimate(before, model, profileFor)
-      val afterCost = estimate(after, model, profileFor)
+  // The property this replaces asserted that adding a sibling never increases
+  // estimated per-node cost. That holds by construction and cannot fail:
+  // estimatedPerNodeUsd is ownUsd / fanOut, and ownUsd does not read children
+  // at all, so the numerator is fixed while the denominator only grows. The
+  // properties below can fail, and each one names a specific way the fold
+  // could be wrong.
+
+  /** Random trees, so the properties are not tested only against fan-outs. */
+  private def genTree(depth: Int): Gen[Tree] =
+    if depth <= 0 then Gen.choose(0, 50).map(index => leaf(Some(index)))
+    else
+      Gen.oneOf(
+        Gen.choose(0, 50).map(index => leaf(Some(index))),
+        for
+          width <- Gen.choose(1, 4)
+          name <- Gen.choose(0, 50).map(index => s"branch-$index")
+          children <- Gen.listOfN(width, genTree(depth - 1))
+        yield branch(name, children)
+      )
+
+  private def genCoefficients: Gen[Stage0Coefficients] =
+    for
+      input <- Gen.choose(0.0, 1000000.0)
+      cached <- Gen.choose(0.0, 1000000.0)
+      written <- Gen.choose(0.0, 1000000.0)
+      output <- Gen.choose(0.0, 100000.0)
+    yield Stage0Coefficients(input, cached, written, output, 1.0)
+
+  /** Every node priced independently of the tree, keyed by its own NodeRef. */
+  private def pricing(seed: Int): NodeRef => NodeProfile =
+    ref =>
+      val magnitude = math.abs(ref.hashCode % 1000).toDouble * seed.toDouble
+      NodeProfile(
+        prefix(ref.toString),
+        "implement",
+        zeroCoefficients.copy(inputTokens = magnitude, outputTokens = magnitude / 2.0)
+      )
+
+  property("subtreeUsd is the sum of every node's own cost, counted exactly once"):
+    // Cross-checked against an independent fold rather than restating the
+    // recursion: this fails on double-counting and on a dropped subtree, which
+    // the previous property could not detect.
+    forAll(genTree(3), Gen.choose(1, 5)) { (tree, seed) =>
+      val profileFor = pricing(seed)
+      val total = estimate(tree, model, profileFor).subtreeUsd
+      val perNode =
+        scheme
+          .cata[Node, Tree, List[Double]](
+            Algebra(node =>
+              model.estimate(profileFor(TaskF.payloadOf(node)).coefficients) ::
+                TaskF.childrenOf(node).flatten
+            )
+          )
+          .apply(tree)
+
+      assertEqualsDouble(total, perNode.sum, 1e-9)
+      assertEquals(estimate(tree, model, profileFor).nodeCount, perNode.size)
+    }
+
+  property("attaching a subtree never lowers the plan's total cost"):
+    forAll(genTree(2), genTree(2), Gen.choose(1, 5)) { (tree, extra, seed) =>
+      val profileFor = pricing(seed)
+      val before = branch("root", List(tree))
+      val after = branch("root", List(tree, extra))
 
       assert(
-        afterCost.estimatedPerNodeUsd <= beforeCost.estimatedPerNodeUsd,
-        s"${afterCost.estimatedPerNodeUsd} was greater than ${beforeCost.estimatedPerNodeUsd}"
+        estimate(after, model, profileFor).subtreeUsd >=
+          estimate(before, model, profileFor).subtreeUsd,
+        "adding work reduced the estimate"
       )
+    }
+
+  property("per-node allocation neither invents nor loses cost"):
+    // The real content of estimatedPerNodeUsd: it splits *this node's* cost
+    // across its fan-out. Fails if allocation ever starts folding in children.
+    forAll(genTree(3), Gen.choose(1, 5)) { (tree, seed) =>
+      val cost = estimate(tree, model, pricing(seed))
+      val fanOut = TaskF.childrenOf(Mu.un(tree)).size.max(1)
+
+      assertEqualsDouble(cost.estimatedPerNodeUsd * fanOut, cost.ownUsd, 1e-9)
+    }
+
+  property("garbage coefficients cannot produce a garbage estimate"):
+    // NaN and negatives are reachable: coefficients are averages over recorded
+    // events, and an empty or malformed sample divides by zero.
+    val poison = List(Double.NaN, Double.PositiveInfinity, Double.NegativeInfinity, -1.0e9)
+    forAll(genTree(2), Gen.oneOf(poison), genCoefficients) { (tree, bad, good) =>
+      val profileFor: NodeRef => NodeProfile =
+        ref =>
+          val coefficients =
+            if ref.hashCode % 2 == 0 then good.copy(inputTokens = bad, outputTokens = bad)
+            else good
+          NodeProfile(prefix(ref.toString), "implement", coefficients)
+      val cost = estimate(tree, model, profileFor)
+
+      assert(cost.subtreeUsd.isFinite && cost.subtreeUsd >= 0.0, s"got ${cost.subtreeUsd}")
+      assert(cost.ownUsd.isFinite && cost.ownUsd >= 0.0, s"got ${cost.ownUsd}")
     }
 
   test("cata annotation carries each node's PrefixKey, tier, and cost"):

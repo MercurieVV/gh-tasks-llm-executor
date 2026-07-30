@@ -6,12 +6,14 @@ import com.github.mercurievv.ghllm.arrow.*
 import com.github.mercurievv.ghllm.cli.*
 import com.github.mercurievv.ghllm.git.*
 import com.github.mercurievv.ghllm.metrics.*
+import com.github.mercurievv.ghllm.task.*
 
 import arrowstep.runtime.AgentMain
 import cats.effect.ExitCode
 import cats.effect.IO
 import cats.effect.IOApp
 import cats.effect.Ref
+import cats.syntax.all.*
 
 /** Body text of a GitHub issue after task metadata has been merged in. */
 opaque type IssueBody = String
@@ -37,35 +39,74 @@ object Main extends IOApp:
       case Some(command) =>
         IO.blocking(renderMetrics(command)).flatMap(IO.println).as(ExitCode.Success)
       case None =>
-        val input = AppInput(
-          os.pwd,
-          Cli.parseTaskNumber(args),
-          Cli.parseRecursiveFlag(args),
-          Cli.parseParallelFlag(args)
-        )
-        AgentMain
-          .run[IO](Cli.removeScriptArgs(args), os.pwd)(_ =>
-            Ref[IO]
-              .of(Map.empty[TaskNumber, Issue])
-              .flatMap(openIssues =>
-                Wiring
-                  .businessLogic[IO]
-                  .program
-                  .run(input)
-                  .run(RunEnv(openIssues))
-              )
+        Cli.parseEstimateCommand(args, os.pwd) match
+          case Some(command) => runEstimate(command)
+          case None          => runProgram(args)
+
+  private def runProgram(args: List[String]): IO[ExitCode] =
+    val input = AppInput(
+      os.pwd,
+      Cli.parseTaskNumber(args),
+      Cli.parseRecursiveFlag(args),
+      Cli.parseParallelFlag(args)
+    )
+    AgentMain
+      .run[IO](Cli.removeScriptArgs(args), os.pwd)(_ =>
+        Ref[IO]
+          .of(Map.empty[TaskNumber, Issue])
+          .flatMap(openIssues =>
+            Wiring
+              .businessLogic[IO]
+              .program
+              .run(input)
+              .run(RunEnv(openIssues))
           )
-          .flatMap { outcome =>
-            IO.print(outcome.stdout) *>
-              IO.pure(ExitCode(outcome.exitCode))
-          }
+      )
+      .flatMap { outcome =>
+        IO.print(outcome.stdout) *>
+          IO.pure(ExitCode(outcome.exitCode))
+      }
+
+  /** Prices a plan without running it. Read-only: it fetches issues and folds
+    * the same dependency tree the executor would walk, and stops there.
+    */
+  private def runEstimate(command: Cli.EstimateCommand): IO[ExitCode] =
+    val root = os.pwd
+    for
+      context <- Impl.resolveContext[IO].run(AppInput(root, Some(command.task), Recursive(true), ParallelExecution(false)))
+      rawIssues <- GitHub.fetchIssues[IO](root)
+      issues <- rawIssues.traverse(Impl.effectiveIssue[IO](root, _))
+      target = issues.find(_.number === command.task)
+      exit <- target match
+        case None =>
+          IO.println(s"Task #${command.task.value} is not an open issue.").as(ExitCode.Error)
+        case Some(issue) =>
+          for
+            openIssues <- Ref[IO].of(issues.map(task => task.number -> task).toMap)
+            backend <- IO.blocking(metricsBackend(command.backend, command.path, command.victoriaUrl))
+            events <- IO.blocking(backend.query(TokenMetrics.TokenMetricsQuery(limit = None)))
+            annotated <- PlanEstimate
+              .annotate[IO](
+                TaskNode(context, issue),
+                command.costModel,
+                NodeProfiles.fromEvents(events, root)
+              )
+              .run(RunEnv(openIssues))
+            _ <- IO.println(PlanEstimate.render(annotated, command.costModel))
+          yield ExitCode.Success
+    yield exit
+
+  private def metricsBackend(
+      kind: TokenMetrics.BackendKind,
+      path: os.Path,
+      victoriaUrl: String
+  ): TokenMetrics.TokenMetricsBackend =
+    kind match
+      case TokenMetrics.BackendKind.VictoriaMetrics => TokenMetrics.VictoriaMetricsBackend(victoriaUrl)
+      case TokenMetrics.BackendKind.Jsonl           => TokenMetrics.JsonlTokenMetricsBackend(path)
 
   private def renderMetrics(command: Cli.MetricsCommand): String =
-    val backend = command.backend match
-      case TokenMetrics.BackendKind.VictoriaMetrics =>
-        TokenMetrics.VictoriaMetricsBackend(command.victoriaUrl)
-      case TokenMetrics.BackendKind.Jsonl =>
-        TokenMetrics.JsonlTokenMetricsBackend(command.path)
+    val backend = metricsBackend(command.backend, command.path, command.victoriaUrl)
     command.view match
       case Cli.MetricsView.Events =>
         TokenMetrics.renderEvents(backend.query(command.query))
