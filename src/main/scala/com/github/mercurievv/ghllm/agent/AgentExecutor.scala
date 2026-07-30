@@ -16,9 +16,11 @@ import java.io.InputStreamReader
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import scala.collection.mutable.StringBuilder
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
+import scala.util.Try
 
 type Output = AgentOutput
 
@@ -44,7 +46,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       contextFiles: Seq[String] = Nil,
       taskNumber: Option[TaskNumber] = None,
       metricsRoot: Option[os.Path] = None,
-      metricsScope: String = "agent"
+      metricsScope: String = "agent",
+      deferMetricsOutcome: Boolean = false
   ): F[Output] =
     runAttempt(
       runner,
@@ -56,6 +59,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       taskNumber,
       metricsRoot,
       metricsScope,
+      deferMetricsOutcome,
       attempt = 1
     )
 
@@ -69,6 +73,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       taskNumber: Option[TaskNumber],
       metricsRoot: Option[os.Path],
       metricsScope: String,
+      deferMetricsOutcome: Boolean,
       attempt: Int
   ): F[Output] =
     for
@@ -85,7 +90,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
           contextFiles,
           taskNumber,
           metricsRoot,
-          metricsScope
+          metricsScope,
+          deferMetricsOutcome
         )
       )
       output = result.output
@@ -115,6 +121,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
               taskNumber,
               metricsRoot,
               metricsScope,
+              deferMetricsOutcome,
               attempt + 1
             )
         else
@@ -176,7 +183,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       contextFiles: Seq[String],
       taskNumber: Option[TaskNumber],
       metricsRoot: Option[os.Path],
-      metricsScope: String
+      metricsScope: String,
+      deferMetricsOutcome: Boolean
   ): AgentResult =
     val started = System.currentTimeMillis()
     val metricsRootResolved = metricsRoot.getOrElse(TokenMetrics.defaultRootForWorktree(cwd))
@@ -184,6 +192,28 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     val metricsVendor = TokenMetrics.parseVendor(runner.agent.value)
     val usageSource = tokenUsageSource(runner, cwd)
     val beforeUsage = usageSource.flatMap(_.current())
+    if deferMetricsOutcome then
+      for
+        vendor <- metricsVendor
+        number <- taskNumber
+      do
+        AgentExecutor.deferTokenMetrics(
+          metricsRootResolved,
+          number,
+          runner,
+          metricsScope,
+          metricsBackend,
+          TokenMetrics.TokenMetricsEvent(
+            timestampMillis = started,
+            vendor = vendor,
+            usage = TokenUsage.TokenSnapshot.Zero,
+            taskNumber = taskNumber,
+            model = runner.model,
+            scope = metricsScope,
+            phase = Some(metricsScope),
+            runner = Some(runner.display)
+          )
+        )
     val metricsSource =
       if usageSource.nonEmpty then "session"
       else
@@ -197,13 +227,18 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     val lastActivity = AtomicLong(started)
     val output = StringBuilder()
     val promptForRun = runner.effectivePrompt(prompt, allowedTools, cwd = Some(cwd))
-    val command = runner.command(promptForRun, allowedTools, jsonSchema, cwd = Some(cwd), contextFiles = contextFiles)
+    val command = commandWithReporting(
+      runner,
+      runner.command(promptForRun, allowedTools, jsonSchema, cwd = Some(cwd), contextFiles = contextFiles)
+    )
     TaskLogger.unsafeTrace(
       s"agent command cwd=$cwd args=${commandForLog(command, promptForRun)} promptChars=${promptForRun.value.length}"
     )
-    val process = ProcessBuilder(command*)
-      .directory(cwd.toIO)
-      .start()
+    val processBuilder = ProcessBuilder(command*).directory(cwd.toIO)
+    runner.invocationEnvironment.foreach { case (name, value) =>
+      processBuilder.environment().put(name, value)
+    }
+    val process = processBuilder.start()
     process.getOutputStream.close()
     val runLogDir =
       os.RelPath(s"agent-${process.pid()}-${fileSafe(runner.agent)}")
@@ -274,21 +309,23 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     stdout.join(TimeUnit.SECONDS.toMillis(5))
     stderr.join(TimeUnit.SECONDS.toMillis(5))
 
-    val result =
-      timedOut match
-        case Some(reason) => throw RuntimeException(reason)
-        case None         => AgentResult(process.exitValue(), AgentOutput(output.toString))
+    val reportedOutput = parseReportedOutput(runner, AgentOutput(output.toString))
     recordTokenMetrics(
       runner = runner,
       taskNumber = taskNumber,
+      metricsRoot = metricsRootResolved,
       metricsScope = metricsScope,
       metricsBackend = metricsBackend,
       metricsVendor = metricsVendor,
       usageSource = usageSource,
       beforeUsage = beforeUsage,
-      output = result.output
+      output = reportedOutput.output,
+      turnCount = reportedOutput.turnCount,
+      deferMetricsOutcome = deferMetricsOutcome
     )
-    result
+    timedOut match
+      case Some(reason) => throw RuntimeException(reason)
+      case None         => AgentResult(process.exitValue(), reportedOutput.output)
 
   private def tokenUsageSource(
       runner: TaskRunner,
@@ -302,14 +339,17 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
   private def recordTokenMetrics(
       runner: TaskRunner,
       taskNumber: Option[TaskNumber],
+      metricsRoot: os.Path,
       metricsScope: String,
       metricsBackend: TokenMetrics.TokenMetricsBackend,
       metricsVendor: Option[TokenUsage.Vendor],
       usageSource: Option[TokenUsage.TokenUsageSource],
       beforeUsage: Option[TokenUsage.TokenSnapshot],
-      output: Output
+      output: Output,
+      turnCount: Option[Int],
+      deferMetricsOutcome: Boolean
   ): Unit =
-    val usage =
+    val usage: Option[TokenUsage.TokenSnapshot] =
       usageSource
         .flatMap(_.current())
         .map(afterUsage => beforeUsage.fold(afterUsage)(before => afterUsage - before))
@@ -329,11 +369,25 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
             usage = usage,
             taskNumber = taskNumber,
             model = runner.model,
-            scope = metricsScope
+            scope = metricsScope,
+            phase = Some(metricsScope),
+            runner = Some(runner.display),
+            turnCount = turnCount
           )
-          metricsBackend.record(event)
+          if deferMetricsOutcome then
+            taskNumber.foreach(number =>
+              AgentExecutor.deferTokenMetrics(
+                metricsRoot,
+                number,
+                runner,
+                metricsScope,
+                metricsBackend,
+                event
+              )
+            )
+          else metricsBackend.record(event)
           TaskLogger.unsafeTrace(
-            s"token metrics recorded agent=${runner.agent.value} vendor=${vendor.toString.toLowerCase} model=${runner.model
+            s"token metrics ${if deferMetricsOutcome then "staged" else "recorded"} agent=${runner.agent.value} vendor=${vendor.toString.toLowerCase} model=${runner.model
                 .getOrElse("-")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} destination=${metricsBackend.destination} usage=${TokenMetrics
                 .renderSummary(usage)}"
           )
@@ -376,6 +430,33 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
           line = reader.readLine()
       finally reader.close()
     }
+
+  private final case class ReportedOutput(output: Output, turnCount: Option[Int])
+
+  private def commandWithReporting(runner: TaskRunner, command: Seq[String]): Seq[String] =
+    if runner.agent.value === "claude" && !command.exists(_.startsWith("--output-format")) then
+      val promptIndex = command.indexOf("-p")
+      command.patch(if promptIndex >= 0 then promptIndex else command.size, Seq("--output-format", "json"), 0)
+    else command
+
+  private def parseReportedOutput(runner: TaskRunner, output: Output): ReportedOutput =
+    if runner.agent.value =!= "claude" then ReportedOutput(output, None)
+    else
+      val json =
+        Try(ujson.read(output.value.trim)).toOption.orElse(
+          output.value.linesIterator.toList.reverseIterator
+            .flatMap(line => Try(ujson.read(line)).toOption)
+            .nextOption()
+        )
+      val obj = json.flatMap(_.objOpt)
+      val result = obj.flatMap(_.get("result")).flatMap(_.strOpt).map(AgentOutput.apply).getOrElse(output)
+      val turnCount =
+        obj
+          .flatMap(_.get("num_turns"))
+          .flatMap(_.numOpt)
+          .map(_.toInt)
+          .filter(_ >= 0)
+      ReportedOutput(result, turnCount)
 
   private def worktreeStatus(cwd: os.Path): String =
     scala.util
@@ -445,4 +526,66 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     }
 
 object AgentExecutor:
+  private final case class MetricsKey(
+      root: os.Path,
+      taskNumber: TaskNumber,
+      runner: String,
+      scope: String
+  )
+
+  private final case class PendingTokenMetrics(
+      backend: TokenMetrics.TokenMetricsBackend,
+      event: TokenMetrics.TokenMetricsEvent
+  )
+
+  private val pendingTokenMetrics =
+    AtomicReference(Map.empty[MetricsKey, PendingTokenMetrics])
+
+  private def deferTokenMetrics(
+      root: os.Path,
+      taskNumber: TaskNumber,
+      runner: TaskRunner,
+      scope: String,
+      backend: TokenMetrics.TokenMetricsBackend,
+      event: TokenMetrics.TokenMetricsEvent
+  ): Unit =
+    val key = MetricsKey(root, taskNumber, runner.display, scope)
+    pendingTokenMetrics.updateAndGet { current =>
+      current.updatedWith(key) {
+        case Some(existing) =>
+          val turns =
+            (existing.event.turnCount, event.turnCount) match
+              case (Some(left), Some(right)) => Some(left + right)
+              case (left @ Some(_), None)    => left
+              case (None, right)             => right
+          Some(
+            existing.copy(
+              event = existing.event.copy(
+                usage = existing.event.usage + event.usage,
+                turnCount = turns
+              )
+            )
+          )
+        case None => Some(PendingTokenMetrics(backend, event))
+      }
+    }
+    ()
+
+  def completeTokenMetrics[F[_]: Sync](
+      root: os.Path,
+      taskNumber: TaskNumber,
+      runner: TaskRunner,
+      scope: String,
+      outcome: String
+  ): F[Unit] =
+    Sync[F].blocking {
+      val key = MetricsKey(root, taskNumber, runner.display, scope)
+      val removed = pendingTokenMetrics.getAndUpdate(_ - key).get(key)
+      removed.foreach(pending =>
+        pending.backend.record(
+          pending.event.copy(outcome = Some(outcome))
+        )
+      )
+    }
+
   def apply[F[_]: Sync]: AgentExecutor[F] = new AgentExecutor[F]
