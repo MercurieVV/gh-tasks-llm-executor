@@ -20,7 +20,7 @@ around them is older than the code.
 | T13–T15 | done | `Impl.ScalaSemanticMandate`; memoised `refreshSemanticDbIfNeeded`; `ScalaTextToolCallEvent` |
 | T16 | done | `TurnCap` (default 25) raises `TurnCapExceeded`, which becomes a `Red` |
 | T17 | done | `TaskArtifact.bound` enforced in `GitHub.renderDependencyConclusions` — the contract existed unused until it was wired there |
-| T18 | done as data only, trimmed | `PrefixKey(runner, model, worktree)` is built in `NodeProfiles` for cost attribution; nothing caches on it. Its `stablePrefixHash` was deleted 2026-07-31 — see the amendment under T18 |
+| T18 | done, and now read | `PrefixKey(runner, model, worktree)` is built in `NodeProfiles` and decides which children amortise a parent's prefix in `TaskTree.foldNode`. Nothing caches on it *at run time* — that is still Stage 6. `stablePrefixHash` deleted 2026-07-31; the surviving fields wired into the cost fold the same day. See both amendments under T18 |
 | T19 | done | `Impl.taskPrompt` is ordered most-stable-first; `PromptSegmentOrderSuite` pins it |
 | T20 | done for `claude`, both paths | `markCachePeers` (root batch) and `collectPendingDependencies` (a split's siblings) mark ≥3 same-`(agent, model)` peers → `ENABLE_PROMPT_CACHING_1H` in the subprocess env. Independent of `--parallel`: the window outlives the run. Still a no-op for non-`claude` agents |
 | T21–T22 | done | `TaskF`, `TaskGraph.coalgebra`, `TaskTree.costAlgebra`, `annotate` |
@@ -546,6 +546,22 @@ runs share a cached prefix is `(agent, model)` — the key `CachePeers`/T20 grou
 A hash keying nothing is not free: it is a field readers must reason about, and one
 that invites re-deriving the wrong grouping. Deleted along with `PrefixKey.of` and the
 five hash tests; `NodeProfilesSuite` now asserts the same-phase grouping on `tier`.
+
+**Amended 2026-07-31 — the remaining three fields now key something.** After the hash
+went, `PrefixKey` was still read by nobody: `NodeProfiles` built it, `NodeProfile` and
+`TaskTree.Attr` carried it, and neither `foldNode` nor `PlanEstimate.render` touched it.
+The same was true of `Cost.estimatedPerNodeUsd` — computed, never printed, asserted only
+by its own tests. They were one dead feature, not two: the per-node figure is the
+shared-prefix allocation, and `PrefixKey` is what decides who shares.
+
+`estimatedPerNodeUsd` divided a node's cost by its raw fan-out, i.e. assumed every child
+reuses the parent's cached prefix. It now divides by the count of children whose
+`PrefixKey` matches, so a fan-out across runners is priced as the serial work it is. That
+also makes the estimator agree with runtime, where `CachePeers` grants the extended TTL
+only to siblings sharing an `(agent, model)`. `PrefixKey` moved onto `Cost` (a child is
+folded to a `Cost` before its parent is priced, so the key has to travel upward) and off
+`Attr`, which held a duplicate. `PlanEstimate.render` prints `per-node=`; when it equals
+`own=`, nothing in that fan-out shares a prefix.
 
 ## T19 — Order assembled prompts most-stable-first
 
