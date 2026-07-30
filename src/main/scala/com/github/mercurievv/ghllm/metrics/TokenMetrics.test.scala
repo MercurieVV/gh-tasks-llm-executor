@@ -54,8 +54,85 @@ class TokenMetricsSuite extends munit.FunSuite:
       )
     )
 
-    assert(rendered.contains("timestampMillis vendor task model scope input output cacheRead cacheWrite total"))
-    assert(rendered.contains("1000 gemini - - quota 1 2 3 4 10"))
+    assert(
+      rendered.contains(
+        "timestampMillis vendor task model scope phase runner turns escalated outcome " +
+          "input output cacheRead cacheWrite total"
+      )
+    )
+    assert(rendered.contains("1000 gemini - - quota - - - false - 1 2 3 4 10"))
+
+  test("renderEvents shows the dimensions runner selection actually reads"):
+    // The regression this pins: `phase`, `runner`, `turnCount`, `escalated` and
+    // `outcome` were recorded and exported for two days while every event had
+    // them empty, and the only local view of the data showed none of them.
+    val rendered = TokenMetrics.renderEvents(
+      List(
+        TokenMetrics.TokenMetricsEvent(
+          timestampMillis = 1000,
+          vendor = TokenUsage.Vendor.Claude,
+          usage = TokenUsage.TokenSnapshot(input = 1, output = 2, cacheRead = 3, cacheWrite = 4, total = 10),
+          taskNumber = Some(TaskNumber(4)),
+          model = Some("haiku"),
+          scope = "agent-run",
+          phase = Some("implement"),
+          runner = Some("claude/haiku"),
+          turnCount = Some(6),
+          escalated = true,
+          outcome = Some("green")
+        )
+      )
+    )
+
+    assert(rendered.contains("implement"), rendered)
+    assert(rendered.contains("claude/haiku"), rendered)
+    assert(rendered.contains("1000 claude 4 haiku agent-run implement claude/haiku 6 true green 1 2 3 4 10"), rendered)
+
+  test("readiness names the gap between recorded events and a usable sample"):
+    def event(phase: Option[String], runner: Option[String], outcome: Option[String]) =
+      TokenMetrics.TokenMetricsEvent(
+        timestampMillis = 1000,
+        vendor = TokenUsage.Vendor.Claude,
+        usage = TokenUsage.TokenSnapshot.Zero,
+        taskNumber = None,
+        model = None,
+        scope = "agent-run",
+        phase = phase,
+        runner = runner,
+        outcome = outcome
+      )
+
+    // Three shapes at once: enough events to price but not to rate (outcome
+    // missing on most), and events with no dimensions at all - the exact shape
+    // every event recorded before 2026-07-31 had.
+    val events =
+      List.fill(4)(event(Some("implement"), Some("claude/haiku"), Some("green"))) ++
+        List.fill(2)(event(Some("implement"), Some("claude/haiku"), None)) ++
+        List.fill(3)(event(None, None, None))
+
+    val rendered = TokenMetrics.renderReadiness(events, minSample = 5)
+
+    assert(rendered.contains("9 event(s), 3 without a phase/runner"), rendered)
+    assert(rendered.contains("minSample=5"), rendered)
+    // 6 dimensioned events clears minSample for cost; only 4 carry an outcome.
+    assert(rendered.contains("implement claude/haiku 6 yes 4 no (1 more)"), rendered)
+
+  test("readiness says so when nothing is measured, rather than printing an empty table"):
+    val events = List(
+      TokenMetrics.TokenMetricsEvent(
+        timestampMillis = 1000,
+        vendor = TokenUsage.Vendor.Codex,
+        usage = TokenUsage.TokenSnapshot.Zero,
+        taskNumber = None,
+        model = None,
+        scope = "agent-run"
+      )
+    )
+
+    val rendered = TokenMetrics.renderReadiness(events)
+
+    assert(rendered.contains("No (phase, runner) pair is measured"), rendered)
+    assert(rendered.contains("Priority.score"), rendered)
 
   test("Aider output token line parses as a token snapshot"):
     val output =

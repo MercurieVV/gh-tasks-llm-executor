@@ -116,6 +116,35 @@ both evaluation prompts — replaced 2026-07-31 by
 No before/after payoff measurement exists yet — Stage 0 records the dimensions,
 but nothing has been run long enough to compare.
 
+### Why there is no payoff data (verified against the backend, 2026-07-31)
+
+Checked rather than assumed, because "blocked on run data" and "silently
+recording nothing" look identical from inside the code.
+
+- **The pipeline works.** VictoriaMetrics is up and holds 562 datapoints across
+  150 series. A probe emitting the exact attribute set of
+  `VictoriaMetricsBackend.attributes` came back with every label intact,
+  including the boolean `escalated` — so nothing is dropped at ingestion.
+- **Every stored point predates the dimensions.** `Attribute("runner", …)`
+  reached `master` in the PR #71 merge at 2026-07-30 13:19. The last event
+  recorded anywhere was 11:04 the same day. Not one run has happened on a build
+  that emits `phase`/`runner`, which is why `successRate` and `meanUsage` have
+  never returned anything but `None`.
+- **`metrics readiness` now says this out loud.** It reports events without a
+  phase/runner and, per measured pair, how many more are needed for `minSample`.
+  Against the live backend today it prints "50 event(s), 50 without a
+  phase/runner". Before it existed, the only local view (`renderEvents`) showed
+  none of the five dimensions, which is how two days of empty ones went unnoticed.
+- **Runner-level dispatch was the larger waste.** 1343 agent dispatches, 271
+  recorded events (14.6%). 1300 of those dispatches were aider, of which 1156
+  produced no usage at all — aider's DeepSeek key returned `Insufficient
+  Balance`, and the executor re-dispatched it ~1150 times. Already fixed by
+  `3af6ad4` (07-30 12:45, `terminationReason` treats billing failures as fatal)
+  plus the `hardExhausted` exclusion in `AgentInventory.parseTool`. Both landed
+  after the wasted runs and, like the labels, have not yet met a live run.
+
+The blocker is therefore a single executor run on current `master`, not code.
+
 ## How to read a task
 
 | Field | Meaning |

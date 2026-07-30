@@ -15,7 +15,7 @@ import scala.util.Try
 /** Command-line surface: raw `args` in, typed program input out. */
 object Cli:
   enum MetricsView:
-    case Events, Summary, Json
+    case Events, Summary, Json, Readiness
 
   final case class MetricsCommand(
       path: os.Path,
@@ -133,6 +133,7 @@ object Cli:
     val view =
       if args.contains("--json") then MetricsView.Json
       else if args.contains("summary") || args.contains("--summary") then MetricsView.Summary
+      else if args.contains("readiness") || args.contains("--readiness") then MetricsView.Readiness
       else MetricsView.Events
 
     val path = optionValue(args, "--path")

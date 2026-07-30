@@ -463,10 +463,18 @@ object TokenMetrics:
       s"total=${snapshot.total}"
     ).mkString(" ")
 
+  // The measurement dimensions are printed, not just stored. Between
+  // 2026-07-29 and 2026-07-31 every recorded event carried an empty `phase` and
+  // `runner`, and nothing noticed, because this was the only view of the data
+  // and it showed neither. A dimension that drives runner selection but is
+  // invisible to the operator fails silently for as long as nobody queries the
+  // backend by hand.
   def renderEvents(events: List[TokenMetricsEvent]): String =
     if events.isEmpty then "No token metrics found."
     else
-      val header = "timestampMillis vendor task model scope input output cacheRead cacheWrite total"
+      val header =
+        "timestampMillis vendor task model scope phase runner turns escalated outcome " +
+          "input output cacheRead cacheWrite total"
       val rows = events.map { event =>
         List(
           event.timestampMillis.toString,
@@ -474,6 +482,11 @@ object TokenMetrics:
           event.taskNumber.map(_.value.toString).getOrElse("-"),
           event.model.getOrElse("-"),
           event.scope,
+          event.phase.getOrElse("-"),
+          event.runner.getOrElse("-"),
+          event.turnCount.map(_.toString).getOrElse("-"),
+          event.escalated.toString,
+          event.outcome.getOrElse("-"),
           event.usage.input.toString,
           event.usage.output.toString,
           event.usage.cacheRead.toString,
@@ -482,6 +495,53 @@ object TokenMetrics:
         ).mkString(" ")
       }
       (header :: rows).mkString(System.lineSeparator())
+
+  /** How close each (phase, runner) is to being usable by runner selection.
+    *
+    * `meanUsage` and `successRate` both answer `None` below `minSample`, and
+    * `selectRunnerFor` reads that `None` as "no signal" and falls back to
+    * `Priority.score`. That fallback is correct but indistinguishable from the
+    * ladder economics being switched off entirely - which is what happens when
+    * events are recorded without a `phase`/`runner`, or without an `outcome`.
+    * This view is the difference between "not measured yet" and "never will be".
+    *
+    * Pure in its inputs so it can be tested without a live backend; the counts
+    * mirror the filters in [[TokenMetricsBackend.meanUsage]] and
+    * [[TokenMetricsBackend.successRate]] exactly, including the requirement that
+    * `successRate` only counts events that carry an outcome.
+    */
+  def renderReadiness(events: List[TokenMetricsEvent], minSample: Int = 20): String =
+    val dimensioned = events.flatMap(event => (event.phase, event.runner).tupled.map(_ -> event))
+    val undimensioned = events.size - dimensioned.size
+    val preamble =
+      s"${events.size} event(s), $undimensioned without a phase/runner (invisible to runner selection), " +
+        s"minSample=$minSample"
+
+    if dimensioned.isEmpty then
+      List(
+        preamble,
+        "No (phase, runner) pair is measured. Runner selection is falling back to Priority.score" +
+          " for every phase - the cost ratio and success rate are not being consulted at all."
+      ).mkString(System.lineSeparator())
+    else
+      val header = "phase runner events usable-for-cost outcomes usable-for-success-rate"
+      val rows = dimensioned
+        .groupBy(_._1)
+        .toList
+        .sortBy { case ((phase, runner), _) => (phase, runner) }
+        .map { case ((phase, runner), grouped) =>
+          val total = grouped.size
+          val withOutcome = grouped.count(_._2.outcome.isDefined)
+          List(
+            phase,
+            runner,
+            total.toString,
+            if total >= minSample then "yes" else s"no (${minSample - total} more)",
+            withOutcome.toString,
+            if withOutcome >= minSample then "yes" else s"no (${minSample - withOutcome} more)"
+          ).mkString(" ")
+        }
+      (preamble :: header :: rows).mkString(System.lineSeparator())
 
   private def writeEvent(event: TokenMetricsEvent): String =
     ujson.write(

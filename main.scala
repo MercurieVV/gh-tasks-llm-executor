@@ -112,6 +112,8 @@ object Main extends IOApp:
         TokenMetrics.renderEvents(backend.query(command.query))
       case Cli.MetricsView.Summary =>
         TokenMetrics.renderSummary(backend.summary(command.query))
+      case Cli.MetricsView.Readiness =>
+        TokenMetrics.renderReadiness(backend.query(command.query))
       case Cli.MetricsView.Json =>
         ujson.write(
           ujson.Obj(
