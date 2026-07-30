@@ -49,10 +49,14 @@ wearing a cost ratio's clothes — and with the same constants on both sides, th
 cancelled. `costWith(meanUsage(phase, runner))` closes that: same Stage 0 events the
 fold reads, applied where the decision is actually made.
 
-Beyond the numbered tasks: Stage 5 has no task breakdown, and three of its leaks
+Beyond the numbered tasks: Stage 5 has no task breakdown, and four of its leaks
 have been closed directly (the implementer's split instructions, the evaluator's
-verdict/preservation restating, and the runner-authored file list, now read from
-git). No before/after payoff measurement exists yet — Stage 0 records the
+verdict/preservation restating, the runner-authored file list, now read from
+git, and the priced tool catalogue in both evaluation prompts — replaced
+2026-07-31 by `AgentInventory.abilityVocabulary`, ~3.2k characters down to ~270,
+since the only rule referencing it needed the ability names and nothing else,
+and the prices were inviting the evaluator to pin a runner over the run-time
+measured choice). No before/after payoff measurement exists yet — Stage 0 records the
 dimensions, but nothing has been run long enough to compare.
 
 ## How to read a task
