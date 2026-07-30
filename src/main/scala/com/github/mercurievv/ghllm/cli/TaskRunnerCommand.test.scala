@@ -39,7 +39,19 @@ class TaskRunnerCommandSuite extends munit.FunSuite:
     assert(!command.contains("--mcp-config"))
     assert(!command.contains("mcp__scala-semantic__annotated_source"))
     assert(!command.exists(_.contains("SCALA SEMANTIC NAVIGATION RULE (must be obeyed):")))
-    assertEquals(command, Seq("claude", "--allowedTools", "Read", "-p", prompt.value))
+    // The cache flag is unconditional (ADR-0001), so it belongs in the exact
+    // shape too rather than being filtered out of it.
+    assertEquals(
+      command,
+      Seq(
+        "claude",
+        "--exclude-dynamic-system-prompt-sections",
+        "--allowedTools",
+        "Read",
+        "-p",
+        prompt.value
+      )
+    )
 
   test("codex command maps workspace MCP JSON to config overrides and injects ScalaSemantic prompt"):
     val root = os.temp.dir()

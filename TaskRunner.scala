@@ -2,6 +2,7 @@ package com.github.mercurievv.ghllm
 
 import com.github.mercurievv.ghllm.agent.*
 import com.github.mercurievv.ghllm.arrow.Impl
+import com.github.mercurievv.ghllm.cli.Cli
 
 import scala.util.Try
 
@@ -42,6 +43,7 @@ final case class TaskRunner(
         val effectiveAllowedTools =
           allowedTools ++ mcpConfig.toList.flatMap(_ => ScalaSemanticClaudeTools)
         Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
+          TaskRunner.claudeCacheFlags ++
           mcpConfig.toList.flatMap(path => Seq("--mcp-config", path.toString)) ++
           (if effectiveAllowedTools.isEmpty then Nil
            else Seq("--allowedTools") ++ effectiveAllowedTools) ++
@@ -71,6 +73,10 @@ final case class TaskRunner(
           case Some("deepseek/deepseek-reasoner") => Some("deepseek/deepseek-v4-pro")
           case other                              => other
         Seq(agent.value) ++ mappedModel.toList.flatMap(value => Seq("--model", value)) ++
+          // aider defaults --cache-prompts to False, so without this every run
+          // re-sends the whole prefix at full price. Unlike the claude TTL knob
+          // this is not an optimisation on top of caching — it is caching.
+          TaskRunner.aiderCacheFlags ++
           Seq("--yes-always", "--no-auto-commits", "--message", promptForRun.value) ++
           contextFiles
       case "gemini" =>
@@ -165,6 +171,33 @@ final case class TaskRunner(
   )
 
 object TaskRunner:
+
+  /** Prompt-cache flags per vendor — see `ADR-0001-prompt-cache-knobs.md`.
+    *
+    * `--exclude-dynamic-system-prompt-sections` moves cwd, env info, memory paths and git status out of claude's
+    * system prompt and into the first user message. Every task here runs in its own worktree, so those sections differ
+    * for every sibling and sit AHEAD of the constant blocks `taskPrompt` orders stable-first — without this, the
+    * shared prefix begins after something that has already diverged.
+    *
+    * Both are opt-out rather than opt-in: the flag is newer than some installed claude CLIs, and an unrecognised flag
+    * is a hard failure rather than a warning, so a deployment on an older CLI (`scripts/remote-run.sh` targets
+    * machines this repo does not control) needs a way to turn it off without a code change.
+    */
+  def claudeCacheFlags: Seq[String] =
+    if Cli.envBoolean("GH_TASKS_CLAUDE_STABLE_SYSTEM_PROMPT", true) then
+      Seq("--exclude-dynamic-system-prompt-sections")
+    else Nil
+
+  /** aider's own default is `--no-cache-prompts`, i.e. no prompt caching at all.
+    *
+    * `--cache-keepalive-pings` is deliberately left at its default of 0: it pings every 5 minutes purely to keep a
+    * cache warm, which pays only for an interactive session. These runs are single-shot, so pings would be spend with
+    * no reader.
+    */
+  def aiderCacheFlags: Seq[String] =
+    if Cli.envBoolean("GH_TASKS_AIDER_CACHE_PROMPTS", true) then Seq("--cache-prompts")
+    else Nil
+
   def unapply(
       runner: TaskRunner
   ): (AgentBinary, Option[String], Option[String], Option[String]) =

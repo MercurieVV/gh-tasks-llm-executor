@@ -79,3 +79,30 @@ class InvocationEnvironmentSuite extends munit.FunSuite:
     // so marking them would be a silent no-op rather than a saving.
     val codex = TaskRunner(AgentBinary("codex"), Some("gpt-5"), None, None, extendedCacheTtl = true)
     assertEquals(codex.invocationEnvironment, Map.empty[String, String])
+
+class CacheFlagSuite extends munit.FunSuite:
+  // See ADR-0001-prompt-cache-knobs.md.
+
+  private def commandFor(agent: String, model: String): Seq[String] =
+    TaskRunner(AgentBinary(agent), Some(model), None, None)
+      .command(AgentPrompt("do the thing"))
+
+  test("claude is asked to keep per-machine context out of the system prompt"):
+    // Each task runs in its own worktree, so cwd/git status differ per sibling.
+    // Left in the system prompt they precede - and so invalidate - every
+    // constant segment taskPrompt orders stable-first for T19.
+    assert(commandFor("claude", "opus").contains("--exclude-dynamic-system-prompt-sections"))
+
+  test("aider is asked to cache prompts at all — its own default is off"):
+    assert(commandFor("aider", "deepseek/deepseek-chat").contains("--cache-prompts"))
+
+  test("no keepalive pings: single-shot runs have no later reader to keep warm"):
+    assert(!commandFor("aider", "deepseek/deepseek-chat").contains("--cache-keepalive-pings"))
+
+  test("vendors with no client-side knob get no invented flag"):
+    // codex/gemini/agy cache server-side or not at all; passing something here
+    // would be a guess that fails hard on an unrecognised flag.
+    List("codex", "gemini", "agy").foreach { agent =>
+      val command = commandFor(agent, "some-model")
+      assert(!command.exists(_.contains("cache")), s"$agent: $command")
+    }
