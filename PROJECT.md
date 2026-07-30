@@ -44,7 +44,10 @@ the ratio degenerates to list price, which is only the cost ratio if both
 runners spend the same tokens on the same job. A smaller model that needs more
 turns spends its discount on volume. Measurement is taken on **both** sides or
 neither — a measured cheap runner compared against an assumed strong one would
-favour whichever side happened to have a sample.
+favour whichever side happened to have a sample. The same rule picks *which*
+runner is the cheap one: `cheapestImplementorToRun` orders candidates on
+measured cost when every implementor is measured for that phase, and on the
+assumed volumes otherwise.
 
 Consequences worth knowing before changing this code:
 
