@@ -106,6 +106,140 @@ class TokenMetricsSuite extends munit.FunSuite:
     assertEquals(TokenMetrics.defaultRootForWorktree(worktree), root)
     assertEquals(TokenMetrics.defaultRootForWorktree(root), root)
 
+  test("cacheHitRatio is zero for empty query"):
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+    assertEquals(backend.cacheHitRatio(TokenMetrics.TokenMetricsQuery()), 0.0)
+
+  test("cacheHitRatio sums across events"):
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    val snap1 = TokenUsage.TokenSnapshot(input = 10, output = 0, cacheRead = 3, cacheWrite = 0, total = 13)
+    val snap2 = TokenUsage.TokenSnapshot(input = 0, output = 0, cacheRead = 5, cacheWrite = 0, total = 5)
+
+    backend.record(TokenMetrics.TokenMetricsEvent(
+      timestampMillis = 1000,
+      vendor = TokenUsage.Vendor.Codex,
+      usage = snap1,
+      taskNumber = None,
+      model = None,
+      scope = "test"
+    ))
+    backend.record(TokenMetrics.TokenMetricsEvent(
+      timestampMillis = 2000,
+      vendor = TokenUsage.Vendor.Codex,
+      usage = snap2,
+      taskNumber = None,
+      model = None,
+      scope = "test"
+    ))
+
+    // total input = 10, total cacheRead = 3+5=8, ratio = 8/18 ≈ 0.444...
+    val expected = 8.0 / 18.0
+    assertEqualsDouble(backend.cacheHitRatio(TokenMetrics.TokenMetricsQuery()), expected, 0.001)
+
+  // ---- T08 successRate tests ---------------------------------------------------
+
+  test("successRate returns None for sample below minSample"):
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    val phase = "plan"
+    val runner = "haiku"
+
+    for i <- 1 to 2 do
+      backend.record(
+        TokenMetrics.TokenMetricsEvent(
+          timestampMillis = 1000 + i,
+          vendor = TokenUsage.Vendor.Codex,
+          usage = TokenUsage.TokenSnapshot.Zero,
+          taskNumber = Some(TaskNumber(i)),
+          model = None,
+          scope = "agent-run",
+          phase = Some(phase),
+          runner = Some(runner),
+          outcome = Some("green")
+        )
+      )
+
+    assert(backend.successRate(phase, runner, minSample = 3).isEmpty)
+
+  test("successRate returns Some(0.2) for 8 green of 40"):
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    val phase = "implement"
+    val runner = "claude"
+
+    for i <- 1 to 40 do
+      val outcome = if i <= 8 then "green" else "red"
+      backend.record(
+        TokenMetrics.TokenMetricsEvent(
+          timestampMillis = 1000 + i,
+          vendor = TokenUsage.Vendor.Claude,
+          usage = TokenUsage.TokenSnapshot.Zero,
+          taskNumber = Some(TaskNumber(i)),
+          model = None,
+          scope = "agent-run",
+          phase = Some(phase),
+          runner = Some(runner),
+          outcome = Some(outcome)
+        )
+      )
+
+    val result = backend.successRate(phase, runner, minSample = 40)
+    assert(result.isDefined)
+    assertEquals(result.get, 0.2, 0.01)
+
+  test("events with outcome=None are excluded from successRate"):
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    val phase = "test"
+    val runner = "gpt"
+
+    // 5 events with defined outcome (2 green, 3 red) → defined‑sample = 5, green = 2 → 0.4
+    for i <- 1 to 5 do
+      val outcome = if i <= 2 then "green" else "red"
+      backend.record(
+        TokenMetrics.TokenMetricsEvent(
+          timestampMillis = 1000 + i,
+          vendor = TokenUsage.Vendor.Codex,
+          usage = TokenUsage.TokenSnapshot.Zero,
+          taskNumber = Some(TaskNumber(i)),
+          model = None,
+          scope = "agent-run",
+          phase = Some(phase),
+          runner = Some(runner),
+          outcome = Some(outcome)
+        )
+      )
+
+    // 5 events with outcome = None — they must be ignored
+    for i <- 6 to 10 do
+      backend.record(
+        TokenMetrics.TokenMetricsEvent(
+          timestampMillis = 1000 + i,
+          vendor = TokenUsage.Vendor.Codex,
+          usage = TokenUsage.TokenSnapshot.Zero,
+          taskNumber = Some(TaskNumber(i)),
+          model = None,
+          scope = "agent-run",
+          phase = Some(phase),
+          runner = Some(runner),
+          outcome = None
+        )
+      )
+
+    val result = backend.successRate(phase, runner, minSample = 5)
+    assert(result.isDefined)
+    assertEquals(result.get, 2.0 / 5.0, 0.01)
   test("jsonl round-trips measurement fields"):
     val dir = os.temp.dir()
     val path = dir / "roundtrip.jsonl"
@@ -182,3 +316,30 @@ class TokenMetricsSuite extends munit.FunSuite:
     assertEquals(event.turnCount, None)
     assertEquals(event.escalated, false)
     assertEquals(event.outcome, None)
+
+  test("simulated failing run records outcome red"):
+    val dir = os.temp.dir()
+    val path = dir / "failing-run.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    backend.record(
+      TokenMetrics.TokenMetricsEvent(
+        timestampMillis = 5000L,
+        vendor = TokenUsage.Vendor.Claude,
+        usage = TokenUsage.TokenSnapshot(input = 100, output = 50, cacheRead = 0, cacheWrite = 0, total = 150),
+        taskNumber = Some(TaskNumber(99)),
+        model = Some("sonnet"),
+        scope = "implement",
+        runner = Some("claude-sonnet"),
+        turnCount = Some(3),
+        outcome = Some("red")
+      )
+    )
+
+    val reloaded = TokenMetrics.JsonlTokenMetricsBackend(path)
+    val results = reloaded.query(TokenMetrics.TokenMetricsQuery())
+
+    assertEquals(results.length, 1)
+    val event = results.head
+    assertEquals(event.outcome, Some("red"))
+    assertEquals(event.turnCount, Some(3))

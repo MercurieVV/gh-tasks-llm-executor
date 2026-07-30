@@ -27,6 +27,7 @@ object TokenMetrics:
       taskNumber: Option[TaskNumber],
       model: Option[String],
       scope: String,
+      phase: Option[String] = None,
       runner: Option[String] = None,
       turnCount: Option[Int] = None,
       escalated: Boolean = false,
@@ -53,6 +54,24 @@ object TokenMetrics:
 
     def summary(query: TokenMetricsQuery): TokenUsage.TokenSnapshot =
       this.query(query.copy(limit = None)).foldLeft(TokenUsage.TokenSnapshot.Zero)(_ + _.usage)
+
+    def cacheHitRatio(query: TokenMetricsQuery): Double =
+      val s = summary(query)
+      val denom = s.input + s.cacheRead
+      if denom == 0L then 0.0 else s.cacheRead.toDouble / denom.toDouble
+
+    // Observed p: fraction of recorded runs for this (phase, runner) whose
+    // outcome was "green". None when the sample is smaller than `minSample`.
+    def successRate(phase: String, runner: String, minSample: Int = 20): Option[Double] =
+      val allEvents = this.query(TokenMetricsQuery(limit = None))
+      val relevant = allEvents.filter(e =>
+        e.phase.contains(phase) && e.runner.contains(runner) && e.outcome.isDefined
+      )
+      val total = relevant.size
+      if total < minSample then None
+      else
+        val greenCount = relevant.count(_.outcome.contains("green"))
+        Some(greenCount.toDouble / total.toDouble)
 
   final class JsonlTokenMetricsBackend(path: os.Path) extends TokenMetricsBackend:
     def destination: String = path.toString
@@ -85,6 +104,7 @@ object TokenMetrics:
   object VictoriaMetricsBackend:
     val MetricName = "gh_tasks_llm_executor_token_usage"
     val PrometheusMetricName = MetricName + "_total"
+    val ScalaTextToolCallsMetricName = "scala_text_tool_calls"
 
     def defaultBaseUrl: String =
       sys.env.get("GH_TASKS_METRICS_VICTORIA_URL").getOrElse("http://localhost:8428")
@@ -115,6 +135,31 @@ object TokenMetrics:
           yield ()
         }
 
+    private[metrics] def recordScalaTextToolCalls(
+        count: Long,
+        runner: String,
+        phase: String,
+        baseUrl: String
+    ): IO[Unit] =
+      IO.delay(configureOtel(baseUrl)) *>
+        OtelJava.autoConfigured[IO]().use { otel =>
+          for
+            meter <- otel.meterProvider.get("gh-tasks-llm-executor")
+            counter <- meter
+              .counter[Long](ScalaTextToolCallsMetricName)
+              .withUnit("{call}")
+              .withDescription("Shell text-tool calls that target Scala source")
+              .create
+            _ <- counter.add(
+              count,
+              List(
+                Attribute("runner", runner),
+                Attribute("phase", phase)
+              )
+            )
+          yield ()
+        }
+
     private def configureOtel(baseUrl: String): Unit =
       setPropertyIfMissing("otel.service.name", "gh-tasks-llm-executor")
       setPropertyIfMissing("otel.metrics.exporter", "otlp")
@@ -136,7 +181,12 @@ object TokenMetrics:
         Some(Attribute("scope", event.scope)),
         Some(Attribute("token_type", tokenType)),
         event.taskNumber.map(number => Attribute("task", number.value.toLong)),
-        event.model.map(model => Attribute("model", model))
+        event.model.map(model => Attribute("model", model)),
+        event.phase.map(p => Attribute("phase", p)),
+        event.runner.map(r => Attribute("runner", r)),
+        event.turnCount.map(tc => Attribute("turn_count", tc.toLong)),
+        Some(Attribute("escalated", event.escalated)),
+        event.outcome.map(o => Attribute("outcome", o))
       ).flatten
 
     private def query(query: TokenMetricsQuery, baseUrl: String): List[TokenMetricsEvent] =
@@ -245,6 +295,21 @@ object TokenMetrics:
         case "jsonl" | "file"                                    => Some(Jsonl)
         case _                                                   => None
 
+  def recordScalaTextToolCalls(
+      transcript: String,
+      runner: String,
+      phase: String,
+      baseUrl: String = VictoriaMetricsBackend.defaultBaseUrl
+  ): Long =
+    val count = TaskLogger.scalaTextToolCallCount(transcript)
+    if count > 0 then
+      Try(
+        VictoriaMetricsBackend
+          .recordScalaTextToolCalls(count, runner, phase, baseUrl)
+          .unsafeRunSync()
+      ).fold(_ => (), identity)
+    count
+
   def defaultBackend(root: os.Path = os.pwd): TokenMetricsBackend =
     backendFromEnv(root)
 
@@ -303,7 +368,8 @@ object TokenMetrics:
         "taskNumber" -> event.taskNumber.map(number => ujson.Num(number.value)).getOrElse(ujson.Null),
         "model" -> event.model.map(ujson.Str(_)).getOrElse(ujson.Null),
         "scope" -> event.scope,
-        "runner" -> event.runner.map(ujson.Str(_)).getOrElse(ujson.Null),
+        "phase" -> event.phase.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
+        "runner" -> event.runner.fold(ujson.Null: ujson.Value)(ujson.Str(_)),
         "turnCount" -> event.turnCount.map(count => ujson.Num(count.toDouble)).getOrElse(ujson.Null),
         "escalated" -> ujson.Bool(event.escalated),
         "outcome" -> event.outcome.map(ujson.Str(_)).getOrElse(ujson.Null),
@@ -332,6 +398,7 @@ object TokenMetrics:
       taskNumber = obj.get("taskNumber").flatMap(readLong).map(value => TaskNumber(value.toInt)),
       model = obj.get("model").flatMap(_.strOpt),
       scope = scope,
+      phase = obj.get("phase").flatMap(_.strOpt),
       runner = obj.get("runner").flatMap(_.strOpt),
       turnCount = obj.get("turnCount").flatMap(readLong).map(_.toInt),
       escalated = obj.get("escalated").flatMap(_.boolOpt).getOrElse(false),
