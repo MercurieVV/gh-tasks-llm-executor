@@ -167,19 +167,18 @@ object BusinessLogic:
   /** Marks the candidates that should write their shared prefix with the extended (1-hour) cache TTL — T20.
     *
     * The TTL costs roughly 2x to write and pays back over about 3 reads, so it is set only where at least 3 candidates
-    * share the same (agent, model): a peer group of 2 would pay the premium and never earn it back. Note that the
-    * peers do not have to run at the same time — a 1-hour window is exactly what decouples the readers from the writer,
-    * which is why `ParallelArrows.MaxParallelism = 2` does not undercut the >= 3 threshold.
+    * share the same (agent, model): a peer group of 2 would pay the premium and never earn it back.
     *
-    * Gated on `--parallel` because that is the mode in which a batch of same-runner candidates is actually expected;
-    * a sequential run of unrelated roots has no shared prefix worth paying for.
+    * Independent of `--parallel`. Peers do not have to run at the same time — an hour-long window is precisely what
+    * decouples the readers from the writer, and three same-runner roots share the constant prompt segments (agent
+    * boundary, answer contract, workflow) whether they run side by side or one after another. This used to be gated on
+    * `--parallel`, which meant an ordinary sequential batch paid full price for a prefix it re-sent every time.
     */
   def markCachePeers(selection: TaskSelection): List[TaskCandidate] =
     val qualifying =
       CachePeers.qualifying(selection.candidates.map(c => (c.runner.agent, c.runner.model)))
     selection.candidates.zip(qualifying).map { case (candidate, earnsTtl) =>
-      val extendedCacheTtl = selection.context.parallelExecution.value && earnsTtl
-      candidate.copy(runner = candidate.runner.copy(extendedCacheTtl = extendedCacheTtl))
+      candidate.copy(runner = candidate.runner.copy(extendedCacheTtl = earnsTtl))
     }
 
   given Functor2K[BusinessLogic] = Functor2K.derived

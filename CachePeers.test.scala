@@ -52,11 +52,17 @@ class CachePeersSuite extends munit.FunSuite:
     val codex = runner("codex", "gpt-5")
     assertEquals(marked(parallel = true, opus, opus, opus, codex), List(true, true, true, false))
 
-  test("sequential runs never set it"):
-    // Without --parallel a batch of unrelated roots has no shared prefix worth
-    // paying a 2x write for.
+  test("a sequential batch earns it too — the window outlives the run"):
+    // Deliberately independent of --parallel: three same-runner roots share the
+    // constant prompt segments whether they run side by side or one after
+    // another, and an hour-long window is what lets the later ones read what
+    // the first wrote.
     val claude = runner("claude", "opus")
-    assertEquals(marked(parallel = false, claude, claude, claude), List(false, false, false))
+    assertEquals(marked(parallel = false, claude, claude, claude), List(true, true, true))
+
+  test("and a sequential batch of two still does not"):
+    val claude = runner("claude", "opus")
+    assertEquals(marked(parallel = false, claude, claude), List(false, false))
 
 class InvocationEnvironmentSuite extends munit.FunSuite:
 
