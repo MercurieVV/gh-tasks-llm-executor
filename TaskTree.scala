@@ -12,8 +12,12 @@ object TaskTree:
   export higherkindness.droste.data.Mu
   export com.github.mercurievv.ghllm.task.TaskF
 
-  type Tree = Mu[TaskF]
-  type AnnotatedTree = Cofree[TaskF, Attr]
+  // The payload is this module's own NodeRef: cost estimation folds a node's
+  // measured identity, nothing more. Orchestration instantiates the same
+  // functor at TaskNode instead - see TaskGraph.
+  type Node[A] = TaskF[NodeRef, A]
+  type Tree = Mu[Node]
+  type AnnotatedTree = Cofree[Node, Attr]
 
   /** Numeric inputs observed by Stage 0, averaged for a `(tier, runner, model)`.
     *
@@ -80,16 +84,16 @@ object TaskTree:
   final case class Attr(prefixKey: PrefixKey, tier: String, cost: Cost)
 
   def branch(name: String, children: List[Tree]): Tree =
-    Mu(TaskF.Branch(name, children))
+    Mu[Node](TaskF.Branch(NodeRef.Branch(name), children))
 
   def leaf(task: Option[Int]): Tree =
-    Mu(TaskF.Leaf(task))
+    Mu[Node](TaskF.Leaf(NodeRef.Leaf(task)))
 
   /** The plan's decision algebra: `TaskF[Cost] => Cost`. */
   def costAlgebra(
       costModel: CostModel,
       profileFor: NodeRef => NodeProfile
-  ): Algebra[TaskF, Cost] =
+  ): Algebra[Node, Cost] =
     Algebra(node => foldNode(node, costModel, profileFor))
 
   def estimate(
@@ -97,7 +101,7 @@ object TaskTree:
       costModel: CostModel,
       profileFor: NodeRef => NodeProfile
   ): Cost =
-    scheme.cata[TaskF, Tree, Cost](costAlgebra(costModel, profileFor)).apply(tree)
+    scheme.cata[Node, Tree, Cost](costAlgebra(costModel, profileFor)).apply(tree)
 
   /** A second algebra builds the `Cofree` annotation with the exact same cost rule as [[costAlgebra]]. The traversal
     * itself remains Droste's `cata`.
@@ -105,10 +109,10 @@ object TaskTree:
   def annotationAlgebra(
       costModel: CostModel,
       profileFor: NodeRef => NodeProfile
-  ): Algebra[TaskF, AnnotatedTree] =
+  ): Algebra[Node, AnnotatedTree] =
     Algebra { node =>
-      val costNode = summon[Functor[TaskF]].map(node)(_.head.cost)
-      val profile = profileFor(nodeRef(node))
+      val costNode = summon[Functor[Node]].map(node)(_.head.cost)
+      val profile = profileFor(TaskF.payloadOf(node))
       Cofree(
         Attr(profile.prefixKey, profile.tier, foldNode(costNode, costModel, profileFor)),
         Eval.now(node)
@@ -120,19 +124,17 @@ object TaskTree:
       costModel: CostModel,
       profileFor: NodeRef => NodeProfile
   ): AnnotatedTree =
-    scheme.cata[TaskF, Tree, AnnotatedTree](annotationAlgebra(costModel, profileFor)).apply(tree)
+    scheme.cata[Node, Tree, AnnotatedTree](annotationAlgebra(costModel, profileFor)).apply(tree)
 
   private val TokensPerMillion = 1000000.0
 
   private def foldNode(
-      node: TaskF[Cost],
+      node: Node[Cost],
       costModel: CostModel,
       profileFor: NodeRef => NodeProfile
   ): Cost =
-    val children = node match
-      case TaskF.Branch(_, values) => values
-      case TaskF.Leaf(_)           => Nil
-    val ownUsd = costModel.estimate(profileFor(nodeRef(node)).coefficients)
+    val children = TaskF.childrenOf(node)
+    val ownUsd = costModel.estimate(profileFor(TaskF.payloadOf(node)).coefficients)
     val fanOut = children.size.max(1)
     Cost(
       ownUsd = ownUsd,
@@ -140,11 +142,6 @@ object TaskTree:
       nodeCount = 1 + children.map(_.nodeCount).sum,
       estimatedPerNodeUsd = ownUsd / fanOut
     )
-
-  private def nodeRef[A](node: TaskF[A]): NodeRef =
-    node match
-      case TaskF.Branch(name, _) => NodeRef.Branch(name)
-      case TaskF.Leaf(task)      => NodeRef.Leaf(task)
 
   private def nonNegative(value: Double): Double =
     if !value.isFinite || value < 0.0 then 0.0 else value

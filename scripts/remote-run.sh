@@ -22,6 +22,7 @@ FILES=(
   src/main/scala/com/github/mercurievv/ghllm/agent/AgentInventory.scala
   src/main/scala/com/github/mercurievv/ghllm/agent/AgentRunnersDiscovery.scala
   src/main/scala/com/github/mercurievv/ghllm/agent/TurnCap.scala
+  src/main/scala/com/github/mercurievv/ghllm/task/TaskGraph.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/ArrowCapabilities.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/ArrowLogging.scala
   src/main/scala/com/github/mercurievv/ghllm/cli/Cli.scala

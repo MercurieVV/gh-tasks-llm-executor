@@ -6,6 +6,7 @@ import com.github.mercurievv.ghllm.arrow.*
 import com.github.mercurievv.ghllm.cli.*
 import com.github.mercurievv.ghllm.git.*
 import com.github.mercurievv.ghllm.metrics.*
+import com.github.mercurievv.ghllm.task.*
 
 import cats.data.Kleisli
 import cats.effect.Deferred
@@ -472,6 +473,18 @@ object Impl:
         )
       }
     }
+
+  // Derived from collectPendingDependencies rather than restated, so the tree
+  // unfold and the walking traversal cannot drift apart on what "must close
+  // before this node" means.
+  def pendingDependencies[F[_]: Sync]: TaskNode => RunF[F][List[TaskNode]] =
+    node => collectPendingDependencies[F].run(node).map(_.pending)
+
+  /** The live dependency graph as a task tree, for folds that want the shape as
+    * data (cost estimation, plan comparison) rather than to walk it.
+    */
+  def taskTree[F[_]: Sync]: TaskNode => RunF[F][TaskGraph.Tree] =
+    node => TaskGraph.unfold[RunF[F]](pendingDependencies[F])(TaskGraph.seed(node))
 
   // A dependency that did not complete stops the walk (Left); one that did is
   // dropped from the open-issue map so later passes skip it.

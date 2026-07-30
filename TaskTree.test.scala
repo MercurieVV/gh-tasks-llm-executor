@@ -132,20 +132,25 @@ class TaskTreeSuite extends ScalaCheckSuite:
       case other => fail(s"expected one annotated child, got $other")
 
   test("cata over a simple tree"):
-    val countAlg: Algebra[TaskF, Int] = Algebra {
+    // Deliberately instantiated at a payload of its own rather than at
+    // TaskTree.Node: the functor is payload-generic, and a fold that only ever
+    // typechecks at one payload would not have shown that.
+    type Labelled[A] = TaskF[String, A]
+
+    val countAlg: Algebra[Labelled, Int] = Algebra {
       case TaskF.Leaf(_)             => 1
       case TaskF.Branch(_, children) => children.sum + 1
     }
 
-    val tree: Fix[TaskF] = Fix(
+    val tree: Fix[Labelled] = Fix[Labelled](
       TaskF.Branch(
         "root",
         List(
-          Fix(TaskF.Leaf(Some(5))),
-          Fix(
+          Fix[Labelled](TaskF.Leaf("first")),
+          Fix[Labelled](
             TaskF.Branch(
               "inner",
-              List(Fix(TaskF.Leaf(Some(10))))
+              List(Fix[Labelled](TaskF.Leaf("second")))
             )
           )
         )
