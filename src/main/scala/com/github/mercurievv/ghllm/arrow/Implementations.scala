@@ -1235,11 +1235,13 @@ Replay rules:
     // trails, and sibling leaves fanning out on the same runner share the
     // longest possible prefix. This matters more now that fan-out marks that
     // prefix with the 1-hour TTL (T20), which costs ~2x to write and only pays
-    // back over ~3 reads. Segment CONTENT is unchanged from the original order.
+    // back over ~3 reads.
     //
-    // `Workflow` is conventions and belongs in the stable region, but it
-    // interpolates the task number, so it can never be part of a shared prefix
-    // and sits after the blocks that can.
+    // `Workflow` used to interpolate the task number (as the `parent:` line of
+    // the subtasks it told the implementer to create), which kept it out of any
+    // shared prefix. Now that the split instructions are gone it is fully
+    // constant, so it leads the conditional Scala mandate: two siblings on one
+    // runner share it even when only one of them touches Scala.
     AgentPrompt(s"""Agent boundary:
 - Do not run tree2m.
 - Do not run git worktree commands.
@@ -1255,25 +1257,14 @@ Final answer contract:
 - List validation commands you ran and whether they passed.
 - Include a proposed commit title.
 - Include a proposed pull request body when useful.
-- Include a one-line "Conclusion:" summary for tasks that depend on this one (what changed, what's now available to build on).
-$scalaMandate
+- Include a one-line "Conclusion:" summary for tasks that depend on this one (what changed, what's now available to build on). Keep it to what a dependent task needs - it is truncated before it reaches them.
+
 Workflow:
-1. First estimate the task size and complexity before editing files.
-2. If the task is too broad, ambiguous, risky, or naturally decomposes into independent steps, split it instead of implementing it directly.
-3. When splitting, create GitHub subtasks with clear, detailed descriptions and narrow scope. Each subtask should include:
-   - parent: #${task.number}
-   - dependencies on earlier subtasks when order matters
-   - concrete acceptance criteria
-   - required abilities/importance (ability -> coefficient), not a pinned runner
-4. Prefer splitting until each subtask is small enough that a weaker model such as Haiku could implement it without needing another split.
-5. Use this exact metadata format in every subtask description, so the concrete runner is picked at run time from live cost/fit data instead of being pinned now:
-   Required abilities/importance:
-   - complex-reasoning: 1.0
-   - scala: 0.6
-   Only add a "preferred llms/models/efforts/versions:" pin instead when the subtask genuinely needs one specific tool/version.
-6. If you split the task, do not implement the parent task. Comment on the parent with the created subtask numbers and the reason for the split.
-7. If the task is already narrow enough, implement it in the current repository and make any necessary file changes.
-$dependencyConclusionStr
+1. This task has already been evaluated as narrow enough to implement. Do not re-decide that. Implement it in the current repository.
+2. Do not split the task, do not create GitHub subtasks, and do not comment on other issues. The executor owns decomposition and ran it before dispatching you.
+3. If the task genuinely cannot be implemented as specified - too broad, ambiguous, or blocked - make NO file changes and say why in your final answer. The executor routes that back for re-evaluation. An attempt to split it yourself is discarded work.
+4. Verify your change with the project's own compile/test commands before answering.
+$scalaMandate$dependencyConclusionStr
 $replayContextStr
 Task ID: #${task.number}
 Title: ${task.title}

@@ -64,8 +64,8 @@ class PromptSegmentOrderSuite extends munit.FunSuite:
     val expected = List(
       "Agent boundary:", // fully constant
       "Final answer contract:", // fully constant
+      "Workflow:", // fully constant since the split instructions were removed
       "SCALA SEMANTIC NAVIGATION RULE", // constant, conditional on the task
-      "Workflow:", // conventions, but interpolates the task number
       "Dependency Task Conclusion Comment:", // parent artifact
       "Replay / repair context:", // prior-run artifact
       "Task ID: #", // task instruction
@@ -97,6 +97,44 @@ class PromptSegmentOrderSuite extends munit.FunSuite:
     assert(!prompt.contains(Impl.ScalaSemanticMandate))
     assert(prompt.indexOf("Agent boundary:") < prompt.indexOf("Workflow:"))
     assert(prompt.startsWith("Agent boundary:"))
+
+  test("the workflow block is shared by a Scala and a non-Scala sibling"):
+    // Only possible because Workflow no longer interpolates the task number.
+    val scalaTask = promptFor(1, "Fix the router", "Change BusinessLogicRetry.scala")
+    val docsTask = promptFor(2, "Update the README", "Document the flag in README.md")
+    val shared = scalaTask.zip(docsTask).takeWhile((l, r) => l == r).map(_._1).mkString
+    assert(shared.contains("Workflow:"))
+
+class ImplementerScopeSuite extends munit.FunSuite:
+  private val runner = TaskRunner(AgentBinary("claude"), Some("opus"), None, None)
+
+  private def prompt: String =
+    Impl
+      .taskPrompt(
+        Issue(TaskNumber(42), IssueTitle("Fix the router"), IssueBody("Change the fallback"), State("open")),
+        runner,
+        None,
+        None
+      )
+      .value
+
+  test("the implementer is not asked to re-decide the split"):
+    // The evaluator arrow already routed this task as Execution.Implement
+    // (BusinessLogic.executeClaimedTask), so split instructions here are both
+    // wasted prompt and an invitation to burn a run producing issue noise
+    // instead of code.
+    assert(!prompt.contains("Required abilities/importance:"))
+    assert(!prompt.contains("When splitting, create GitHub subtasks"))
+    assert(!prompt.contains("Prefer splitting"))
+    assert(!prompt.contains("preferred llms/models/efforts/versions"))
+
+  test("the implementer is told to implement, and how to refuse"):
+    assert(prompt.contains("Do not split the task"))
+    assert(prompt.contains("make NO file changes"))
+
+  test("the workflow no longer interpolates the task number"):
+    val workflow = prompt.substring(prompt.indexOf("Workflow:"), prompt.indexOf("Task ID: #"))
+    assert(!workflow.contains("#42"), workflow)
 
 class SemanticDbMemoizationSuite extends CatsEffectSuite:
   test("refresh runs once across two dispatches with unchanged source hash"):
