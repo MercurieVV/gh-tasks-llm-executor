@@ -53,14 +53,19 @@ Ranked objective:
 
 ## 1. Current state
 
-- `AgentInventory.nextStrongerImplementor` (`AgentInventory.scala:182`) exists.
-- It is wired at `Implementations.scala:860` in `routeRunnerFallback`, but triggers on
-  `Throwable` only — i.e. the runner *crashed*.
+This section described the repo before any of the stages below were built. It is
+kept for the reasoning, not as a description of the code — see
+`TOKEN_EFFICIENCY_TASKS.md` §Status for what is actually implemented now.
+
+- `AgentInventory.nextStrongerImplementor` exists. *(Still true.)*
+- It was wired in `routeRunnerFallback`, but triggered on `Throwable` only — i.e. the
+  runner *crashed*. *(Fixed: it escalates on `VerificationResult.Red` too.)*
 - Escalation on **verification failure** (compile/test red) does not exist. This is the
-  highest-value gap and a small diff.
+  highest-value gap and a small diff. *(Done — Stage 1.)*
 - `PROJECT.md` currently selects tier by *predicting* required capability, and names
   under-powering as the primary failure mode. Prediction is unnecessary when a free
-  verifier is available.
+  verifier is available. *(Done — `PROJECT.md` and the evaluator prompt now state the
+  measured rule.)*
 
 ## 2. Stages
 

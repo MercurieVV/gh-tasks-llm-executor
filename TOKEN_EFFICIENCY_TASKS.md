@@ -7,6 +7,31 @@ one or two files, the exact insertion point, the target signature written out, a
 named test as the completion check. The `Do NOT` fence exists because weak models
 expand scope — it is part of the specification, not advice.
 
+## Status (verified against the code, 2026-07-30)
+
+Read this before picking up a task — several are already done and the plan text
+around them is older than the code.
+
+| Task | State | Evidence |
+|---|---|---|
+| T01–T05 | done | `TokenMetricsEvent` carries `phase`/`runner`/`model`/`turnCount`/`escalated`/`outcome`; exported as OTel attributes; `cacheHitRatio` reads them back |
+| T06–T11 | done | `VerificationResult.scala`; `routeRunnerFallback` escalates on `Red`, hard-resets first, `MaxEscalationDepth = 2` |
+| T12 | done | `AgentInventory.selectRunnerFor` + `breakEvenRateAgainst` + `successRate(minSample = 20)` |
+| T13–T15 | done | `Impl.ScalaSemanticMandate`; memoised `refreshSemanticDbIfNeeded`; `ScalaTextToolCallEvent` |
+| T16 | done | `TurnCap` (default 25) raises `TurnCapExceeded`, which becomes a `Red` |
+| T17 | done | `TaskArtifact.bound` enforced in `GitHub.renderDependencyConclusions` — the contract existed unused until it was wired there |
+| T18 | done as data only | `PrefixKey` is built in `NodeProfiles` for cost attribution; nothing caches on it |
+| T19 | done | `Impl.taskPrompt` is ordered most-stable-first; `PromptSegmentOrderSuite` pins it |
+| T20 | **not started** | no cache-TTL call anywhere, and siblings are not launched together. An earlier audit called this done on the strength of a `FanOutCacheTest.scala` string inside a `TestEditGuard` test fixture — that file does not exist |
+| T21–T22 | done | `TaskF`, `TaskGraph.coalgebra`, `TaskTree.costAlgebra`, `annotate` |
+| T23 | partial | the fold is reachable from the `estimate` CLI path (`PlanEstimate`), but execution routing still does not consume it — the cost model informs a human, not the scheduler |
+
+Beyond the numbered tasks: Stage 5 has no task breakdown, and three of its leaks
+have been closed directly (the implementer's split instructions, the evaluator's
+verdict/preservation restating, and the runner-authored file list, now read from
+git). No before/after payoff measurement exists yet — Stage 0 records the
+dimensions, but nothing has been run long enough to compare.
+
 ## How to read a task
 
 | Field | Meaning |
