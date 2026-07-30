@@ -64,6 +64,92 @@ class CachePeersSuite extends munit.FunSuite:
     val claude = runner("claude", "opus")
     assertEquals(marked(parallel = false, claude, claude), List(false, false))
 
+  private def dispatchOrder(runners: TaskRunner*): List[(Int, String)] =
+    val candidates = runners.toList.zipWithIndex.map { case (r, i) => candidate(i + 1, r, parallel = false) }
+    BusinessLogic
+      .markCachePeers(TaskSelection(context(false), candidates))
+      .map(c => (c.issue.number.value, c.runner.agent.value + "/" + c.runner.model.getOrElse("-")))
+
+  test("candidates sharing a cache key are dispatched adjacently, not interleaved"):
+    // A B A B re-sends A's prefix on its second run once B's turn outlives the
+    // provider's default 5-minute window. Neither group here reaches MinPeers,
+    // so no TTL is bought - adjacency is the whole saving.
+    val opus = runner("claude", "opus")
+    val codex = runner("codex", "gpt-5")
+    assertEquals(
+      dispatchOrder(opus, codex, opus, codex),
+      List(1 -> "claude/opus", 3 -> "claude/opus", 2 -> "codex/gpt-5", 4 -> "codex/gpt-5")
+    )
+
+  test("grouping reorders the queue without reprioritising it"):
+    // Both directions of stability: the first candidate still runs first, and
+    // members keep their relative order inside a group. Without that this would
+    // be a scheduler quietly overriding selection priority.
+    val opus = runner("claude", "opus")
+    val haiku = runner("claude", "haiku")
+    val ordered = dispatchOrder(haiku, opus, haiku, opus, haiku)
+
+    assertEquals(ordered.head, 1 -> "claude/haiku")
+    assertEquals(ordered.map(_._1), List(1, 3, 5, 2, 4))
+
+  test("a batch that already shares one key is left exactly as it was"):
+    val claude = runner("claude", "opus")
+    assertEquals(dispatchOrder(claude, claude, claude).map(_._1), List(1, 2, 3))
+
+  test("the TTL marks follow the candidates through the reorder"):
+    // The failure this pins: computing `qualifying` on the original order and
+    // zipping it onto the grouped list would hand one group's marks to another.
+    val opus = runner("claude", "opus")
+    val codex = runner("codex", "gpt-5")
+    val candidates =
+      List(opus, codex, opus, codex, opus).zipWithIndex.map { case (r, i) =>
+        candidate(i + 1, r, parallel = false)
+      }
+    val result = BusinessLogic.markCachePeers(TaskSelection(context(false), candidates))
+
+    assertEquals(
+      result.map(c => (c.runner.agent.value, c.runner.extendedCacheTtl)),
+      List(
+        ("claude", true),
+        ("claude", true),
+        ("claude", true),
+        ("codex", false),
+        ("codex", false)
+      )
+    )
+
+class GroupAdjacentSuite extends munit.ScalaCheckSuite:
+  import org.scalacheck.Gen
+  import org.scalacheck.Prop.forAll
+
+  private val items = Gen.listOf(Gen.zip(Gen.choose(0, 4), Gen.choose(0, 99)))
+
+  property("grouping is a permutation - no run is dropped or duplicated"):
+    forAll(items) { list =>
+      val grouped = arrow.CachePeers.groupAdjacent(list)(_._1)
+      assertEquals(grouped.sorted, list.sorted)
+    }
+
+  property("every key occupies exactly one contiguous block"):
+    forAll(items) { list =>
+      val keys = arrow.CachePeers.groupAdjacent(list)(_._1).map(_._1)
+      // A key that appears in two separate blocks shows up twice in the
+      // deduplicated run-length encoding of the key sequence.
+      val blocks = keys.foldLeft(List.empty[Int]) {
+        case (head :: tail, key) if head == key => head :: tail
+        case (acc, key)                         => key :: acc
+      }
+      assertEquals(blocks.size, blocks.distinct.size)
+    }
+
+  property("order within a key is never disturbed"):
+    forAll(items) { list =>
+      val grouped = arrow.CachePeers.groupAdjacent(list)(_._1)
+      list.map(_._1).distinct.foreach { key =>
+        assertEquals(grouped.filter(_._1 == key), list.filter(_._1 == key))
+      }
+    }
+
 class InvocationEnvironmentSuite extends munit.FunSuite:
 
   test("the claude CLI is told to use the 1h cache only when marked"):

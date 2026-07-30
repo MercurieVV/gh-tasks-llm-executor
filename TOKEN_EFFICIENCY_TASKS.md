@@ -22,7 +22,7 @@ around them is older than the code.
 | T17 | done | `TaskArtifact.bound` enforced in `GitHub.renderDependencyConclusions` — the contract existed unused until it was wired there |
 | T18 | done, and now read | `PrefixKey(runner, model, worktree)` is built in `NodeProfiles` and decides which children amortise a parent's prefix in `TaskTree.foldNode`. Nothing caches on it *at run time* — that is still Stage 6. `stablePrefixHash` deleted 2026-07-31; the surviving fields wired into the cost fold the same day. See both amendments under T18 |
 | T19 | done | `Impl.taskPrompt` is ordered most-stable-first; `PromptSegmentOrderSuite` pins it |
-| T20 | done for `claude`, both paths | `markCachePeers` (root batch) and `collectPendingDependencies` (a split's siblings) mark ≥3 same-`(agent, model)` peers → `ENABLE_PROMPT_CACHING_1H` in the subprocess env. Independent of `--parallel`: the window outlives the run. Still a no-op for non-`claude` agents |
+| T20 | done, both paths, and no longer claude-only | `markCachePeers` (root batch) and `collectPendingDependencies` (a split's siblings) mark ≥3 same-`(agent, model)` peers → `ENABLE_PROMPT_CACHING_1H` in the subprocess env. Independent of `--parallel`: the window outlives the run. Amended 2026-07-31: the root batch is now also *ordered* by cache key (`CachePeers.groupAdjacent`), which is the half that pays for everyone the TTL cannot reach — see the amendment below |
 | T21–T22 | done | `TaskF`, `TaskGraph.coalgebra`, `TaskTree.costAlgebra`, `annotate` |
 | T23 | done, scope decided | the tree fold stays a planning/reporting artifact; the measurement it exposes now drives routing leaf-locally via `AgentTool.costWith`. See "Why the fold does not route" below |
 
@@ -651,8 +651,25 @@ which is why grepping the command builders suggests the feature is absent.
 
 Limits worth knowing before extending it:
 
-- **`claude` only.** `invocationEnvironment` is empty for every other agent, so marking
-  a `codex`/`gemini`/`aider` peer group is a silent no-op rather than a saving.
+- **`claude` only — for the *TTL*.** `invocationEnvironment` is empty for every other
+  agent, so marking a `codex`/`gemini`/`aider` peer group buys no window. Per ADR-0001
+  this is the finished state, not an oversight: codex, gemini and agy expose no
+  client-side cache control at all, and aider's `--cache-keepalive-pings` is
+  deliberately left at 0 because these runs are single-shot, so a ping is spend with no
+  reader. Do not re-derive this.
+- **Ordering is the part that is not claude-only.** Amended 2026-07-31:
+  `markCachePeers` now runs `CachePeers.groupAdjacent` over the root batch so
+  same-`(agent, model)` candidates dispatch back-to-back. The TTL answers "how long does
+  the window last"; adjacency answers "does the next reader arrive inside it", and that
+  one applies to every runner and every group below `MinPeers`, which still get the
+  provider's default ~5-minute window. `A B A B` re-sends A's prefix, `A A B B` reads it
+  back. Grouping is stable between and within groups, so the highest-priority candidate
+  still runs first — it pulls its peers up behind it rather than being displaced.
+- **The dependency list is deliberately NOT grouped.** `collectPendingDependencies`
+  still emits siblings in issue order, because `plan.pending` feeds
+  `traverse.untilLeft`: the list order decides which dependency is attempted first and
+  which are skipped once one fails. Reordering it would change which tasks run, not just
+  what they pay. Adjacency is only free where the elements are independent.
 - **Both paths are covered now.** The root batch is grouped in `markCachePeers`; a
   split's siblings are grouped in `collectPendingDependencies`, which is the only place
   that can see the sibling set. Both share `CachePeers.qualifying`.

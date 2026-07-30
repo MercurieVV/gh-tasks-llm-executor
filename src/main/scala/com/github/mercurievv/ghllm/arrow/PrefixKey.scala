@@ -33,3 +33,23 @@ object CachePeers:
   def qualifying[K](keys: List[K]): List[Boolean] =
     val counts = keys.groupMapReduce(identity)(_ => 1)(_ + _)
     keys.map(key => counts.getOrElse(key, 0) >= MinPeers)
+
+  /** Reorder so runs sharing a cache key are adjacent — the other half of T20.
+    *
+    * [[qualifying]] decides who pays for a 1-hour window; this decides who never
+    * needed one. A batch dispatched `A B A B` re-sends A's prefix on its second
+    * run whenever B's turn outlived the provider's default 5-minute TTL, while
+    * `A A B B` reads it back. That default window is the common case, not the
+    * rare one: it covers every group below [[MinPeers]], and every runner whose
+    * CLI exposes no TTL control at all (see ADR-0001 — `codex`, `gemini`, `agy`
+    * expose nothing, so adjacency is the *only* lever they have).
+    *
+    * Stable in both directions, which is what keeps this from quietly becoming a
+    * scheduler: groups are emitted in order of first appearance, and members keep
+    * their relative order inside a group. So the highest-priority candidate still
+    * runs first — it simply pulls its peers up behind it instead of letting an
+    * unrelated key wedge in between.
+    */
+  def groupAdjacent[A, K](items: List[A])(keyOf: A => K): List[A] =
+    val byKey = items.groupBy(keyOf)
+    items.map(keyOf).distinct.flatMap(key => byKey.getOrElse(key, Nil))
