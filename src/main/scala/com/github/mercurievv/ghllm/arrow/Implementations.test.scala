@@ -162,3 +162,41 @@ class SemanticDbMemoizationSuite extends CatsEffectSuite:
       _ <- Impl.refreshSemanticDbIfNeeded(env, two)(count.update(_ + 1))
       changed <- count.get
     yield assert(changed == 2, s"expected 2 refreshes, got $changed")
+
+class FanOutCachePeersSuite extends CatsEffectSuite:
+
+  private def issue(number: Int, body: String = ""): Issue =
+    Issue(TaskNumber(number), IssueTitle(s"Task $number"), IssueBody(body), State("open"))
+
+  private def context: RunContext =
+    RunContext(os.pwd, AgentInventory(Nil), taskNumber = None)
+
+  private def pendingTtl(dependencyCount: Int): IO[List[Boolean]] =
+    val children = (2 to dependencyCount + 1).toList
+    val parent = issue(1, s"Depends on ${children.map(n => s"#$n").mkString(", ")}")
+    for
+      issues <- Ref[IO].of((parent :: children.map(issue(_))).map(i => i.number -> i).toMap)
+      env <- RunEnv.create[IO](issues)
+      plan <- Impl.collectPendingDependencies[IO].run(TaskNode(context, parent)).run(env)
+    yield plan.pending.map(_.extendedCacheTtl)
+
+  test("three siblings routing to one runner earn the extended TTL"):
+    pendingTtl(3).map(ttl => assertEquals(ttl, List(true, true, true)))
+
+  test("two siblings do not"):
+    pendingTtl(2).map(ttl => assertEquals(ttl, List(false, false)))
+
+  test("a lone dependency does not"):
+    pendingTtl(1).map(ttl => assertEquals(ttl, List(false)))
+
+  test("the parent node itself is not marked by its children"):
+    // extendedCacheTtl travels with the sibling set, not with the task that
+    // owns it: the parent has no peers here.
+    val parent = issue(1, "Depends on #2, #3, #4")
+    for
+      issues <- Ref[IO].of(
+        (parent :: List(2, 3, 4).map(issue(_))).map(i => i.number -> i).toMap
+      )
+      env <- RunEnv.create[IO](issues)
+      plan <- Impl.collectPendingDependencies[IO].run(TaskNode(context, parent)).run(env)
+    yield assert(!plan.node.extendedCacheTtl)

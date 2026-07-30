@@ -240,7 +240,18 @@ final case class RunSummary(
   * The recursive walk descends from issue to issue, so the context has to travel with it. It used to be captured in a
   * closure instead, which is what forced `RecursiveArrows` to be constructed per run rather than wired once.
   */
-final case class TaskNode(context: RunContext, issue: Issue)
+/** A task in the dependency walk.
+  *
+  * `extendedCacheTtl` is set when this node is one of >= 3 siblings in the same fan-out that will route to the same
+  * runner, so the first of them writes the shared prompt prefix with the 1-hour TTL and the rest read it (T20). It
+  * rides on the node rather than being recomputed at claim time because peer-ness is a property of the SET of
+  * siblings, which a single node cannot see.
+  */
+final case class TaskNode(
+    context: RunContext,
+    issue: Issue,
+    extendedCacheTtl: Boolean = false
+)
 
 /** What must close before a task node may run, plus whether any of it came from the node being an already split parent
   * (which means the node should be replayed on a later pass instead of implemented now).

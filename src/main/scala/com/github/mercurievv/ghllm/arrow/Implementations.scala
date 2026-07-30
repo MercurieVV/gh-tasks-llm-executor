@@ -475,11 +475,19 @@ object Impl:
               .filter(child => GitHub.parentIds(child).contains(issue.number))
               .sortBy(_.number.value)
           else Nil
+        val siblings = (openDeps ++ openChildren).distinctBy(_.number)
+        // Peer-ness is a property of the sibling SET, so it has to be decided
+        // here: claimAndRun sees one node at a time and could never tell that
+        // two other tasks are about to run on the same runner. Not gated on
+        // --parallel, unlike the root batch: siblings share the prompt prefix
+        // whether or not they overlap in time, and the 1-hour window is what
+        // makes a sequential read still a hit.
+        val earnsTtl = CachePeers.qualifying(siblings.map(prospectiveRunnerKey(node.context, _)))
         DependencyPlan(
           node = node,
-          pending = (openDeps ++ openChildren)
-            .distinctBy(_.number)
-            .map(TaskNode(node.context, _)),
+          pending = siblings.zip(earnsTtl).map { case (issue, ttl) =>
+            TaskNode(node.context, issue, extendedCacheTtl = ttl)
+          },
           hasOpenChildren = openChildren.nonEmpty
         )
       }
@@ -531,21 +539,37 @@ object Impl:
   // Takes the candidate pipeline as a parameter rather than rebuilding the
   // whole program to call into it; Wiring supplies the deferred, already
   // instrumented arrow.
+  /** The runner a task will route to, decided from the issue alone.
+    *
+    * One definition, called from two places: `claimAndRun`, which actually runs
+    * it, and the cache-peer grouping in `collectPendingDependencies`, which only
+    * needs to know whether two siblings will land on the same runner. If these
+    * ever diverged, the grouping would promise a shared prefix that never
+    * materialises and the TTL premium would be paid for nothing.
+    */
+  def selectRunnerForIssue(context: RunContext, issue: Issue): TaskRunner =
+    val metadata = TaskMetadata.parse(issue.body.value)
+    context.agentInventory
+      .selectRunnerFor(
+        metadata.requiredAbilities,
+        GitHub.taskRunners(issue),
+        phase = metadata.phase,
+        metricsBackend = Some(TokenMetrics.defaultBackend(context.root))
+      )
+      .getOrElse(evaluatorRunner)
+
+  def prospectiveRunnerKey(context: RunContext, issue: Issue): (AgentBinary, Option[String]) =
+    val runner = selectRunnerForIssue(context, issue)
+    (runner.agent, runner.model)
+
   def claimAndRun[F[_]: Async](
       executeCandidate: -->[F, TaskCandidate, RunSummary]
   ): -->[F, TaskNode, RunSummary] =
     Kleisli { node =>
       val context = node.context
       val issue = node.issue
-      val metadata = TaskMetadata.parse(issue.body.value)
-      val runner = context.agentInventory
-        .selectRunnerFor(
-          metadata.requiredAbilities,
-          GitHub.taskRunners(issue),
-          phase = metadata.phase,
-          metricsBackend = Some(TokenMetrics.defaultBackend(context.root))
-        )
-        .getOrElse(evaluatorRunner)
+      val runner = selectRunnerForIssue(context, issue)
+        .copy(extendedCacheTtl = node.extendedCacheTtl)
       val runnable = TaskCandidate(context, issue, runner)
 
       IssueClaim

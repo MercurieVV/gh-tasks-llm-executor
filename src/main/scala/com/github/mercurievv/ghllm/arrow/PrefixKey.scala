@@ -31,3 +31,20 @@ object PrefixKey:
       .digest(input.getBytes(StandardCharsets.UTF_8))
     val hash = digest.map(b => f"$b%02x").mkString
     PrefixKey(runner, model, worktree, hash)
+
+/** Who is worth paying the extended (1-hour) cache TTL for — T20.
+  *
+  * The premium is roughly 2x on the write and pays back over about 3 reads, so a
+  * group is marked only once it has [[MinPeers]] members sharing the same
+  * `(agent, model)`. Peers do not have to run concurrently: an hour-long window
+  * is exactly what lets a later sibling read a prefix an earlier one wrote.
+  */
+object CachePeers:
+  val MinPeers: Int = 3
+
+  /** For each key in `keys` (input order preserved), whether its group is large
+    * enough to earn the TTL.
+    */
+  def qualifying[K](keys: List[K]): List[Boolean] =
+    val counts = keys.groupMapReduce(identity)(_ => 1)(_ + _)
+    keys.map(key => counts.getOrElse(key, 0) >= MinPeers)

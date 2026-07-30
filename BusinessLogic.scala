@@ -175,13 +175,10 @@ object BusinessLogic:
     * a sequential run of unrelated roots has no shared prefix worth paying for.
     */
   def markCachePeers(selection: TaskSelection): List[TaskCandidate] =
-    val cachePeers =
-      selection.candidates
-        .groupMapReduce(candidate => (candidate.runner.agent, candidate.runner.model))(_ => 1)(_ + _)
-    selection.candidates.map { candidate =>
-      val extendedCacheTtl =
-        selection.context.parallelExecution.value &&
-          cachePeers((candidate.runner.agent, candidate.runner.model)) >= 3
+    val qualifying =
+      CachePeers.qualifying(selection.candidates.map(c => (c.runner.agent, c.runner.model)))
+    selection.candidates.zip(qualifying).map { case (candidate, earnsTtl) =>
+      val extendedCacheTtl = selection.context.parallelExecution.value && earnsTtl
       candidate.copy(runner = candidate.runner.copy(extendedCacheTtl = extendedCacheTtl))
     }
 
