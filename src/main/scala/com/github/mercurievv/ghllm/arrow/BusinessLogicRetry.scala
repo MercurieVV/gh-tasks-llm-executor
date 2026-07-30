@@ -44,8 +44,23 @@ object BusinessLogicRetry:
       ),
       executeTaskArrows = empty.executeTaskArrows.copy(
         runAgent = empty.executeTaskArrows.runAgent.copy(
-          runTaskWithRunner = retryRunTaskWithRunner(progress)
-        )
+          // The verifier runs INSIDE the escalation loop, not after it.
+          //
+          // `BusinessLogic.executePreparedTaskInWorktree` composes
+          // `runAgent >>> runProjectValidation`, and this decorator only ever
+          // wrapped `runAgent` - so compile and test failures, which is what
+          // "red" almost always means, raised past the ladder and killed the
+          // task instead of escalating it. Only errors thrown inside the agent
+          // run itself (a turn cap, a dead process) ever reached
+          // `routeRunnerFallback`. That is the wrong half: the plan's Stage 1
+          // is "run -> compile + test -> red: escalate", and the free verifier
+          // is the whole reason a cheap runner can be tried first.
+          runTaskWithRunner =
+            run => retryRunTaskWithRunner(progress)(run.andThen(Impl.runProjectValidation[F]))
+        ),
+        // Already run above, once per attempt. Left in place it would re-run the
+        // whole suite on the winning attempt and record a second sample for it.
+        runProjectValidation = _ => Kleisli.ask[F, ExecutedTask]
       )
     )
 

@@ -147,6 +147,48 @@ class AgentRunArrowsSuite extends CatsEffectSuite:
       }
     }
 
+  test("a red verifier escalates, not just a dead runner"):
+    // The agent itself succeeds every time; only the verifier objects, which is
+    // what "red" almost always is - it did not compile, or a test failed. Until
+    // validation was composed into the retried unit this raised straight past
+    // the ladder and killed the task.
+    Ref[IO].of(List.empty[AgentBinary]).flatMap { runners =>
+      val runTaskWithRunner = Kleisli { (task: PreparedTask) =>
+        runners.update(_ :+ task.claimedTask.runner.agent)
+          .as(ExecutedTask(task.claimedTask, AgentOutput("ok")))
+      }
+      val validate = Kleisli { (executed: ExecutedTask) =>
+        if executed.run.runner.agent.value == weak.agent.value then
+          IO.raiseError(RuntimeException("tests failed"))
+        else IO.pure(executed)
+      }
+      val retryingRunTask = BusinessLogicRetry.retryRunTaskWithRunner[IO](
+        routeFallback = Kleisli { case (task, _) =>
+          IO.pure(Right(task.copy(claimedTask = task.claimedTask.copy(runner = strong))))
+        },
+        raiseFailure = Kleisli(IO.raiseError)
+      )(runTaskWithRunner.andThen(validate))
+
+      retryingRunTask.run(prepared(weak)).flatMap { result =>
+        runners.get.map { attempted =>
+          assertEquals(result.output.value, "ok")
+          assertEquals(attempted, List(weak.agent, strong.agent))
+        }
+      }
+    }
+
+  test("validation is not left on the post-agent slot as well"):
+    // It now runs inside the loop. Left here too it would re-run the whole
+    // suite on the winning attempt and record a second sample for that runner.
+    val bomb: Kleisli[IO, ExecutedTask, ExecutedTask] =
+      Kleisli(_ => IO.raiseError(RuntimeException("validation ran twice")))
+    val slot =
+      BusinessLogicRetry[IO](_ => IO.unit).executeTaskArrows.runProjectValidation(bomb)
+
+    slot
+      .run(ExecutedTask(prepared(weak).claimedTask, AgentOutput("ok")))
+      .map(result => assertEquals(result.output.value, "ok"))
+
   test("with no stronger runner the failure propagates"):
     val retryingRunTask = BusinessLogicRetry.retryRunTaskWithRunner[IO](
       routeFallback = Kleisli { case (_, verdict) => IO.pure(Left(verdict)) },
