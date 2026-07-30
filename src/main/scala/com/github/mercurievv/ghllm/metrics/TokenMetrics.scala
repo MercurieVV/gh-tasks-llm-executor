@@ -150,7 +150,12 @@ object TokenMetrics:
         Some(Attribute("scope", event.scope)),
         Some(Attribute("token_type", tokenType)),
         event.taskNumber.map(number => Attribute("task", number.value.toLong)),
-        event.model.map(model => Attribute("model", model))
+        event.model.map(model => Attribute("model", model)),
+        event.phase.map(p => Attribute("phase", p)),
+        event.runner.map(r => Attribute("runner", r)),
+        event.turnCount.map(tc => Attribute("turn_count", tc.toLong)),
+        Some(Attribute("escalated", event.escalated)),
+        event.outcome.map(o => Attribute("outcome", o))
       ).flatten
 
     private def query(query: TokenMetricsQuery, baseUrl: String): List[TokenMetricsEvent] =
