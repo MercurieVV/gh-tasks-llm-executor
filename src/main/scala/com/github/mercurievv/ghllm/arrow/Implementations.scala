@@ -1166,7 +1166,10 @@ Replay rules:
 - If the previous implementation was already merged, create the minimal follow-up fix in this task branch.
 """).getOrElse("")
 
-    val scalaMandate = if (task.body.value.toLowerCase.contains(".scala")) s"\n\n$ScalaSemanticMandate" else ""
+    // Same predicate as the SemanticDB refresh gate, deliberately: the two
+    // Stage 3 features must agree on what "a Scala task" is, and body-only
+    // matching missed tasks that name their files in the title.
+    val scalaMandate = if taskTouchesScala(task) then s"\n\n$ScalaSemanticMandate" else ""
 
     AgentPrompt(s"""Task ID: #${task.number}
 Title: ${task.title}

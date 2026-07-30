@@ -222,7 +222,11 @@ object TaskLogger:
     case AgentStream(stream: AgentOutputStream, rawLine: AgentOutputLine)
     case Monitor
 
-  private val MonitorKey = " monitor"
+  // NUL-prefixed so it can never collide with a sticky key captured from
+  // agent output by the user's GH_TASKS_STICKY_REGEX. Written as an escape,
+  // not a raw byte: a literal NUL makes git treat this file as binary, which
+  // silently hides it from diffs and from grep/rg.
+  private val MonitorKey = "\u0000monitor"
 
   private val writeLock = new Object
 

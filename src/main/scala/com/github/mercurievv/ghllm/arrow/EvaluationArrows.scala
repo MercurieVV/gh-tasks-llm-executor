@@ -423,7 +423,7 @@ object EvaluationArrows:
       else if strongDescription(task.body) then "strong"
       else "weak"
 
-    val scalaMandate = if (task.body.value.toLowerCase.contains(".scala")) s"\n\n${Impl.ScalaSemanticMandate}" else ""
+    val scalaMandate = if Impl.taskTouchesScala(task) then s"\n\n${Impl.ScalaSemanticMandate}" else ""
 
     AgentPrompt(s"""Evaluate and prepare this GitHub task before implementation.
 
@@ -509,7 +509,7 @@ $dependencyConclusionStr$userAnswerStr$scalaMandate""")
       .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
       .getOrElse("")
 
-    val scalaMandate = if (task.body.value.toLowerCase.contains(".scala")) s"\n\n${Impl.ScalaSemanticMandate}" else ""
+    val scalaMandate = if Impl.taskTouchesScala(task) then s"\n\n${Impl.ScalaSemanticMandate}" else ""
 
     AgentPrompt(
       s"""Create missing GitHub subtasks for an already-evaluated split task.

@@ -326,7 +326,24 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     stdout.join(TimeUnit.SECONDS.toMillis(5))
     stderr.join(TimeUnit.SECONDS.toMillis(5))
 
-    val reportedOutput = parseReportedOutput(runner, AgentOutput(output.toString))
+    val transcript = output.synchronized(output.toString)
+    // Scanned against the RAW stream, not reportedOutput.output: for claude the
+    // latter is only the final result text, and the `cat`/`rg` invocations being
+    // counted appear in the streamed transcript. Without this the whole metric
+    // reads zero and there is no way to tell whether the ScalaSemantic mandate
+    // is being obeyed (TOKEN_EFFICIENCY_PLAN.md §2 Stage 3).
+    val scalaTextToolCalls =
+      TokenMetrics.recordScalaTextToolCalls(
+        transcript,
+        runner.display,
+        phase.getOrElse("unknown")
+      )
+    if scalaTextToolCalls > 0 then
+      TaskLogger.unsafeTrace(
+        s"scala text-tool calls agent=${runner.agent.value} scope=$metricsScope phase=${phase
+            .getOrElse("-")} task=${taskNumber.map(_.value.toString).getOrElse("-")} count=$scalaTextToolCalls"
+      )
+    val reportedOutput = parseReportedOutput(runner, AgentOutput(transcript))
     recordTokenMetrics(
       runner = runner,
       taskNumber = taskNumber,
