@@ -86,15 +86,35 @@ failing calls from the common path, but the underlying transport failures
 restarted") are server-side and out of this repo's reach. `ScalaTextToolCallEvent`
 already counts the fallback, so the payoff is measurable once run data accumulates.
 
-Beyond the numbered tasks: Stage 5 has no task breakdown, and four of its leaks
-have been closed directly (the implementer's split instructions, the evaluator's
-verdict/preservation restating, the runner-authored file list, now read from
-git, and the priced tool catalogue in both evaluation prompts — replaced
-2026-07-31 by `AgentInventory.abilityVocabulary`, ~3.2k characters down to ~270,
-since the only rule referencing it needed the ability names and nothing else,
-and the prices were inviting the evaluator to pin a runner over the run-time
-measured choice). No before/after payoff measurement exists yet — Stage 0 records the
-dimensions, but nothing has been run long enough to compare.
+Beyond the numbered tasks: Stage 5 never got a numbered breakdown, because its
+audit turned out to be the deliverable. Its seven named steps were checked
+against the code on 2026-07-31 and only two were ever done by a model. Both are
+now fixed, so Stage 5 is closed by audit rather than by tasks:
+
+| Stage 5 step | Who does it | Verdict |
+|---|---|---|
+| conflict detection | `Git.unresolvedConflictFiles` / `hasUnresolvedConflicts` | git-derived. A model only *resolves* conflicts, which is not deterministic |
+| test running | repo's own hook via `Git.runProjectValidation` | deterministic — but until 2026-07-31 it ran outside the escalation loop, so its verdict killed tasks instead of escalating them. Fixed |
+| lint / format | same hook | deterministic. The executor deliberately does not know a project's checks; the project supplies one executable gate |
+| PR templating | `Impl.extractAgentFinalization` | model-written, and left that way: a commit title and PR body summarising an arbitrary diff are prose, not a deterministic function of it. Parsed out of the run that already happened — no extra call |
+| metadata parsing | `TaskMetadata.parse` | pure string parsing |
+| runner selection | `AgentInventory.selectRunnerFor` | measured, in code. The one model input is the evaluator's ability *names*, and the priced catalogue that invited it to pick a runner outright was removed |
+| branch hygiene | executor (`Agent boundary:` forbids the agent all of it) | deterministic |
+
+The second fix: the final answer contract asked the implementer to "List
+validation commands you ran and whether they passed" — a deterministic question
+the hook answers authoritatively, reported by a model, parsed by nothing, and
+misleading exactly when the two disagree. Removed 2026-07-31; Workflow step 4
+still requires the verification itself.
+
+Four further Stage 5 leaks were closed earlier and directly: the implementer's
+split instructions, the evaluator's verdict/preservation restating, the
+runner-authored file list (now read from git), and the priced tool catalogue in
+both evaluation prompts — replaced 2026-07-31 by
+`AgentInventory.abilityVocabulary`, ~3.2k characters down to ~270.
+
+No before/after payoff measurement exists yet — Stage 0 records the dimensions,
+but nothing has been run long enough to compare.
 
 ## How to read a task
 
