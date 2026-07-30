@@ -99,6 +99,7 @@ object TokenMetrics:
   object VictoriaMetricsBackend:
     val MetricName = "gh_tasks_llm_executor_token_usage"
     val PrometheusMetricName = MetricName + "_total"
+    val ScalaTextToolCallsMetricName = "scala_text_tool_calls"
 
     def defaultBaseUrl: String =
       sys.env.get("GH_TASKS_METRICS_VICTORIA_URL").getOrElse("http://localhost:8428")
@@ -126,6 +127,31 @@ object TokenMetrics:
               if value > 0 then counter.add(value, attributes(event, kind))
               else IO.unit
             }
+          yield ()
+        }
+
+    private[metrics] def recordScalaTextToolCalls(
+        count: Long,
+        runner: String,
+        phase: String,
+        baseUrl: String
+    ): IO[Unit] =
+      IO.delay(configureOtel(baseUrl)) *>
+        OtelJava.autoConfigured[IO]().use { otel =>
+          for
+            meter <- otel.meterProvider.get("gh-tasks-llm-executor")
+            counter <- meter
+              .counter[Long](ScalaTextToolCallsMetricName)
+              .withUnit("{call}")
+              .withDescription("Shell text-tool calls that target Scala source")
+              .create
+            _ <- counter.add(
+              count,
+              List(
+                Attribute("runner", runner),
+                Attribute("phase", phase)
+              )
+            )
           yield ()
         }
 
@@ -263,6 +289,21 @@ object TokenMetrics:
         case "victoria" | "victoriametrics" | "victoria-metrics" => Some(VictoriaMetrics)
         case "jsonl" | "file"                                    => Some(Jsonl)
         case _                                                   => None
+
+  def recordScalaTextToolCalls(
+      transcript: String,
+      runner: String,
+      phase: String,
+      baseUrl: String = VictoriaMetricsBackend.defaultBaseUrl
+  ): Long =
+    val count = TaskLogger.scalaTextToolCallCount(transcript)
+    if count > 0 then
+      Try(
+        VictoriaMetricsBackend
+          .recordScalaTextToolCalls(count, runner, phase, baseUrl)
+          .unsafeRunSync()
+      ).fold(_ => (), identity)
+    count
 
   def defaultBackend(root: os.Path = os.pwd): TokenMetricsBackend =
     backendFromEnv(root)
