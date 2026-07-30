@@ -15,6 +15,7 @@ FILES=(
   BusinessLogic.scala
   BusinessArrows.scala
   TaskRunner.scala
+  TaskTree.scala
   Models.scala
   Priority.scala
   src/main/scala/com/github/mercurievv/ghllm/agent/AgentExecutor.scala
@@ -29,15 +30,18 @@ FILES=(
   src/main/scala/com/github/mercurievv/ghllm/arrow/Implementations.scala
   src/main/scala/com/github/mercurievv/ghllm/git/IssueClaim.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/ParallelArrows.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/PrefixKey.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/Replayability.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/BusinessLogicReplay.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/Retryability.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/BusinessLogicRetry.scala
+  src/main/scala/com/github/mercurievv/ghllm/arrow/TaskTree.scala
   src/main/scala/com/github/mercurievv/ghllm/cli/RunEnv.scala
   src/main/scala/com/github/mercurievv/ghllm/metrics/TaskLogger.scala
   src/main/scala/com/github/mercurievv/ghllm/metrics/TokenMetrics.scala
   src/main/scala/com/github/mercurievv/ghllm/metrics/TokenUsage.scala
   src/main/scala/com/github/mercurievv/ghllm/metrics/VendorBudgets.scala
+  src/main/scala/com/github/mercurievv/ghllm/task/TaskF.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/Wiring.scala
   src/main/scala/com/github/mercurievv/ghllm/cli/taskMetadata.scala
 )
