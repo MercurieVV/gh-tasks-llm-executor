@@ -36,9 +36,25 @@ Do not use raw scalac flags for this. Avoid:
 //> using options -sourceroot:..
 ```
 
-If SemanticDB tools report an empty index, verify generation with:
-`find .semanticdb -name '*.semanticdb'`
+## Refreshing is two steps, and skipping the second is silent
 
-If ScalaSemantic still returns an old outline after refresh, the running MCP
-server has cached the previous root index. Restart the MCP/client session so it
-loads the refreshed `.semanticdb` files.
+`scripts/refresh-semanticdb.sh` writes new `.semanticdb` files. The MCP server
+caches the index in memory and keeps serving the old one until told otherwise,
+so **always follow the script with the `refresh_workspace` MCP tool**. A session
+restart also works but is not required — `refresh_workspace` is the cheap fix.
+
+This matters because a stale index does not fail, it lies plausibly:
+`document_outline` returns an outline with line numbers off by however much the
+file has moved and members that no longer exist, and `find_symbol` returns
+`count: 0` for a symbol added since the last compile — which reads exactly like
+"this symbol does not exist".
+
+The same trap applies to coverage. `scala-cli compile .` is **main-scope only**,
+so without `--test` every `*.test.scala` is absent from the index and
+`find_usages` under-reports any symbol whose remaining callers are tests. The
+script passes `--test` and prints an indexed/sources count; if it warns that
+files are missing, treat "no usages" answers as unproven until they are indexed.
+`scripts/*.scala` and `project-remote.scala` are standalone scala-cli scripts
+outside the build and are expected to stay unindexed.
+
+Verify generation directly with: `find .semanticdb -name '*.semanticdb' | wc -l`
