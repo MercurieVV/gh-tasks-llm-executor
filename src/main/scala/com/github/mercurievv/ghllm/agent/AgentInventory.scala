@@ -56,6 +56,16 @@ final case class AgentTool(
       val raw = input * 0.020 + output * 0.004 * effortMultiplier
       math.round(raw * 1000.0) / 1000.0
 
+  // Break-even success rate for trying this tool before `stronger`:
+  // the ladder wins iff observed success rate p > c/s.
+  // See TOKEN_EFFICIENCY_PLAN.md section 2, Stage 1.
+  def breakEvenRateAgainst(stronger: AgentTool): Option[Double] =
+    cost.flatMap { c =>
+      stronger.cost.filter(_ > 0).map { s =>
+        math.min(1.0, c / s)
+      }
+    }
+
   // A price pinned long ago (model repriced upstream, model-prices.json not
   // refreshed) shouldn't silently drive ranking as if it were current.
   // Past this age, cost/priority fall back to "unknown" instead of a wrong
