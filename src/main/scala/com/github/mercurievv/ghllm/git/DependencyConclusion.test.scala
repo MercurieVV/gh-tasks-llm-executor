@@ -33,3 +33,21 @@ class DependencyConclusionSuite extends munit.FunSuite:
       .get
     assert(rendered.endsWith("- #9: Wired it in."))
     assert(rendered.contains(TaskArtifact.Marker))
+
+class FilesTouchedSuite extends munit.FunSuite:
+
+  test("no files touched renders no block"):
+    assertEquals(GitHub.renderFilesTouched(Nil), "")
+
+  test("paths are listed one per line under a heading"):
+    val rendered = GitHub.renderFilesTouched(List("a/Foo.scala", "b/Bar.scala"))
+    assertEquals(rendered, "\nFiles touched:\n  a/Foo.scala\n  b/Bar.scala\n")
+
+  test("a wide-reaching run is capped by count, and says how many were dropped"):
+    // Capped by count rather than characters on purpose: truncating mid-path
+    // would hand the next task a file name that does not exist.
+    val files = (1 to GitHub.MaxReportedFiles + 5).map(i => s"File$i.scala").toList
+    val rendered = GitHub.renderFilesTouched(files)
+    assert(rendered.contains("... and 5 more"))
+    files.take(GitHub.MaxReportedFiles).foreach(file => assert(rendered.contains(file), file))
+    assert(!rendered.contains(s"File${GitHub.MaxReportedFiles + 1}.scala"))

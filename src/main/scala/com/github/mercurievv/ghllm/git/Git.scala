@@ -282,6 +282,39 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       }
     }
 
+  /** Every path this run touched, additions included — what a dependent task
+    * needs in order to start from file names instead of searching for them
+    * (TOKEN_EFFICIENCY_PLAN.md §2 Stage 2, "never 'go find it'").
+    *
+    * Read from git rather than from the runner's prose: the set is already
+    * known exactly, so asking a model to restate it spends tokens to obtain a
+    * worse answer.
+    */
+  def changedFiles: Kleisli[F, (os.Path, BranchName, Option[BranchName]), List[String]] =
+    Kleisli.apply { case (worktreePath, branchName, baseBranch) =>
+      F.blocking {
+        val baseRef = baseRefOf(worktreePath, branchName, baseBranch)
+        val committed = os
+          .proc("git", "diff", "--name-only", s"${baseRef.value}...HEAD")
+          .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        val committedFiles =
+          if committed.exitCode === 0 then nonEmptyLines(committed.out.text()) else Nil
+        val pending = os
+          .proc("git", "status", "--porcelain")
+          .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        val pendingFiles =
+          if pending.exitCode =!= 0 then Nil
+          else
+            nonEmptyLines(pending.out.text(), trim = false).flatMap { line =>
+              val path = line.drop(3).trim
+              // "old -> new": the new path is the one that now exists.
+              val subject = path.split(" -> ").lastOption.map(_.trim).getOrElse(path)
+              Option.when(subject.nonEmpty)(subject)
+            }
+        (committedFiles ++ pendingFiles).distinct.sorted
+      }
+    }
+
   /** The uncommitted half of [[modifiedOrDeletedFiles]], for callers that judge
     * a worktree before anything is committed and so have no base ref to diff
     * against — the repair loop validates and only then commits.

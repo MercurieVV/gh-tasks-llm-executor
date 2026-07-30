@@ -793,16 +793,34 @@ $prText
         fields.get("body").collect { case ujson.Str(body) => body }
       case _ => None
 
+  /** The `Files touched:` block a dependent task reads.
+    *
+    * Capped, and by count rather than characters: a truncated path list would
+    * hand the next task a path that does not exist. A wide-reaching task is
+    * better summarised by its count than by an arbitrary prefix of its paths.
+    */
+  val MaxReportedFiles: Int = 40
+
+  def renderFilesTouched(files: List[String]): String =
+    if files.isEmpty then ""
+    else
+      val shown = files.take(MaxReportedFiles)
+      val more =
+        if files.length > MaxReportedFiles then
+          s"\n  ... and ${files.length - MaxReportedFiles} more"
+        else ""
+      s"\nFiles touched:\n${shown.map(file => s"  $file").mkString("\n")}$more\n"
+
   def commentConclusion[F[_]](progress: String => F[Unit])(using
       Sync[F]
-  ): Kleisli[F, (os.Path, Issue, TaskRunner, Option[String]), Unit] =
-    Kleisli.apply { case (root, task, runner, conclusion) =>
+  ): Kleisli[F, (os.Path, Issue, TaskRunner, Option[String], List[String]), Unit] =
+    Kleisli.apply { case (root, task, runner, conclusion, filesTouched) =>
       val conclusionLine =
         conclusion.fold("")(text => s"\nConclusion:\n$text\n")
       val body =
         s"""Script conclusion:
 Task #${task.number} completed successfully.
-$conclusionLine
+$conclusionLine${renderFilesTouched(filesTouched)}
 Runner:
 ${runner.display}
 """

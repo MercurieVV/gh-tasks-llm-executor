@@ -229,3 +229,52 @@ class ModifiedOrDeletedInWorktreeSuite extends CatsEffectSuite:
     os.write(root / "Bar.test.scala", "class BarSuite\n")
 
     changed(root).map(files => assertEquals(files, Nil))
+
+class ChangedFilesSuite extends CatsEffectSuite:
+
+  private def repo(): os.Path =
+    val root = os.temp.dir(prefix = "git-touched-files")
+    os.proc("git", "init", "-q", "-b", "master").call(cwd = root)
+    os.proc("git", "config", "user.email", "test@example.com").call(cwd = root)
+    os.proc("git", "config", "user.name", "Test").call(cwd = root)
+    os.write(root / "Foo.scala", "object Foo\n")
+    os.proc("git", "add", ".").call(cwd = root)
+    os.proc("git", "commit", "-q", "-m", "seed").call(cwd = root)
+    root
+
+  private def branch(root: os.Path): os.Path =
+    val worktree = os.temp.dir(prefix = "git-touched-worktree") / "task-1"
+    os.proc("git", "worktree", "add", "-q", "-b", "task-1", worktree.toString).call(cwd = root)
+    worktree
+
+  private def touched(worktree: os.Path): IO[List[String]] =
+    Git[IO](_ => IO.unit).changedFiles
+      .run((worktree, BranchName("task-1"), Some(BranchName("master"))))
+
+  test("a clean worktree touched nothing"):
+    touched(branch(repo())).map(files => assertEquals(files, Nil))
+
+  test("additions count here, unlike modifiedOrDeletedFiles"):
+    // This list is context for the next task, not a guard: a file the run
+    // created is exactly what a dependent task needs to be pointed at.
+    val worktree = branch(repo())
+    os.write(worktree / "Bar.scala", "object Bar\n")
+
+    touched(worktree).map(files => assertEquals(files, List("Bar.scala")))
+
+  test("committed and uncommitted changes are merged, deduplicated and sorted"):
+    val root = repo()
+    val worktree = branch(root)
+    os.write.over(worktree / "Foo.scala", "object Foo // one\n")
+    os.proc("git", "add", ".").call(cwd = worktree)
+    os.proc("git", "commit", "-q", "-m", "edit").call(cwd = worktree)
+    os.write.over(worktree / "Foo.scala", "object Foo // two\n")
+    os.write(worktree / "Bar.scala", "object Bar\n")
+
+    touched(worktree).map(files => assertEquals(files, List("Bar.scala", "Foo.scala")))
+
+  test("a rename reports the path that now exists"):
+    val worktree = branch(repo())
+    os.proc("git", "mv", "Foo.scala", "Renamed.scala").call(cwd = worktree)
+
+    touched(worktree).map(files => assert(files.contains("Renamed.scala"), files.toString))

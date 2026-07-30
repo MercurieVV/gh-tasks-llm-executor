@@ -1147,11 +1147,18 @@ object Impl:
       val conclusion = extractPrefixedLine(task.output, "Conclusion")
       for
         _ <- progress(s"Closing task #${run.task.number} with comment...")
+        // Taken from git, not from the runner's summary: dependent tasks get
+        // exact paths to start from instead of searching for them, and a
+        // failure to read them must not block closing the task.
+        filesTouched <- git[F].changedFiles
+          .run((run.worktreePath, run.branchName, run.baseBranch))
+          .handleError(_ => Nil)
         _ <- GitHub.commentConclusion(progress)(
           run.context.root,
           run.task,
           run.runner,
-          conclusion
+          conclusion,
+          filesTouched
         )
         _ <- GitHub.setIssueStatus(progress)(
           run.context.root,
