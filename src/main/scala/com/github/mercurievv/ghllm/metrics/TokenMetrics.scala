@@ -55,6 +55,11 @@ object TokenMetrics:
     def summary(query: TokenMetricsQuery): TokenUsage.TokenSnapshot =
       this.query(query.copy(limit = None)).foldLeft(TokenUsage.TokenSnapshot.Zero)(_ + _.usage)
 
+    def cacheHitRatio(query: TokenMetricsQuery): Double =
+      val s = summary(query)
+      val denom = s.input + s.cacheRead
+      if denom == 0L then 0.0 else s.cacheRead.toDouble / denom.toDouble
+
     // Observed p: fraction of recorded runs for this (phase, runner) whose
     // outcome was "green". None when the sample is smaller than `minSample`.
     def successRate(phase: String, runner: String, minSample: Int = 20): Option[Double] =

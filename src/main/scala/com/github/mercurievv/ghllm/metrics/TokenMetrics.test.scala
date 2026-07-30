@@ -101,6 +101,41 @@ class TokenMetricsSuite extends munit.FunSuite:
     assertEquals(TokenMetrics.defaultRootForWorktree(worktree), root)
     assertEquals(TokenMetrics.defaultRootForWorktree(root), root)
 
+  test("cacheHitRatio is zero for empty query"):
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+    assertEquals(backend.cacheHitRatio(TokenMetrics.TokenMetricsQuery()), 0.0)
+
+  test("cacheHitRatio sums across events"):
+    val dir = os.temp.dir()
+    val path = dir / "metrics.jsonl"
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(path)
+
+    val snap1 = TokenUsage.TokenSnapshot(input = 10, output = 0, cacheRead = 3, cacheWrite = 0, total = 13)
+    val snap2 = TokenUsage.TokenSnapshot(input = 0, output = 0, cacheRead = 5, cacheWrite = 0, total = 5)
+
+    backend.record(TokenMetrics.TokenMetricsEvent(
+      timestampMillis = 1000,
+      vendor = TokenUsage.Vendor.Codex,
+      usage = snap1,
+      taskNumber = None,
+      model = None,
+      scope = "test"
+    ))
+    backend.record(TokenMetrics.TokenMetricsEvent(
+      timestampMillis = 2000,
+      vendor = TokenUsage.Vendor.Codex,
+      usage = snap2,
+      taskNumber = None,
+      model = None,
+      scope = "test"
+    ))
+
+    // total input = 10, total cacheRead = 3+5=8, ratio = 8/18 ≈ 0.444...
+    val expected = 8.0 / 18.0
+    assertEqualsDouble(backend.cacheHitRatio(TokenMetrics.TokenMetricsQuery()), expected, 0.001)
+
   // ---- T08 successRate tests ---------------------------------------------------
 
   test("successRate returns None for sample below minSample"):
