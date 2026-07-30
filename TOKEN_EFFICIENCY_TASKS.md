@@ -22,7 +22,7 @@ around them is older than the code.
 | T17 | done | `TaskArtifact.bound` enforced in `GitHub.renderDependencyConclusions` — the contract existed unused until it was wired there |
 | T18 | done as data only | `PrefixKey` is built in `NodeProfiles` for cost attribution; nothing caches on it |
 | T19 | done | `Impl.taskPrompt` is ordered most-stable-first; `PromptSegmentOrderSuite` pins it |
-| T20 | **not started** | no cache-TTL call anywhere, and siblings are not launched together. An earlier audit called this done on the strength of a `FanOutCacheTest.scala` string inside a `TestEditGuard` test fixture — that file does not exist |
+| T20 | **blocked, not merely unstarted** | the TTL is an API parameter and this executor invokes vendor CLIs as subprocesses, so there is nowhere to set it — see the task for what remains salvageable. An earlier audit called this done on the strength of a `FanOutCacheTest.scala` string inside a `TestEditGuard` test fixture — that file does not exist |
 | T21–T22 | done | `TaskF`, `TaskGraph.coalgebra`, `TaskTree.costAlgebra`, `annotate` |
 | T23 | partial | the fold is reachable from the `estimate` CLI path (`PlanEstimate`), but execution routing still does not consume it — the cost model informs a human, not the scheduler |
 
@@ -505,6 +505,28 @@ fan-out with ≥3 children, not on a linear chain.
 single-child edge.
 
 **Do NOT.** Launch siblings staggered — they must start together or the window is lost.
+
+**Blocked as written — read before starting.** The TTL is an API-level parameter
+(`cache_control: {type: "ephemeral", ttl: "1h"}` on a content block). This executor
+never speaks to the API: `TaskRunner.command` builds an argv for a vendor CLI
+(`claude -p`, `codex exec`, `aider --message`, `gemini -p`, `agy --print`) and
+`AgentExecutor` runs it as a subprocess. The CLI constructs its own request, and none
+of the five exposes a TTL flag. There is nowhere to set this without either a vendor
+CLI flag that does not exist or replacing the subprocess transport with a direct API
+client — a far larger change than "medium" implies, and one that would have to be
+re-done per vendor.
+
+Two things are salvageable from this task without that:
+
+1. **Launch siblings together.** The prefix would then be shared inside the provider's
+   *default* (5-minute) cache window, which needs no flag. This half is genuinely not
+   done: `ParallelArrows.parAll` is wired for independent ROOT candidates under
+   `--parallel`, not for the children of one fan-out, which still run sequentially
+   through `RecursiveArrows`.
+2. **Note the cap interaction first.** `ParallelArrows.MaxParallelism = 2`, so even
+   once siblings run concurrently, a 3-child fan-out has at most 2 concurrent readers
+   of the prefix. The ≥3-reads break-even above and that cap were chosen independently
+   and currently contradict each other — decide which moves before building on either.
 
 ---
 
