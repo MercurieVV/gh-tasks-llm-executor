@@ -198,8 +198,10 @@ Layer every assembled prompt most-stable-first, since caching is prefix-only:
 - Never share one live session across parallel siblings: it forces serialisation via a
   mutex (destroying the parallelism) and cross-pollutes their contexts.
 - Live process reuse is worth it only inside a repair loop on a single runner.
-- Skip `IOLocal`. Carry `PrefixKey(runner, model, worktree, stablePrefixHash)` in the
-  arrow payload as data, so `TokenMetrics` can attribute cache hits. Ambient
+- Skip `IOLocal`. Carry `PrefixKey(runner, model, worktree)` in the
+  arrow payload as data, so `TokenMetrics` can attribute cache hits. (This listed a
+  fourth `stablePrefixHash` field; it was built, never cached on, and deleted — see
+  the T18 amendment in `TOKEN_EFFICIENCY_TASKS.md`.) Ambient
   fiber-local state is invisible to metrics and to tests; it can be added later as a
   shim over the explicit version, but not the reverse.
 

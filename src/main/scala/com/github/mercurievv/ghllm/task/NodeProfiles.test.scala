@@ -86,9 +86,11 @@ class NodeProfilesSuite extends CatsEffectSuite:
     assertEqualsDouble(model.estimate(profile.coefficients), 0.0, 1e-12)
     assertEquals(profile.tier, "implement")
 
-  test("nodes of the same phase share a prefix hash, different phases do not"):
-    // layer2 is the tier: same-phase nodes are the ones that actually share a
-    // cached prefix, which is the grouping the cache analysis reads.
+  test("nodes of the same phase share a tier, different phases do not"):
+    // Same-phase nodes are the ones that actually share a cached prefix, and
+    // `tier` is what carries that grouping. It used to be restated as a SHA-256
+    // `stablePrefixHash` over ("system", "repo", tier); that hash was removed
+    // because it was a second copy of this field and nothing cached on it.
     val events = List(
       event(Some(1), Some("plan"), input = 10, output = 0),
       event(Some(2), Some("test"), input = 10, output = 0)
@@ -98,8 +100,8 @@ class NodeProfilesSuite extends CatsEffectSuite:
     val alsoPlan = profileFor(NodeRef.Task(3, Some("plan")))
     val test = profileFor(NodeRef.Task(2, Some("test")))
 
-    assertEquals(plan.prefixKey.stablePrefixHash, alsoPlan.prefixKey.stablePrefixHash)
-    assertNotEquals(plan.prefixKey.stablePrefixHash, test.prefixKey.stablePrefixHash)
+    assertEquals(plan.tier, alsoPlan.tier)
+    assertNotEquals(plan.tier, test.tier)
 
   test("the reported runner and model are the sample's most frequent"):
     val events = List(

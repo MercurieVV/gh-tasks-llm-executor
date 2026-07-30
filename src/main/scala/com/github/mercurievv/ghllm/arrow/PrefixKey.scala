@@ -2,35 +2,20 @@ package com.github.mercurievv.ghllm.arrow
 
 import os.*
 
-import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
-
+/** Cache attribution for a node: who ran it, on what model, in which worktree.
+  *
+  * This carried a `stablePrefixHash` (SHA-256 over three prompt layers) until it
+  * was removed. Nothing cached on it, and it could not usefully be made to: its
+  * only caller fed it the constants `"system" | "repo" | tier`, so the hash was
+  * a restatement of `tier`, which sits beside it in `TaskTree.Attr`. What
+  * actually decides whether two runs share a cached prefix is `(agent, model)` —
+  * see [[CachePeers]], which is what T20 groups on.
+  */
 final case class PrefixKey(
     runner: String,
     model: Option[String],
-    worktree: os.Path,
-    stablePrefixHash: String
+    worktree: os.Path
 )
-
-object PrefixKey:
-  def of(
-      runner: String,
-      model: Option[String],
-      worktree: os.Path,
-      layer0: String,
-      layer1: String,
-      layer2: String
-  ): PrefixKey =
-    // The stable prefix hash is computed only from the three layers so that
-    // identical layers produce the same hash regardless of runner/model/worktree.
-    val input =
-      List(layer0, layer1, layer2)
-        .mkString("|")
-    val digest = MessageDigest
-      .getInstance("SHA-256")
-      .digest(input.getBytes(StandardCharsets.UTF_8))
-    val hash = digest.map(b => f"$b%02x").mkString
-    PrefixKey(runner, model, worktree, hash)
 
 /** Who is worth paying the extended (1-hour) cache TTL for — T20.
   *

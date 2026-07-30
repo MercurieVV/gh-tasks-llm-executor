@@ -85,15 +85,10 @@ object NodeProfiles:
       worktree: os.Path
   ): NodeProfile =
     NodeProfile(
-      // layer2 is the tier: nodes of the same phase are the ones that actually
-      // share a cached prefix, so this is the grouping a cache analysis wants.
-      PrefixKey.of(
+      PrefixKey(
         runner = mostCommon(sample.flatMap(_.runner)).getOrElse(UnknownTier),
         model = mostCommon(sample.flatMap(_.model)),
-        worktree = worktree,
-        layer0 = "system",
-        layer1 = "repo",
-        layer2 = tier
+        worktree = worktree
       ),
       tier,
       coefficientsOf(sample)

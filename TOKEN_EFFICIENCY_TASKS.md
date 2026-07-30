@@ -20,7 +20,7 @@ around them is older than the code.
 | T13–T15 | done | `Impl.ScalaSemanticMandate`; memoised `refreshSemanticDbIfNeeded`; `ScalaTextToolCallEvent` |
 | T16 | done | `TurnCap` (default 25) raises `TurnCapExceeded`, which becomes a `Red` |
 | T17 | done | `TaskArtifact.bound` enforced in `GitHub.renderDependencyConclusions` — the contract existed unused until it was wired there |
-| T18 | done as data only | `PrefixKey` is built in `NodeProfiles` for cost attribution; nothing caches on it |
+| T18 | done as data only, trimmed | `PrefixKey(runner, model, worktree)` is built in `NodeProfiles` for cost attribution; nothing caches on it. Its `stablePrefixHash` was deleted 2026-07-31 — see the amendment under T18 |
 | T19 | done | `Impl.taskPrompt` is ordered most-stable-first; `PromptSegmentOrderSuite` pins it |
 | T20 | done for `claude`, both paths | `markCachePeers` (root batch) and `collectPendingDependencies` (a split's siblings) mark ≥3 same-`(agent, model)` peers → `ENABLE_PROMPT_CACHING_1H` in the subprocess env. Independent of `--parallel`: the window outlives the run. Still a no-op for non-`claude` agents |
 | T21–T22 | done | `TaskF`, `TaskGraph.coalgebra`, `TaskTree.costAlgebra`, `annotate` |
@@ -487,18 +487,24 @@ Lowest value. Do last. See `TOKEN_EFFICIENCY_PLAN.md` §2 Stage 6.
 **Do.**
 
 ```scala
-final case class PrefixKey(runner: String, model: Option[String],
-                           worktree: os.Path, stablePrefixHash: String)
+final case class PrefixKey(runner: String, model: Option[String], worktree: os.Path)
 ```
 
-Plus `PrefixKey.of(...)` computing `stablePrefixHash` as a SHA-256 of the concatenated
-stable prompt layers `[0..2]`.
-
-**Done when.** Tests assert identical inputs give an identical hash, and that changing
-any layer changes it.
+**Done when.** `NodeProfiles` builds one per node so cache spend can be attributed to
+a `(runner, model, worktree)`.
 
 **Do NOT.** Use `IOLocal`. This is explicit payload data so `TokenMetrics` can attribute
 cache hits (plan §2 Stage 6).
+
+**Amended 2026-07-31 — the `stablePrefixHash` field was removed.** As specified it was
+a SHA-256 over the stable prompt layers `[0..2]`, and it was built that way. Nothing
+ever cached on it, and it could not be made to: its only caller (`NodeProfiles`) passes
+the constants `"system" | "repo" | tier`, so the digest was a restatement of `tier`,
+which already sits beside it in `TaskTree.Attr`. What actually determines whether two
+runs share a cached prefix is `(agent, model)` — the key `CachePeers`/T20 groups on.
+A hash keying nothing is not free: it is a field readers must reason about, and one
+that invites re-deriving the wrong grouping. Deleted along with `PrefixKey.of` and the
+five hash tests; `NodeProfilesSuite` now asserts the same-phase grouping on `tier`.
 
 ## T19 — Order assembled prompts most-stable-first
 

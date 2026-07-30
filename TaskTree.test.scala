@@ -28,13 +28,10 @@ class TaskTreeSuite extends ScalaCheckSuite:
     )
 
   private def prefix(value: String): PrefixKey =
-    PrefixKey.of(
-      runner = "test-runner",
+    PrefixKey(
+      runner = s"test-runner-$value",
       model = Some("test-model"),
-      worktree = os.pwd,
-      layer0 = "system",
-      layer1 = "repo",
-      layer2 = value
+      worktree = os.pwd
     )
 
   private def profile(
