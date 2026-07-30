@@ -53,7 +53,13 @@ Consequences worth knowing before changing this code:
 
 - **Bias down, not up.** A wasted cheap attempt is now a bounded cost, so the
   20×-cheaper runner wins at `p > 5%`. Do not re-add capability prediction on top.
-- **Escalation is the safety net.** `BusinessLogicRetry.routeRunnerFallback`
+- **Escalation is the safety net.** The retried unit is
+  `runTaskWithRunner.andThen(Impl.runProjectValidation)`, so the verifier runs
+  INSIDE the loop — until 2026-07-31 it ran after it, and a failing compile or
+  test raised past the ladder and killed the task instead of escalating it.
+  Anything composed after the agent that can reject its work belongs inside the
+  same loop, or the ladder cannot see the rejection.
+  `BusinessLogicRetry.routeRunnerFallback`
   escalates on `VerificationResult.Red` and `Failed`, hard-resets the worktree
   first (the stronger runner must start from HEAD, not from half-finished edits),
   seeds the retry with the error artifact only — never the failed transcript — and

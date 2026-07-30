@@ -15,7 +15,7 @@ around them is older than the code.
 | Task | State | Evidence |
 |---|---|---|
 | T01–T05 | done | `TokenMetricsEvent` carries `phase`/`runner`/`model`/`turnCount`/`escalated`/`outcome`; exported as OTel attributes; `cacheHitRatio` reads them back |
-| T06–T11 | done | `VerificationResult.scala`; `routeRunnerFallback` escalates on `Red`, hard-resets first, `MaxEscalationDepth = 2` |
+| T06–T11 | done | `VerificationResult.scala`; `routeRunnerFallback` escalates on `Red`, hard-resets first, `MaxEscalationDepth = 2`. Corrected 2026-07-31: the verifier ran *after* the retry loop, so only turn caps and dead processes ever escalated — a failing compile or test killed the task. The retried unit is now `runTaskWithRunner.andThen(runProjectValidation)` |
 | T12 | done | `AgentInventory.selectRunnerFor` + `breakEvenRateAgainst` + `successRate(minSample = 20)` |
 | T13–T15 | done | `Impl.ScalaSemanticMandate`; memoised `refreshSemanticDbIfNeeded`; `ScalaTextToolCallEvent` |
 | T16 | done | `TurnCap` (default 25) raises `TurnCapExceeded`, which becomes a `Red` |
