@@ -182,6 +182,27 @@ class CacheFlagSuite extends munit.FunSuite:
   test("aider is asked to cache prompts at all — its own default is off"):
     assert(commandFor("aider", "deepseek/deepseek-chat").contains("--cache-prompts"))
 
+  test("claude is never passed --system-prompt, which would silently void the flag"):
+    // The failure mode ADR-0001 names and nothing guarded: claude documents
+    // --exclude-dynamic-system-prompt-sections as ignored when --system-prompt
+    // is present. Both flags would still be on the command line, every test
+    // above would still pass, and the T19 ordering would quietly stop paying
+    // off - with no error anywhere. Adding --system-prompt is a real design
+    // option; doing it without noticing this is not.
+    val command = commandFor("claude", "opus")
+    assert(command.contains("--exclude-dynamic-system-prompt-sections"), command.toString)
+    assert(
+      !command.contains("--system-prompt"),
+      "--system-prompt voids --exclude-dynamic-system-prompt-sections; see ADR-0001"
+    )
+
+  test("the opt-outs exist because an unrecognised flag is fatal, not a warning"):
+    // scripts/remote-run.sh deploys to machines whose CLI versions this repo
+    // does not control, so both knobs have to be switchable without a code
+    // change. A default-on flag with no escape hatch is a deployment break.
+    assertEquals(TaskRunner.claudeCacheFlags, Seq("--exclude-dynamic-system-prompt-sections"))
+    assertEquals(TaskRunner.aiderCacheFlags, Seq("--cache-prompts"))
+
   test("no keepalive pings: single-shot runs have no later reader to keep warm"):
     assert(!commandFor("aider", "deepseek/deepseek-chat").contains("--cache-keepalive-pings"))
 

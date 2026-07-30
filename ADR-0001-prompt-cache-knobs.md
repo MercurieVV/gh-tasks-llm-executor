@@ -66,6 +66,13 @@ still gets it — but if a future change adds `--system-prompt`, this flag silen
 doing anything, and the T19 ordering quietly stops paying off. That is the failure mode
 to watch for.
 
+Since 2026-07-31 it is watched by a test rather than by this paragraph:
+`CacheFlagSuite` asserts that `claude`'s command line carries
+`--exclude-dynamic-system-prompt-sections` and does **not** carry `--system-prompt`.
+Adding `--system-prompt` remains a legitimate design choice — the test exists so that
+choice is made deliberately, with this trade-off in view, instead of voiding the flag by
+accident while every other test still passes.
+
 ## Revisit when
 
 - A vendor adds a client-side cache control (`codex` is the likely first).
