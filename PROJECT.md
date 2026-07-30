@@ -12,11 +12,54 @@ scope split: a scope-piece may itself carry a `Phase:`. Bias toward FEWER phases
 a trivial, fully-specified task stays a single `implement` (or no split); never
 force 4-phase overhead.
 
-Each phase routes to the cheapest runner still CAPABLE of that leaf (aim low, stop
-at the capability floor). Under-powering a leaf is the primary failure mode: a
-too-weak model yields wrong code, forcing repair/replay and a net token loss.
+## Runner selection: start at the floor, escalate on red
 
-| Phase | Required capability | Tier |
+Selection is **measured, not predicted**. Earlier guidance here said to predict the
+capability a leaf needs and to treat under-powering as the primary failure mode.
+That advice was written before the verifier was wired in, and it is now wrong in
+both halves: prediction is unnecessary when a free verifier can answer the same
+question empirically, and an under-powered leaf is no longer terminal because it
+escalates.
+
+`AgentInventory.selectRunnerFor` takes the cheapest available implementor and keeps
+it only when its measured success rate beats the price ratio:
+
+```
+c = cheap runner cost, s = next stronger cost, p = observed success rate
+E[ladder] = c + (1-p)·s   <   E[direct] = s   <=>   p > c/s
+```
+
+`AgentTool.breakEvenRateAgainst` supplies `c/s`;
+`TokenMetricsBackend.successRate(phase, runner)` supplies `p`, per phase, from
+recorded outcomes. Either being absent — an unpriced tool, or fewer than
+`minSample = 20` recorded runs — falls back to the existing `Priority.score`
+ordering unchanged. An unmeasured pair is never read as a 100% success rate.
+
+Consequences worth knowing before changing this code:
+
+- **Bias down, not up.** A wasted cheap attempt is now a bounded cost, so the
+  20×-cheaper runner wins at `p > 5%`. Do not re-add capability prediction on top.
+- **Escalation is the safety net.** `BusinessLogicRetry.routeRunnerFallback`
+  escalates on `VerificationResult.Red` and `Failed`, hard-resets the worktree
+  first (the stronger runner must start from HEAD, not from half-finished edits),
+  seeds the retry with the error artifact only — never the failed transcript — and
+  stops at `MaxEscalationDepth = 2`, after which the task surfaces to a human.
+- **The turn cap feeds the same path.** Exceeding `TurnCap` (default 25,
+  overridable in `.gh-tasks-llm-executor/execution-limits.json`) raises
+  `TurnCapExceeded`, which becomes a `Red` rather than a `Failed` — "could not
+  finish" is not "the tool is broken".
+- **Tests are not the implementer's to edit.** `TestEditGuard` rejects a run that
+  modified, deleted or renamed an existing test file unless its phase is `test`,
+  `plan` or `source-of-truth`. Adding a test is allowed. A task with no `Phase:` is
+  guarded, not exempt. This is what keeps a green honest: without it, the cheapest
+  path to a passing verifier is to weaken the verifier, and the resulting `"green"`
+  would feed `successRate` and bias selection toward the runner that cheated.
+  A task in this repo that legitimately must change a test needs `Phase: test`.
+
+The tier table below is the **starting prior** for a phase with no measurements
+yet, not a floor to be defended:
+
+| Phase | Required capability | Starting tier |
 |---|---|---|
 | plan | strong reasoning / decomposition | high |
 | source-of-truth | judgment on authority / spec | high–medium |
