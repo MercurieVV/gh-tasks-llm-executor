@@ -501,8 +501,17 @@ object BusinessLogicRetry:
           metricsScope = "repair"
         )
         changed <- Impl.git[F].filesChanged(worktreePath)
+        // Same false-green hole as the main execute path, on a second route: a
+        // repair agent that weakens a test turns CI green and this commits it.
+        // The repair agent works uncommitted, so the worktree alone is the diff.
+        testEdits <- Impl
+          .git[F]
+          .modifiedOrDeletedInWorktree(worktreePath)
+          .map(TestEditGuard.violations(TestEditGuard.phaseOf(task.body), _))
         _ <-
-          if changed then
+          if testEdits.nonEmpty then
+            F.raiseError[Unit](RuntimeException(TestEditGuard.report(TestEditGuard.phaseOf(task.body), testEdits)))
+          else if changed then
             Impl.git[F].runProjectValidation(worktreePath).attempt.flatMap {
               case Right(_) =>
                 Impl.git[F].commitAll(worktreePath, task, Some(commitMessage))

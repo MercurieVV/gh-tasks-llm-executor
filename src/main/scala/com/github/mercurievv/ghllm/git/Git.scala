@@ -242,29 +242,77 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       }
     }
 
+  // Resolves what "before this task" means: the pushed branch if there is one,
+  // else the task's base, else whichever default branch this repo uses.
+  private def baseRefOf(
+      worktreePath: os.Path,
+      branchName: BranchName,
+      baseBranch: Option[BranchName]
+  ): BranchName =
+    val remoteBranch = BranchName(s"origin/${branchName.value}")
+    val hasRemoteBranch = os
+      .proc("git", "rev-parse", "--verify", remoteBranch.value)
+      .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+      .exitCode === 0
+    if hasRemoteBranch then remoteBranch
+    else
+      baseBranch.getOrElse(BranchName({
+        val hasMaster = os
+          .proc("git", "rev-parse", "--verify", "master")
+          .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+          .exitCode === 0
+        if hasMaster then "master" else "main"
+      }))
+
+  /** Paths this run modified, deleted or renamed — committed or not.
+    *
+    * Additions are deliberately excluded: the caller ([[TestEditGuard]]) blocks
+    * changes that could weaken an existing test, and a new file weakens nothing.
+    */
+  def modifiedOrDeletedFiles: Kleisli[F, (os.Path, BranchName, Option[BranchName]), List[String]] =
+    Kleisli.apply { case (worktreePath, branchName, baseBranch) =>
+      F.blocking {
+        val baseRef = baseRefOf(worktreePath, branchName, baseBranch)
+        val committed = os
+          .proc("git", "diff", "--name-only", "--diff-filter=MDR", s"${baseRef.value}...HEAD")
+          .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        val committedFiles =
+          if committed.exitCode === 0 then nonEmptyLines(committed.out.text()) else Nil
+        (committedFiles ++ uncommittedModifiedOrDeleted(worktreePath)).distinct.sorted
+      }
+    }
+
+  /** The uncommitted half of [[modifiedOrDeletedFiles]], for callers that judge
+    * a worktree before anything is committed and so have no base ref to diff
+    * against — the repair loop validates and only then commits.
+    */
+  def modifiedOrDeletedInWorktree: Kleisli[F, os.Path, List[String]] =
+    Kleisli.apply(worktreePath => F.blocking(uncommittedModifiedOrDeleted(worktreePath).distinct.sorted))
+
+  private def uncommittedModifiedOrDeleted(worktreePath: os.Path): List[String] =
+    // Porcelain's two status columns cover index and worktree; an untracked
+    // file reads "??" and must not count, so match the letters explicitly.
+    val pending = os
+      .proc("git", "status", "--porcelain")
+      .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+    if pending.exitCode =!= 0 then Nil
+    else
+      nonEmptyLines(pending.out.text(), trim = false).flatMap { line =>
+        val status = line.take(2)
+        val path = line.drop(3).trim
+        // A rename prints "old -> new"; the old path is the one at risk.
+        val subject = path.split(" -> ").headOption.map(_.trim).getOrElse(path)
+        if status.exists(c => c === 'M' || c === 'D' || c === 'R') && subject.nonEmpty then Some(subject)
+        else None
+      }
+
+  private def nonEmptyLines(text: String, trim: Boolean = true): List[String] =
+    text.linesIterator.map(line => if trim then line.trim else line).filter(_.trim.nonEmpty).toList
+
   def hasPublishableCommits: Kleisli[F, (os.Path, BranchName, Option[BranchName]), Boolean] =
     Kleisli.apply { case (worktreePath, branchName, baseBranch) =>
       F.blocking {
-        val remoteBranch = BranchName(s"origin/$branchName")
-        val hasRemoteBranch = os
-          .proc("git", "rev-parse", "--verify", remoteBranch.value)
-          .call(
-            cwd = worktreePath,
-            stdout = os.Pipe,
-            stderr = os.Pipe,
-            check = false
-          )
-          .exitCode === 0
-        val baseRef =
-          if (hasRemoteBranch) remoteBranch
-          else
-            baseBranch.getOrElse(BranchName({
-              val hasMaster = os
-                .proc("git", "rev-parse", "--verify", "master")
-                .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
-                .exitCode === 0
-              if (hasMaster) "master" else "main"
-            }))
+        val baseRef = baseRefOf(worktreePath, branchName, baseBranch)
         val result = os
           .proc("git", "rev-list", "--count", s"$baseRef..HEAD")
           .call(

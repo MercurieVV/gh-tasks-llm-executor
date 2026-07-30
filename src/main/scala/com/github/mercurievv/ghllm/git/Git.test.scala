@@ -125,3 +125,107 @@ class GitSuite extends CatsEffectSuite:
           assertEquals(localHead, originHead)
         }
     }
+
+class ModifiedOrDeletedFilesSuite extends CatsEffectSuite:
+
+  private def repo(): os.Path =
+    val root = os.temp.dir(prefix = "git-changed-files")
+    os.proc("git", "init", "-q", "-b", "master").call(cwd = root)
+    os.proc("git", "config", "user.email", "test@example.com").call(cwd = root)
+    os.proc("git", "config", "user.name", "Test").call(cwd = root)
+    os.write(root / "Foo.scala", "object Foo\n")
+    os.write(root / "Foo.test.scala", "class FooSuite\n")
+    os.proc("git", "add", ".").call(cwd = root)
+    os.proc("git", "commit", "-q", "-m", "seed").call(cwd = root)
+    root
+
+  private def changed(worktree: os.Path): IO[List[String]] =
+    Git[IO](_ => IO.unit)
+      .modifiedOrDeletedFiles
+      .run((worktree, BranchName("task-1"), Some(BranchName("master"))))
+
+  private def branch(root: os.Path): os.Path =
+    val worktree = os.temp.dir(prefix = "git-changed-worktree") / "task-1"
+    os.proc("git", "worktree", "add", "-q", "-b", "task-1", worktree.toString).call(cwd = root)
+    worktree
+
+  test("an uncommitted edit to an existing file is reported"):
+    val worktree = branch(repo())
+    os.write.over(worktree / "Foo.test.scala", "class FooSuite // weakened\n")
+
+    changed(worktree).map(files => assertEquals(files, List("Foo.test.scala")))
+
+  test("a committed edit is reported too — an agent may commit its own work"):
+    val root = repo()
+    val worktree = branch(root)
+    os.write.over(worktree / "Foo.test.scala", "class FooSuite // weakened\n")
+    os.proc("git", "add", ".").call(cwd = worktree)
+    os.proc("git", "commit", "-q", "-m", "edit").call(cwd = worktree)
+
+    changed(worktree).map(files => assertEquals(files, List("Foo.test.scala")))
+
+  test("a deleted test is reported — deleting the verifier passes it too"):
+    val worktree = branch(repo())
+    os.remove(worktree / "Foo.test.scala")
+
+    changed(worktree).map(files => assertEquals(files, List("Foo.test.scala")))
+
+  test("a newly added file is not reported"):
+    // Adding a test strengthens the verifier; blocking it would stop an
+    // implementer from covering the code it just wrote.
+    val worktree = branch(repo())
+    os.write(worktree / "Bar.test.scala", "class BarSuite\n")
+
+    changed(worktree).map(files => assertEquals(files, Nil))
+
+  test("an untracked file is not mistaken for a modification"):
+    val worktree = branch(repo())
+    os.write(worktree / "scratch.txt", "notes\n")
+
+    changed(worktree).map(files => assertEquals(files, Nil))
+
+  test("a clean worktree reports nothing"):
+    changed(branch(repo())).map(files => assertEquals(files, Nil))
+
+  test("production and test edits are reported together, sorted"):
+    val worktree = branch(repo())
+    os.write.over(worktree / "Foo.scala", "object Foo // changed\n")
+    os.write.over(worktree / "Foo.test.scala", "class FooSuite // changed\n")
+
+    changed(worktree).map(files => assertEquals(files, List("Foo.scala", "Foo.test.scala")))
+
+class ModifiedOrDeletedInWorktreeSuite extends CatsEffectSuite:
+
+  private def worktree(): os.Path =
+    val root = os.temp.dir(prefix = "git-worktree-only")
+    os.proc("git", "init", "-q", "-b", "master").call(cwd = root)
+    os.proc("git", "config", "user.email", "test@example.com").call(cwd = root)
+    os.proc("git", "config", "user.name", "Test").call(cwd = root)
+    os.write(root / "Foo.test.scala", "class FooSuite\n")
+    os.proc("git", "add", ".").call(cwd = root)
+    os.proc("git", "commit", "-q", "-m", "seed").call(cwd = root)
+    root
+
+  private def changed(path: os.Path): IO[List[String]] =
+    Git[IO](_ => IO.unit).modifiedOrDeletedInWorktree.run(path)
+
+  test("an uncommitted test edit is seen without any base ref"):
+    // The repair loop validates before committing, so it has no branch to diff.
+    val root = worktree()
+    os.write.over(root / "Foo.test.scala", "class FooSuite // weakened\n")
+
+    changed(root).map(files => assertEquals(files, List("Foo.test.scala")))
+
+  test("a committed edit is invisible here — by design, this is the worktree only"):
+    val root = worktree()
+    os.write.over(root / "Foo.test.scala", "class FooSuite // weakened\n")
+    os.proc("git", "add", ".").call(cwd = root)
+    os.proc("git", "commit", "-q", "-m", "edit").call(cwd = root)
+
+    changed(root).map(files => assertEquals(files, Nil))
+
+  test("an untracked new test is not a modification"):
+    val root = worktree()
+    os.write(root / "Bar.test.scala", "class BarSuite\n")
+
+    changed(root).map(files => assertEquals(files, Nil))

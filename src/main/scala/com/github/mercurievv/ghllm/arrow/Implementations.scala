@@ -1009,8 +1009,42 @@ object Impl:
   def recordAgentOutput[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli.ask[F, ExecutedTask]
 
-  def runProjectValidation[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
+  /** Rejects a run that changed the tests it is about to be judged by, before
+    * the judgement happens. Raising here puts it on the same path as a failed
+    * validation, so the existing ladder escalates it and, if the stronger
+    * runner does the same, surfaces it to a human.
+    */
+  def guardTestEdits[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli { task =>
+      val phase = TestEditGuard.phaseOf(task.run.task.body)
+      if TestEditGuard.isExempt(phase) then task.pure[F]
+      else
+        git[F].modifiedOrDeletedFiles
+          .run((task.run.worktreePath, task.run.branchName, task.run.baseBranch))
+          .map(TestEditGuard.violations(phase, _))
+          .flatMap {
+            case Nil => task.pure[F]
+            case violations =>
+              val message = TestEditGuard.report(phase, violations)
+              progress(message) *>
+                AgentExecutor.completeTokenMetrics[F](
+                  task.run.context.root,
+                  task.run.task.number,
+                  task.run.runner,
+                  phase.getOrElse("implement"),
+                  // Not "green": this run is being rejected, and recording it
+                  // as anything else would teach successRate that the runner
+                  // succeeded at what it was actually caught doing.
+                  "red"
+                ) *> Sync[F].raiseError(RuntimeException(message))
+          }
+    }
+
+  def runProjectValidation[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
+    guardTestEdits[F] >>> Kleisli { task =>
+      // The phase the outcome is attributed to must be the task's own, or
+      // successRate(phase, runner) reads every run as an `implement` sample.
+      val phase = TestEditGuard.phaseOf(task.run.task.body).getOrElse("implement")
       git[F].runProjectValidation.run(task.run.worktreePath).attempt.flatMap {
         case Right(_) =>
           AgentExecutor
@@ -1018,7 +1052,7 @@ object Impl:
               task.run.context.root,
               task.run.task.number,
               task.run.runner,
-              "implement",
+              phase,
               "green"
             )
             .as(task)
@@ -1027,7 +1061,7 @@ object Impl:
             task.run.context.root,
             task.run.task.number,
             task.run.runner,
-            "implement",
+            phase,
             "red"
           ) *> Sync[F].raiseError(error)
       }
