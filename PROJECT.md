@@ -35,6 +35,17 @@ recorded outcomes. Either being absent — an unpriced tool, or fewer than
 `minSample = 20` recorded runs — falls back to the existing `Priority.score`
 ordering unchanged. An unmeasured pair is never read as a 100% success rate.
 
+`c` and `s` are **costs, not prices**. `AgentTool.costWith` multiplies each
+tool's per-token price by the volume that `(phase, runner)` is measured to
+consume (`TokenMetricsBackend.meanUsage`, same `minSample = 20`), falling back
+to the assumed 20k in / 4k out when unmeasured. This matters because `c/s`
+divides two of them: with assumed volumes on both sides the volumes cancel and
+the ratio degenerates to list price, which is only the cost ratio if both
+runners spend the same tokens on the same job. A smaller model that needs more
+turns spends its discount on volume. Measurement is taken on **both** sides or
+neither — a measured cheap runner compared against an assumed strong one would
+favour whichever side happened to have a sample.
+
 Consequences worth knowing before changing this code:
 
 - **Bias down, not up.** A wasted cheap attempt is now a bounded cost, so the

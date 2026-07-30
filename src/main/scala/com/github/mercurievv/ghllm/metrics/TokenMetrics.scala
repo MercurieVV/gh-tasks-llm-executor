@@ -77,6 +77,43 @@ object TokenMetrics:
       val denom = s.input + s.cacheRead
       if denom == 0L then 0.0 else s.cacheRead.toDouble / denom.toDouble
 
+    /** Mean tokens one run of this (phase, runner) actually consumes.
+      *
+      * `AgentTool.cost` otherwise assumes a fixed 20k in / 4k out for every
+      * runner and every phase, which turns the ladder's `c/s` into a pure PRICE
+      * ratio. Price is not cost: a cheap model that needs three times the turns
+      * is not three times cheaper, and the constants hide exactly that.
+      *
+      * Cache reads are counted at their own price by the caller, not folded in
+      * here, and cache writes are counted as input because that is what the
+      * vendor bills them as before the multiplier is applied.
+      *
+      * `None` below `minSample` — deliberately the same discipline as
+      * [[successRate]], so an unmeasured pair falls back to the constants rather
+      * than to a mean of two runs.
+      */
+    def meanUsage(
+        phase: String,
+        runner: String,
+        minSample: Int = 20
+    ): Option[TokenUsage.TokenSnapshot] =
+      val relevant = this
+        .query(TokenMetricsQuery(limit = None))
+        .filter(e => e.phase.contains(phase) && e.runner.contains(runner))
+      if relevant.size < minSample then None
+      else
+        val n = relevant.size.toLong
+        val total = relevant.foldLeft(TokenUsage.TokenSnapshot.Zero)(_ + _.usage)
+        Some(
+          TokenUsage.TokenSnapshot(
+            input = total.input / n,
+            output = total.output / n,
+            cacheRead = total.cacheRead / n,
+            cacheWrite = total.cacheWrite / n,
+            total = total.total / n
+          )
+        )
+
     // Observed p: fraction of recorded runs for this (phase, runner) whose
     // outcome was "green". None when the sample is smaller than `minSample`.
     def successRate(phase: String, runner: String, minSample: Int = 20): Option[Double] =

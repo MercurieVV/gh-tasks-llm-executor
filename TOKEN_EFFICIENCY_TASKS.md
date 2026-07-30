@@ -24,7 +24,30 @@ around them is older than the code.
 | T19 | done | `Impl.taskPrompt` is ordered most-stable-first; `PromptSegmentOrderSuite` pins it |
 | T20 | done for `claude`, both paths | `markCachePeers` (root batch) and `collectPendingDependencies` (a split's siblings) mark ≥3 same-`(agent, model)` peers → `ENABLE_PROMPT_CACHING_1H` in the subprocess env. Independent of `--parallel`: the window outlives the run. Still a no-op for non-`claude` agents |
 | T21–T22 | done | `TaskF`, `TaskGraph.coalgebra`, `TaskTree.costAlgebra`, `annotate` |
-| T23 | partial | the fold is reachable from the `estimate` CLI path (`PlanEstimate`), but execution routing still does not consume it — the cost model informs a human, not the scheduler |
+| T23 | done, scope decided | the tree fold stays a planning/reporting artifact; the measurement it exposes now drives routing leaf-locally via `AgentTool.costWith`. See "Why the fold does not route" below |
+
+### Why the fold does not route (T22/T23 scope decision, 2026-07-30)
+
+T22's `Do NOT` calls the cost algebra "the plan's decision procedure", which implied
+execution should consume the annotated tree. It should not, and this is deliberate.
+
+Every scheduling decision this executor makes is **leaf-local**: which runner takes
+this task, whether to escalate after a red, whether this task's siblings are cache
+peers. None of them needs to know a subtree's shape or total. What the tree fold
+uniquely produces is `subtreeUsd` — a whole-plan number — and whole-plan questions are
+answered before anything runs, by a person deciding whether a plan is worth starting.
+That is the `estimate` CLI, and it already works.
+
+Making `executeRecursive` consume the `Cofree` annotation would make a per-run GitHub
+tree walk a prerequisite for every routing decision, to inform choices that do not
+depend on the tree.
+
+What *was* missing is that the measurement behind the fold never reached the decisions
+that could use it. `AgentTool.cost` assumed a fixed 20k input / 4k output for every
+runner and every phase, so `breakEvenRateAgainst`'s `c/s` was a ratio of list prices
+wearing a cost ratio's clothes — and with the same constants on both sides, they
+cancelled. `costWith(meanUsage(phase, runner))` closes that: same Stage 0 events the
+fold reads, applied where the decision is actually made.
 
 Beyond the numbered tasks: Stage 5 has no task breakdown, and three of its leaks
 have been closed directly (the implementer's split instructions, the evaluator's

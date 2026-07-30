@@ -358,6 +358,92 @@ class AgentInventorySuite extends CatsEffectSuite:
     assertEquals(unpriced.breakEvenRateAgainst(strong), None)
   }
 
+  test("a cheap runner that burns the tokens it saved loses the break-even") {
+    // The defect this fixes: with assumed volumes on both sides, c/s collapses
+    // to the ratio of list prices (0.1 here), so p = 0.2 clears it. Measure the
+    // volumes and the cheap runner turns out to spend 10x as many tokens for
+    // the same job — its real cost equals the stronger runner's, and no success
+    // rate below 1.0 justifies trying it first.
+    val inventory = AgentInventory(List(cheapTool, strongerTool))
+    val backend = FixedSuccessRateBackend(
+      rates = Map((phase, cheapTool.runner.display) -> Some(0.2)),
+      usage = Map(
+        (phase, cheapTool.runner.display) -> snapshot(input = 200000, output = 40000),
+        (phase, strongerTool.runner.display) -> snapshot(input = 20000, output = 4000)
+      )
+    )
+
+    val selected = inventory.selectRunnerFor(
+      requiredAbilities,
+      preferred = Nil,
+      phase = Some(phase),
+      metricsBackend = Some(backend)
+    )
+
+    assertEquals(selected, Some(strongerTool.runner))
+  }
+
+  test("measured volumes keep a genuinely cheap runner cheap") {
+    val inventory = AgentInventory(List(cheapTool, strongerTool))
+    val backend = FixedSuccessRateBackend(
+      rates = Map((phase, cheapTool.runner.display) -> Some(0.2)),
+      usage = Map(
+        (phase, cheapTool.runner.display) -> snapshot(input = 20000, output = 4000),
+        (phase, strongerTool.runner.display) -> snapshot(input = 20000, output = 4000)
+      )
+    )
+
+    val selected = inventory.selectRunnerFor(
+      requiredAbilities,
+      preferred = Nil,
+      phase = Some(phase),
+      metricsBackend = Some(backend)
+    )
+
+    assertEquals(selected, Some(cheapTool.runner))
+  }
+
+  test("one side measured is treated as neither side measured") {
+    // Comparing a measured cost against a placeholder would systematically
+    // favour whichever side happened to have a sample, so both fall back.
+    val inventory = AgentInventory(List(cheapTool, strongerTool))
+    val backend = FixedSuccessRateBackend(
+      rates = Map((phase, cheapTool.runner.display) -> Some(0.2)),
+      usage = Map((phase, cheapTool.runner.display) -> snapshot(input = 200000, output = 40000))
+    )
+
+    val selected = inventory.selectRunnerFor(
+      requiredAbilities,
+      preferred = Nil,
+      phase = Some(phase),
+      metricsBackend = Some(backend)
+    )
+
+    // Same verdict as before measurement existed: p = 0.2 > assumed c/s = 0.1.
+    assertEquals(selected, Some(cheapTool.runner))
+  }
+
+  test("cost falls back to the assumed volumes when nothing is measured") {
+    assertEquals(cheapTool.costWith(None), cheapTool.cost)
+    assert(cheapTool.cost.exists(_ > 0))
+  }
+
+  test("a cache read is not billed at the full input rate") {
+    // Same token count, once as fresh input and once as a cache read: the read
+    // must price lower or the cache is invisible to selection.
+    val fresh = cheapTool.costWith(Some(snapshot(input = 100000, output = 0)))
+    val cached = cheapTool.costWith(Some(snapshot(input = 0, output = 0, cacheRead = 100000)))
+    assert(fresh.exists(f => cached.exists(_ < f)), s"fresh=$fresh cached=$cached")
+  }
+
+  private def snapshot(
+      input: Long = 0,
+      output: Long = 0,
+      cacheRead: Long = 0,
+      cacheWrite: Long = 0
+  ): TokenUsage.TokenSnapshot =
+    TokenUsage.TokenSnapshot(input, output, cacheRead, cacheWrite, input + output)
+
   private def implementor(
       id: String,
       agent: String,
@@ -379,7 +465,8 @@ class AgentInventorySuite extends CatsEffectSuite:
     )
 
   private final case class FixedSuccessRateBackend(
-      rates: Map[(String, String), Option[Double]]
+      rates: Map[(String, String), Option[Double]],
+      usage: Map[(String, String), TokenUsage.TokenSnapshot] = Map.empty
   ) extends TokenMetrics.TokenMetricsBackend:
     override val destination: String = "fixed-success-rates"
 
@@ -397,3 +484,10 @@ class AgentInventorySuite extends CatsEffectSuite:
         minSample: Int
     ): Option[Double] =
       rates.getOrElse((phase, runner), None)
+
+    override def meanUsage(
+        phase: String,
+        runner: String,
+        minSample: Int
+    ): Option[TokenUsage.TokenSnapshot] =
+      usage.get((phase, runner))

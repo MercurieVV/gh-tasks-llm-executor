@@ -47,21 +47,59 @@ final case class AgentTool(
     // isn't measured.
     budgetPressure: Option[Double] = None
 ):
-  def cost: Option[Double] =
+  def cost: Option[Double] = costWith(None)
+
+  /** Expected USD for one run of this tool.
+    *
+    * `usage` is the measured mean for the `(phase, runner)` this decision is
+    * about ([[TokenMetrics.TokenMetricsBackend.meanUsage]]). Without it the
+    * volumes fall back to `AssumedInputMTok`/`AssumedOutputMTok` — the original
+    * behaviour, kept so an unmeasured tool ranks exactly as it used to.
+    *
+    * The distinction matters because `breakEvenRateAgainst` divides two of
+    * these. With assumed volumes on both sides they cancel, and `c/s` collapses
+    * to the ratio of list prices — which is only the ratio of COSTS if both
+    * runners consume the same tokens to do the same job. They do not: the cheap
+    * runner is cheap partly because it is smaller, and a smaller model that
+    * needs more turns spends its price advantage on volume. Measuring both
+    * sides is what stops the ladder from biasing down on a discount that is not
+    * really there.
+    */
+  def costWith(usage: Option[TokenUsage.TokenSnapshot]): Option[Double] =
     for
       input <- inputUsdPerMTok.filter(_ > 0)
       output <- outputUsdPerMTok.filter(_ > 0)
       if !isPriceStale
     yield
-      val raw = input * 0.020 + output * 0.004 * effortMultiplier
+      val inputMTok =
+        usage.fold(AgentTool.AssumedInputMTok)(u =>
+          // A cache write bills as input; a cache read is charged separately at
+          // its own fraction, so it must not be counted at the full rate here.
+          (u.input + u.cacheWrite).toDouble / AgentTool.TokensPerMillion +
+            u.cacheRead.toDouble / AgentTool.TokensPerMillion * AgentTool.CacheReadPriceRatio
+        )
+      val outputMTok =
+        usage.fold(AgentTool.AssumedOutputMTok)(_.output.toDouble / AgentTool.TokensPerMillion)
+      // The effort multiplier is a prior on how much a reasoning tier writes.
+      // Once output volume is measured it is already in the number, so applying
+      // it again would double-count.
+      val effortFactor = if usage.isDefined then 1.0 else effortMultiplier
+      val raw = input * inputMTok + output * outputMTok * effortFactor
       math.round(raw * 1000.0) / 1000.0
 
   // Break-even success rate for trying this tool before `stronger`:
   // the ladder wins iff observed success rate p > c/s.
   // See TOKEN_EFFICIENCY_PLAN.md section 2, Stage 1.
   def breakEvenRateAgainst(stronger: AgentTool): Option[Double] =
-    cost.flatMap { c =>
-      stronger.cost.filter(_ > 0).map { s =>
+    breakEvenRateAgainst(stronger, None, None)
+
+  def breakEvenRateAgainst(
+      stronger: AgentTool,
+      thisUsage: Option[TokenUsage.TokenSnapshot],
+      strongerUsage: Option[TokenUsage.TokenSnapshot]
+  ): Option[Double] =
+    costWith(thisUsage).flatMap { c =>
+      stronger.costWith(strongerUsage).filter(_ > 0).map { s =>
         math.min(1.0, c / s)
       }
     }
@@ -148,6 +186,21 @@ final case class AgentTool(
 object AgentTool:
   val MaxPriceAgeDays = 180
 
+  val TokensPerMillion = 1000000.0
+
+  /** Volumes used when a (phase, runner) has no measurement yet. These were the
+    * only volumes the cost model ever had; they are a prior now, not the model.
+    */
+  val AssumedInputMTok = 0.020
+  val AssumedOutputMTok = 0.004
+
+  /** Cache reads bill at a fraction of the input rate. Kept here rather than
+    * read from `TaskTree.CostModel` so pricing a runner does not depend on the
+    * plan-estimation module; the two must agree, and this is the value to change
+    * if a vendor's ratio moves.
+    */
+  val CacheReadPriceRatio = 0.1
+
   // aider is a multi-vendor runner (its `agent` field is always "aider");
   // the actual vendor being billed is encoded in the model id.
   def vendorKeyFor(agent: String, model: Option[String]): String =
@@ -212,7 +265,17 @@ final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights
             .headOption
           nextStrongerRunner <- nextStrongerImplementor(candidate.runner)
           nextStronger <- availableImplementors.find(_.matches(nextStrongerRunner))
-          breakEvenRate <- candidate.breakEvenRateAgainst(nextStronger)
+          // Measured volumes on BOTH sides or neither: mixing a measured cheap
+          // runner with an assumed strong one would compare a real cost against
+          // a placeholder and systematically favour whichever side is measured.
+          candidateUsage = backend.meanUsage(phaseName, candidate.runner.display)
+          strongerUsage = backend.meanUsage(phaseName, nextStronger.runner.display)
+          bothMeasured = candidateUsage.isDefined && strongerUsage.isDefined
+          breakEvenRate <- candidate.breakEvenRateAgainst(
+            nextStronger,
+            if bothMeasured then candidateUsage else None,
+            if bothMeasured then strongerUsage else None
+          )
           observedSuccessRate <- backend.successRate(phaseName, candidate.runner.display)
         yield
           if observedSuccessRate > breakEvenRate then candidate
