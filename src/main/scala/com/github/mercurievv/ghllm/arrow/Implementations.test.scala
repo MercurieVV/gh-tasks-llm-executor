@@ -177,6 +177,26 @@ class ImplementerScopeSuite extends munit.FunSuite:
     assert(prompt.contains("Do not split the task"))
     assert(prompt.contains("make NO file changes"))
 
+  test("the final answer contract asks only for things something parses"):
+    // Stage 5: a deterministic step must not be performed by the model. Whether
+    // the project validates is decided by the repo's own hook in
+    // Impl.runProjectValidation, which is authoritative and escalates on red.
+    // The contract used to ask the agent to "List validation commands you ran
+    // and whether they passed" - output tokens on every run, parsed by nothing,
+    // and an unverifiable claim that carries weight when it disagrees with the
+    // hook. Workflow step 4 still tells the agent to verify; only the report of
+    // it is gone.
+    assert(!prompt.contains("List validation commands"))
+    assert(prompt.contains("Verify your change with the project's own compile/test commands"))
+    val contract = prompt.substring(prompt.indexOf("Final answer contract:"), prompt.indexOf("Workflow:"))
+    val asks = contract.linesIterator.filter(_.startsWith("- ")).toList
+    // Every remaining ask is either recorded whole (the summary) or extracted by
+    // Impl.extractAgentFinalization / the Conclusion parser.
+    assertEquals(asks.size, 4, contract)
+    assert(contract.contains("proposed commit title"), contract)
+    assert(contract.contains("proposed pull request body"), contract)
+    assert(contract.contains("\"Conclusion:\""), contract)
+
   test("the workflow no longer interpolates the task number"):
     val workflow = prompt.substring(prompt.indexOf("Workflow:"), prompt.indexOf("Task ID: #"))
     assert(!workflow.contains("#42"), workflow)

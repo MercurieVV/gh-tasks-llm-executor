@@ -1302,7 +1302,6 @@ Replay rules:
 
 Final answer contract:
 - Summarize the implementation.
-- List validation commands you ran and whether they passed.
 - Include a proposed commit title.
 - Include a proposed pull request body when useful.
 - Include a one-line "Conclusion:" summary for tasks that depend on this one (what changed, what's now available to build on). Keep it to what a dependent task needs - it is truncated before it reaches them.
