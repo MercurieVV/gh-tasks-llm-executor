@@ -1171,35 +1171,18 @@ Replay rules:
     // matching missed tasks that name their files in the title.
     val scalaMandate = if taskTouchesScala(task) then s"\n\n$ScalaSemanticMandate" else ""
 
-    AgentPrompt(s"""Task ID: #${task.number}
-Title: ${task.title}
-Agent: ${runner.agent}
-Model: ${runner.model.getOrElse("")}
-Effort: ${runner.effort.getOrElse("")}
-Version: ${runner.version.getOrElse("")}
-
-Task Description:
-${task.body}
-$dependencyConclusionStr
-$replayContextStr
-Workflow:
-1. First estimate the task size and complexity before editing files.
-2. If the task is too broad, ambiguous, risky, or naturally decomposes into independent steps, split it instead of implementing it directly.
-3. When splitting, create GitHub subtasks with clear, detailed descriptions and narrow scope. Each subtask should include:
-   - parent: #${task.number}
-   - dependencies on earlier subtasks when order matters
-   - concrete acceptance criteria
-   - required abilities/importance (ability -> coefficient), not a pinned runner
-4. Prefer splitting until each subtask is small enough that a weaker model such as Haiku could implement it without needing another split.
-5. Use this exact metadata format in every subtask description, so the concrete runner is picked at run time from live cost/fit data instead of being pinned now:
-   Required abilities/importance:
-   - complex-reasoning: 1.0
-   - scala: 0.6
-   Only add a "preferred llms/models/efforts/versions:" pin instead when the subtask genuinely needs one specific tool/version.
-6. If you split the task, do not implement the parent task. Comment on the parent with the created subtask numbers and the reason for the split.
-7. If the task is already narrow enough, implement it in the current repository and make any necessary file changes.
-
-Agent boundary:
+    // Ordered most-stable-first (TOKEN_EFFICIENCY_PLAN.md §2 Stage 6, T19).
+    // Prompt caching is prefix-only: one volatile byte early invalidates every
+    // segment after it, so the fully constant blocks lead, the task's own text
+    // trails, and sibling leaves fanning out on the same runner share the
+    // longest possible prefix. This matters more now that fan-out marks that
+    // prefix with the 1-hour TTL (T20), which costs ~2x to write and only pays
+    // back over ~3 reads. Segment CONTENT is unchanged from the original order.
+    //
+    // `Workflow` is conventions and belongs in the stable region, but it
+    // interpolates the task number, so it can never be part of a shared prefix
+    // and sits after the blocks that can.
+    AgentPrompt(s"""Agent boundary:
 - Do not run tree2m.
 - Do not run git worktree commands.
 - Do not run git commit.
@@ -1216,6 +1199,33 @@ Final answer contract:
 - Include a proposed pull request body when useful.
 - Include a one-line "Conclusion:" summary for tasks that depend on this one (what changed, what's now available to build on).
 $scalaMandate
+Workflow:
+1. First estimate the task size and complexity before editing files.
+2. If the task is too broad, ambiguous, risky, or naturally decomposes into independent steps, split it instead of implementing it directly.
+3. When splitting, create GitHub subtasks with clear, detailed descriptions and narrow scope. Each subtask should include:
+   - parent: #${task.number}
+   - dependencies on earlier subtasks when order matters
+   - concrete acceptance criteria
+   - required abilities/importance (ability -> coefficient), not a pinned runner
+4. Prefer splitting until each subtask is small enough that a weaker model such as Haiku could implement it without needing another split.
+5. Use this exact metadata format in every subtask description, so the concrete runner is picked at run time from live cost/fit data instead of being pinned now:
+   Required abilities/importance:
+   - complex-reasoning: 1.0
+   - scala: 0.6
+   Only add a "preferred llms/models/efforts/versions:" pin instead when the subtask genuinely needs one specific tool/version.
+6. If you split the task, do not implement the parent task. Comment on the parent with the created subtask numbers and the reason for the split.
+7. If the task is already narrow enough, implement it in the current repository and make any necessary file changes.
+$dependencyConclusionStr
+$replayContextStr
+Task ID: #${task.number}
+Title: ${task.title}
+Agent: ${runner.agent}
+Model: ${runner.model.getOrElse("")}
+Effort: ${runner.effort.getOrElse("")}
+Version: ${runner.version.getOrElse("")}
+
+Task Description:
+${task.body}
 """)
 
   // Implementer runs unattended (`-p`, stdin closed) with zero tool grants

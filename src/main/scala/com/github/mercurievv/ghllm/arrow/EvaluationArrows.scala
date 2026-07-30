@@ -488,6 +488,7 @@ Phase -> required-abilities guidance (write these as "Required abilities/importa
 - implement       -> narrow, well-specified code change      -> medium importance (task-dependent); low ONLY when genuinely trivial + fully specified
 - test            -> narrow verification                     -> low-medium importance; keep the ability list short so a cheap runner is picked
 Name abilities that match the vocabulary already used in tool strengths/jobTypes above so run-time matching actually fires.
+$scalaMandate
 
 Available local implementor tools:
 ${agentInventory.promptBlock}
@@ -498,7 +499,7 @@ Description state: $descriptionState
 
 Current Task Description:
 ${task.body}
-$dependencyConclusionStr$userAnswerStr$scalaMandate""")
+$dependencyConclusionStr$userAnswerStr""")
 
   def splitTaskPrompt(
       task: Issue,
@@ -513,16 +514,11 @@ $dependencyConclusionStr$userAnswerStr$scalaMandate""")
 
     AgentPrompt(
       s"""Create missing GitHub subtasks for an already-evaluated split task.
-
-Task ID: #${task.number}
-Title: ${task.title}
+$scalaMandate
 
 Available local implementor tools:
 ${agentInventory.promptBlock}
 
-Already-evaluated task body:
-${task.body}
-$dependencyConclusionStr
 Rules:
 - Do not evaluate this task again.
 - Do not decide whether it should be implemented directly.
@@ -539,7 +535,13 @@ Rules:
 - Use only GitHub issue creation/comment commands for the split side effects.
 - Do not implement code changes.
 - Return a short plain-text summary listing the child issue numbers you created.
-$scalaMandate
+
+Task ID: #${task.number}
+Title: ${task.title}
+
+Already-evaluated task body:
+${task.body}
+$dependencyConclusionStr
 """
     )
 
