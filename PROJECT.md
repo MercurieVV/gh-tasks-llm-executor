@@ -64,6 +64,13 @@ Consequences worth knowing before changing this code:
   first (the stronger runner must start from HEAD, not from half-finished edits),
   seeds the retry with the error artifact only — never the failed transcript — and
   stops at `MaxEscalationDepth = 2`, after which the task surfaces to a human.
+- **The repair loops rotate too.** A red that arrives *after* publication — a
+  rejected push, a failed CI check — is repaired rather than escalated: the
+  branch is already pushed, so a hard reset is destructive. But the repair agent
+  must still change runner between attempts. `repairRunnerSequence` precomputes
+  `MaxRepairBuildCheckAttempts + 1` runners from `alternateImplementor`, staying
+  on the last one when the inventory runs out. Until 2026-07-31 that loop re-ran
+  the runner that had just failed, three times over.
 - **The turn cap feeds the same path.** Exceeding `TurnCap` (default 25,
   overridable in `.gh-tasks-llm-executor/execution-limits.json`) raises
   `TurnCapExceeded`, which becomes a `Red` rather than a `Failed` — "could not
