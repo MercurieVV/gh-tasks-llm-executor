@@ -38,12 +38,6 @@ final case class ExistingPullRequestResumeArrows[-->[_, _]](
 object Replayability:
   type ReplayFlow[F[_]] = [A, B] =>> Kleisli[[X] =>> OptionT[F, X], A, B]
 
-  // Force the compiler / remote‑launcher to include PrefixKey as a dependency.
-  private val _ensurePrefixKeyIncluded: Unit = {
-    val _ = PrefixKey("", None, os.pwd, "")
-    ()
-  }
-
   def resumeExistingPullRequest[-->[_, _]](
       resume: ExistingPullRequestResumeArrows[-->]
   )(using

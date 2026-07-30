@@ -36,7 +36,6 @@ FILES=(
   src/main/scala/com/github/mercurievv/ghllm/arrow/BusinessLogicReplay.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/Retryability.scala
   src/main/scala/com/github/mercurievv/ghllm/arrow/BusinessLogicRetry.scala
-  src/main/scala/com/github/mercurievv/ghllm/arrow/TaskTree.scala
   src/main/scala/com/github/mercurievv/ghllm/cli/RunEnv.scala
   src/main/scala/com/github/mercurievv/ghllm/metrics/TaskLogger.scala
   src/main/scala/com/github/mercurievv/ghllm/metrics/TokenMetrics.scala
