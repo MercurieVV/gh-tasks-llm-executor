@@ -22,7 +22,7 @@ around them is older than the code.
 | T17 | done | `TaskArtifact.bound` enforced in `GitHub.renderDependencyConclusions` — the contract existed unused until it was wired there |
 | T18 | done as data only | `PrefixKey` is built in `NodeProfiles` for cost attribution; nothing caches on it |
 | T19 | done | `Impl.taskPrompt` is ordered most-stable-first; `PromptSegmentOrderSuite` pins it |
-| T20 | done for `claude` root batches; untested until now | `markCachePeers` (≥3 peers + `--parallel`) → `ENABLE_PROMPT_CACHING_1H` in the subprocess env. Not applied to a split's children, and a no-op for non-`claude` agents |
+| T20 | done for `claude`, both paths | `markCachePeers` (root batch) and `collectPendingDependencies` (a split's siblings) mark ≥3 same-`(agent, model)` peers → `ENABLE_PROMPT_CACHING_1H` in the subprocess env. Independent of `--parallel`: the window outlives the run. Still a no-op for non-`claude` agents |
 | T21–T22 | done | `TaskF`, `TaskGraph.coalgebra`, `TaskTree.costAlgebra`, `annotate` |
 | T23 | partial | the fold is reachable from the `estimate` CLI path (`PlanEstimate`), but execution routing still does not consume it — the cost model informs a human, not the scheduler |
 
@@ -518,13 +518,13 @@ Limits worth knowing before extending it:
 
 - **`claude` only.** `invocationEnvironment` is empty for every other agent, so marking
   a `codex`/`gemini`/`aider` peer group is a silent no-op rather than a saving.
-- **Root candidates, not fan-out children.** The peer group is the selected root batch.
-  A task's dependencies still run sequentially through `RecursiveArrows.untilLeft`, so
-  the children of one split never form a peer group at all. That is the remaining half
-  of this task.
-- **Concurrency is not required.** A 1-hour window is precisely what decouples readers
-  from the writer, so `ParallelArrows.MaxParallelism = 2` does not undercut the ≥3
-  threshold — the third peer reads the prefix later, not simultaneously.
+- **Both paths are covered now.** The root batch is grouped in `markCachePeers`; a
+  split's siblings are grouped in `collectPendingDependencies`, which is the only place
+  that can see the sibling set. Both share `CachePeers.qualifying`.
+- **Concurrency is not required, and is not consulted.** A 1-hour window is precisely
+  what decouples readers from the writer, so neither path gates on `--parallel` and
+  `ParallelArrows.MaxParallelism = 2` does not undercut the ≥3 threshold — a later peer
+  reads the prefix, it does not have to read it simultaneously.
 
 ---
 
