@@ -100,3 +100,19 @@ Concrete runner ids come from whatever
 `AgentInventory.selectRunner` / `GitHub.taskRunners` match tier/fit automatically.
 Selection is model-agnostic — the cheapest leaf runner may be `codex/*` or
 `gemini/*`, never hardcode `claude/*`.
+
+## Writing a task issue the executor can actually be held to
+
+`POSTMORTEM-2026-07-31-gh-task-execution.md` analyses a run that closed 44 issues
+and merged 25 PRs while delivering about half the work. Every one of those tasks
+passed its own acceptance criteria. Read it before writing task specs; the four
+recurring defects it documents are cheap to avoid and invisible once merged:
+
+- **Acceptance must constrain values, not shape.** "passes `phase`" was satisfied
+  by passing the wrong variable of the right type. Name the value set.
+- **Every scope item needs its own criterion.** An item with none is silently
+  dropped and the task still closes green.
+- **`## Files` is either enforced or deleted.** It was guessed, it was wrong, and
+  succeeding required ignoring it.
+- **A write side and a read side in two tasks need a third that crosses them.**
+  Both halves can be individually correct and jointly useless.
