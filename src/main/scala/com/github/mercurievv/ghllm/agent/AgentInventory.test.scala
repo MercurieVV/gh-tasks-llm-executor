@@ -423,6 +423,39 @@ class AgentInventorySuite extends CatsEffectSuite:
     assertEquals(selected, Some(cheapTool.runner))
   }
 
+  test("the ladder's first rung is the cheapest to run, not the cheapest per token") {
+    // cheapTool has the lowest price per token but is measured to spend 50x the
+    // volume on this phase, so it is the most expensive runner to actually use.
+    // Ordering candidates on list price alone would put the ladder on it.
+    val midTool = implementor(id = "mid", agent = "mid-agent", priceScale = 2.0, strengths = Nil)
+    val inventory = AgentInventory(List(cheapTool, midTool, strongerTool))
+    val backend = FixedSuccessRateBackend(
+      rates = Map.empty,
+      usage = Map(
+        (phase, cheapTool.runner.display) -> snapshot(input = 1000000, output = 200000),
+        (phase, midTool.runner.display) -> snapshot(input = 20000, output = 4000),
+        (phase, strongerTool.runner.display) -> snapshot(input = 20000, output = 4000)
+      )
+    )
+
+    assertEquals(inventory.cheapestImplementorToRun(phase, backend).map(_.runner), Some(midTool.runner))
+  }
+
+  test("a partial usage sample leaves the candidate ordering on the assumed volumes") {
+    // Same rule as c/s: ranking one measured tool against an unmeasured one
+    // compares a real number with a placeholder. Only cheapTool is measured -
+    // and measured badly - yet it stays the floor, exactly as before any
+    // measurement existed.
+    val midTool = implementor(id = "mid", agent = "mid-agent", priceScale = 2.0, strengths = Nil)
+    val inventory = AgentInventory(List(cheapTool, midTool, strongerTool))
+    val backend = FixedSuccessRateBackend(
+      rates = Map.empty,
+      usage = Map((phase, cheapTool.runner.display) -> snapshot(input = 1000000, output = 200000))
+    )
+
+    assertEquals(inventory.cheapestImplementorToRun(phase, backend).map(_.runner), Some(cheapTool.runner))
+  }
+
   test("cost falls back to the assumed volumes when nothing is measured") {
     assertEquals(cheapTool.costWith(None), cheapTool.cost)
     assert(cheapTool.cost.exists(_ > 0))

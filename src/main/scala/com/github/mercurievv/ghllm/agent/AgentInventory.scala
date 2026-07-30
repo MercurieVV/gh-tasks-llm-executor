@@ -260,9 +260,7 @@ final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights
         for
           phaseName <- phase
           backend <- metricsBackend
-          candidate <- availableImplementors
-            .sortBy(_.cost.getOrElse(Double.PositiveInfinity))
-            .headOption
+          candidate <- cheapestImplementorToRun(phaseName, backend)
           nextStrongerRunner <- nextStrongerImplementor(candidate.runner)
           nextStronger <- availableImplementors.find(_.matches(nextStrongerRunner))
           // Measured volumes on BOTH sides or neither: mixing a measured cheap
@@ -283,6 +281,34 @@ final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights
 
       measuredSelection.orElse(priorityFallback).map(_.runner)
     else defaultImplementor
+
+  /** The implementor cheapest to actually RUN this phase — the ladder's bottom
+    * rung.
+    *
+    * Ordering on `AgentTool.cost` alone is the same defect `costWith` exists to
+    * remove, one step earlier: a runner priced 10x lower that burns 20x the
+    * tokens on this phase is not the cheap one, and taking it as the candidate
+    * puts the ladder on the wrong rung before the break-even test ever runs.
+    *
+    * Measured volumes are used only when EVERY implementor has them, for the
+    * same reason `selectRunnerFor` demands both sides of `c/s`: ranking a
+    * measured tool against an assumed one compares a real number with a
+    * placeholder and moves whichever tool happens to have a sample. With a
+    * partial sample the whole ordering falls back to the assumed volumes, which
+    * is exactly how it ranked before any measurement existed.
+    */
+  def cheapestImplementorToRun(
+      phase: String,
+      backend: TokenMetrics.TokenMetricsBackend
+  ): Option[AgentTool] =
+    val measured = availableImplementors.map(tool => tool -> backend.meanUsage(phase, tool.runner.display))
+    val allMeasured = measured.nonEmpty && measured.forall(_._2.isDefined)
+    measured
+      .sortBy { case (tool, usage) =>
+        tool.costWith(if allMeasured then usage else None).getOrElse(Double.PositiveInfinity)
+      }
+      .headOption
+      .map(_._1)
 
   def nextStrongerImplementor(runner: TaskRunner): Option[TaskRunner] =
     val implementors = availableImplementors
