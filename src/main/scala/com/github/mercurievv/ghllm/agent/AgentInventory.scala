@@ -135,22 +135,6 @@ final case class AgentTool(
       optionMatches(effort, runner.effort) &&
       versionMatches(version, runner.version)
 
-  def promptLine: String =
-    val modelValue = model.getOrElse("")
-    val effortValue = effort.getOrElse("")
-    val versionValue = version.getOrElse("")
-    val roleValue = roles.mkString(",")
-    val jobTypeValue = jobTypes.mkString(",")
-    val strengthValue = strengths.mkString(",")
-    val costValue =
-      if isPriceStale then s"unknown (price stale, asOfDate=${asOfDate.getOrElse("?")})"
-      else
-        cost
-          .map(value => f"$$$value%.3f/task (${value / 0.010}%.0fx)")
-          .getOrElse("unknown")
-    val budgetValue = budgetPressure.map(value => f"${value * 100}%.0f%% used").getOrElse("unknown")
-    s"- $id: agent=$agent model=$modelValue effort=$effortValue version=$versionValue roles=$roleValue jobTypes=$jobTypeValue strengths=$strengthValue cost=$costValue budget=$budgetValue"
-
   private def optionMatches(
       configured: Option[String],
       requested: Option[String]
@@ -332,11 +316,23 @@ final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights
       .headOption
       .map(_.runner)
 
-  def promptBlock: String =
-    val lines = availableTools.map(_.promptLine)
-    if lines.isEmpty then
-      "No available local implementor tools were discovered. Use claude/opus if no better runner is available."
-    else lines.mkString("\n")
+  /** The ability names an evaluator may write, and nothing else.
+    *
+    * This replaced a per-tool dump (id, agent, model, effort, version, roles,
+    * jobTypes, strengths, cost, budget for every discovered tool) that both
+    * evaluation prompts carried. The prompts' only real use for it was the
+    * instruction to "name abilities that match the vocabulary already used in
+    * tool strengths/jobTypes", so an evaluator's coefficients actually match a
+    * tool at selection time — that is this list. The rest was priced input
+    * inviting the model to pick a runner, which it must not do: the runner is
+    * chosen at run time from measured cost and success rate, and a pin written
+    * during evaluation overrides that measurement outright.
+    */
+  def abilityVocabulary: String =
+    val names = availableTools.flatMap(tool => tool.strengths ++ tool.jobTypes).distinct.sorted
+    if names.isEmpty then
+      "No local implementor tools were discovered - use general ability names (e.g. complex-reasoning, scala, planning, focused-fixes)."
+    else names.mkString(", ")
 
   private def availableImplementors: List[AgentTool] =
     availableTools.filter(tool => tool.roles.exists(_.equalsIgnoreCase("implementor")))

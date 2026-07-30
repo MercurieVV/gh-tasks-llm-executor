@@ -234,3 +234,72 @@ class EvaluatorOutputScopeSuite extends munit.FunSuite:
     // required-abilities blocks have no older layer to fall back on.
     assert(prompt.contains("Required abilities/importance:"))
     assert(prompt.contains("Phase: implement"))
+
+class EvaluatorInventoryScopeSuite extends munit.FunSuite:
+
+  private val inventory = AgentInventory(
+    List(
+      tool("cheap", "cheap-agent", 0.5, List("focused-fixes", "scala"), List("implement", "test")),
+      tool("strong", "strong-agent", 30.0, List("complex-reasoning", "scala"), List("plan"))
+    )
+  )
+
+  private val task =
+    Issue(TaskNumber(7), IssueTitle("Fix the router"), IssueBody("Change the fallback"), State("open"))
+
+  private def evaluate =
+    EvaluationArrows.evaluateTaskPrompt(task, None, inventory, userAnswer = None).value
+
+  private def split =
+    EvaluationArrows.splitTaskPrompt(task, None, inventory).value
+
+  test("both evaluation prompts carry the ability vocabulary"):
+    // The vocabulary is the one thing the rules actually reference: an ability
+    // name that matches nothing advertised never fires at selection time.
+    for prompt <- List(evaluate, split) do
+      assert(prompt.contains("complex-reasoning"), prompt)
+      assert(prompt.contains("focused-fixes"), prompt)
+      assert(prompt.contains("implement"), prompt)
+
+  test("neither prompt ships per-tool prices or runner ids"):
+    // Prices invite the evaluator to pick a runner, and a pin written during
+    // evaluation beats run-time measured selection outright. Selection reads
+    // cost and success rate itself; the evaluator does not need either.
+    for prompt <- List(evaluate, split) do
+      assert(!prompt.contains("cheap-agent"), prompt)
+      assert(!prompt.contains("strong-agent"), prompt)
+      assert(!prompt.contains("/task"), prompt)
+      assert(!prompt.contains("budget="), prompt)
+
+  test("the vocabulary is deduplicated and ordered"):
+    // "scala" is advertised by both tools; repeating it is paid-for noise, and
+    // a stable order keeps the prompt prefix cacheable across evaluations.
+    assertEquals(
+      inventory.abilityVocabulary,
+      "complex-reasoning, focused-fixes, implement, plan, scala, test"
+    )
+
+  test("an empty inventory still names usable abilities"):
+    val empty = AgentInventory(Nil).abilityVocabulary
+    assert(empty.contains("complex-reasoning"), empty)
+
+  private def tool(
+      id: String,
+      agent: String,
+      price: Double,
+      strengths: List[String],
+      jobTypes: List[String]
+  ): AgentTool =
+    AgentTool(
+      id = AgentToolId(id),
+      agent = Agent(agent),
+      model = Some(id),
+      effort = None,
+      version = None,
+      roles = List("implementor"),
+      jobTypes = jobTypes,
+      strengths = strengths,
+      available = Available(true),
+      inputUsdPerMTok = Some(price),
+      outputUsdPerMTok = Some(price)
+    )

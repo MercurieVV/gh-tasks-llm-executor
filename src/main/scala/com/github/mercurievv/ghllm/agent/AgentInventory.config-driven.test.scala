@@ -77,7 +77,6 @@ class AgentInventoryConfigDrivenSuite extends munit.FunSuite:
     )
     val inventory = AgentInventory(List(unknown))
     assertEquals(unknown.cost, None)
-    assert(unknown.promptLine.contains("cost=unknown"))
     assertEquals(
       inventory.selectRunner(List(unknown.runner)),
       Some(unknown.runner)

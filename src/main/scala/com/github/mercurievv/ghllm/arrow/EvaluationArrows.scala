@@ -445,7 +445,7 @@ Rules:
     Required abilities/importance:
     - complex-reasoning: 1.0
     - scala: 0.6
-  - Name abilities that match the vocabulary already used in tool strengths/jobTypes above (e.g. complex-reasoning, source-of-truth, refactoring, focused-fixes, scala, planning, debugging, docs) so they actually match a tool's advertised strengths/jobTypes at selection time.
+  - Name abilities from the "Ability vocabulary" list below so they actually match a tool's advertised strengths/jobTypes at selection time.
   - Coefficient = importance, not confidence: 1.0 for an ability the task cannot succeed without, lower for nice-to-have.
   - EXCEPTION - pinning a concrete runner is still allowed, and takes priority over required abilities, ONLY when the task genuinely needs one specific tool/version (e.g. reproducing a bug tied to one exact model). In that rare case, keep using "preferred llms/models/efforts/versions" as a ranked list of exact agent/model/effort/version entries (leave effort or version empty when unused, e.g. claude/sonnet//1.0.0).
   - Match the abilities to the job type, scope, and risk: small mechanical tasks need few/low-importance abilities, while broad Scala refactors, failing CI repair, and ambiguous debugging need high-importance capability abilities.
@@ -477,11 +477,11 @@ Phase -> required-abilities guidance. These are a STARTING PRIOR for a phase wit
 - source-of-truth -> judgment on authority / spec            -> high-medium importance (e.g. source-of-truth: 0.8)
 - implement       -> narrow, well-specified code change      -> medium importance (task-dependent); go low freely once the leaf is narrow and fully specified - a failed cheap attempt escalates
 - test            -> narrow verification                     -> low-medium importance; keep the ability list short so a cheap runner is picked
-Name abilities that match the vocabulary already used in tool strengths/jobTypes above so run-time matching actually fires.
+Name abilities from the vocabulary below so run-time matching actually fires.
 $scalaMandate
 
-Available local implementor tools:
-${agentInventory.promptBlock}
+Ability vocabulary advertised by the available runners:
+${agentInventory.abilityVocabulary}
 
 Task ID: #${task.number}
 Title: ${task.title}
@@ -506,8 +506,8 @@ $dependencyConclusionStr$userAnswerStr""")
       s"""Create missing GitHub subtasks for an already-evaluated split task.
 $scalaMandate
 
-Available local implementor tools:
-${agentInventory.promptBlock}
+Ability vocabulary advertised by the available runners:
+${agentInventory.abilityVocabulary}
 
 Rules:
 - Do not evaluate this task again.
@@ -519,7 +519,7 @@ Rules:
 - Create the missing child issues now.
 - Each child issue body must include this exact parent link line:
   Parent: #${task.number}
-- Each child issue must include dependencies if needed, acceptance criteria, narrow scope, and a "Required abilities/importance:" block (ability -> importance coefficient 0..1). Only pin a concrete "preferred llms/models/efforts/versions" runner when the child genuinely needs one specific tool/version.
+- Each child issue must include dependencies if needed, acceptance criteria, narrow scope, and a "Required abilities/importance:" block (ability -> importance coefficient 0..1, named from the vocabulary above). Only pin a concrete "preferred llms/models/efforts/versions" runner when the child genuinely needs one specific tool/version - a pin overrides run-time measured selection outright, so it is a rare exception, not a default.
 - Preserve the phase-typed split design when the evaluated task body describes one.
 - Prefer a target scope that a weaker model such as Haiku could implement without another split.
 - Use only GitHub issue creation/comment commands for the split side effects.

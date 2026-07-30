@@ -58,7 +58,6 @@ class AgentInventorySuite extends CatsEffectSuite:
     )
 
     assertEquals(unknown.cost, None)
-    assert(unknown.promptLine.contains("cost=unknown"))
   }
 
   test("matches bare task-metadata version against full probe version string") {
