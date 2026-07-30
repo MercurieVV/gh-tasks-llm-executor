@@ -46,21 +46,6 @@ object Impl:
       .get("GH_TASKS_USER_INPUT_SOUND")
       .forall(value => !Set("0", "false", "no", "off").contains(value.toLowerCase))
 
-  // Extended‑cache TTL marker, inserted at fan‑out points (≥3 siblings).
-  val CacheTtlExtendedMarker = "<!-- cache-ttl: 3600 -->"
-
-  // Private atomic store for the current batch size.  Must be set immediately
-  // before running each candidate so that runTaskWithRunner can see it.
-  private val batchSizeStore = new java.util.concurrent.atomic.AtomicInteger(0)
-
-  /** Called by BusinessLogic before launching a candidate. */
-  def setCurrentBatchSize(size: Int): Unit = batchSizeStore.set(size)
-
-  /** Conditionally prepend the extended‑cache marker to a prompt. */
-  def maybePrependCacheHint(prompt: AgentPrompt, extendedCache: Boolean): AgentPrompt =
-    if extendedCache then AgentPrompt(s"$CacheTtlExtendedMarker\n${prompt.value}")
-    else prompt
-
   // TTL-gated, not per-task: refreshing means shelling out to codex/gemini/
   // deepseek/ccusage probes, so it only runs once per process invocation
   // (here, before AgentInventory reads the snapshot) and only when the
@@ -820,18 +805,12 @@ object Impl:
   def runTaskWithRunner[F[_]: Sync]: -->[F, PreparedTask, ExecutedTask] =
     Kleisli { task =>
       val run = task.claimedTask
-      // Enable the 1‑hour cache TTL marker only when there are at least 3
-      // siblings in the current batch.
-      val extendedCacheTtl = batchSizeStore.get >= 3
       val prompt =
-        maybePrependCacheHint(
-          taskPrompt(
-            run.task,
-            run.runner,
-            task.parentConclusion,
-            task.replayContext
-          ),
-          extendedCacheTtl
+        taskPrompt(
+          run.task,
+          run.runner,
+          task.parentConclusion,
+          task.replayContext
         )
       for
         _ <- progress(

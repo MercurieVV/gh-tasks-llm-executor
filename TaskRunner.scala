@@ -10,13 +10,22 @@ final case class TaskRunner(
     agent: AgentBinary,
     model: Option[String],
     effort: Option[String],
-    version: Option[String]
+    version: Option[String],
+    extendedCacheTtl: Boolean = false
 ):
   def display: String =
     val modelPart = model.fold("")(value => s", model: $value")
     val effortPart = effort.fold("")(value => s", effort: $value")
     val versionPart = version.fold("")(value => s", version: $value")
-    s"agent: $agent$modelPart$effortPart$versionPart"
+    val cacheTtlPart = Option.when(extendedCacheTtl)(", cache TTL: 1h").getOrElse("")
+    s"agent: $agent$modelPart$effortPart$versionPart$cacheTtlPart"
+
+  def invocationEnvironment: Map[String, String] =
+    Option
+      .when(agent.value == "claude" && extendedCacheTtl)(
+        "ENABLE_PROMPT_CACHING_1H" -> "1"
+      )
+      .toMap
 
   def command(
       prompt: AgentPrompt,
@@ -152,3 +161,9 @@ final case class TaskRunner(
     "mcp__scala-semantic__extract_method_plan",
     "mcp__scala-semantic__value_flow"
   )
+
+object TaskRunner:
+  def unapply(
+      runner: TaskRunner
+  ): (AgentBinary, Option[String], Option[String], Option[String]) =
+    (runner.agent, runner.model, runner.effort, runner.version)

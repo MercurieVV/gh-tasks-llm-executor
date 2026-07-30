@@ -56,25 +56,24 @@ final case class BusinessLogic[-->[_, _]](
       traverse: ArrowTraverse[-->],
       attempt: ArrowAttempt[-->]
   ): TaskSelection --> RunSummary =
+    val candidates = arrow.lift { (selection: TaskSelection) =>
+      val cachePeers =
+        selection.candidates
+          .groupMapReduce(candidate => (candidate.runner.agent, candidate.runner.model))(_ => 1)(_ + _)
+      selection.candidates.map { candidate =>
+        val extendedCacheTtl =
+          selection.context.parallelExecution.value &&
+            cachePeers((candidate.runner.agent, candidate.runner.model)) >= 3
+        candidate.copy(
+          runner = candidate.runner.copy(extendedCacheTtl = extendedCacheTtl)
+        )
+      }
+    }
     val isolated = runCandidateIsolated
-
     programArrows.loadOpenIssues >>>
       programArrows.routeParallelExecution >>>
-      Kleisli { (selection: TaskSelection) =>
-        val batchSize = selection.candidates.size
-        Impl.setCurrentBatchSize(batchSize)
-
-        val candidates = selection.candidates
-        val isolatedWithBatch = isolated.lmap[TaskCandidate] { candidate =>
-          Impl.setCurrentBatchSize(batchSize)
-          candidate
-        }
-
-        if (selection.context.parallelExecution.value)
-          traverse.parAll(isolatedWithBatch).run(candidates)
-        else
-          traverse.all(isolatedWithBatch).run(candidates)
-      } >>>
+      ((candidates >>> traverse.parAll(isolated)) |||
+        (candidates >>> traverse.all(isolated))) >>>
       programArrows.lastSummary
 
   def runCandidate(using ArrowChoice[-->], ArrowDefer[-->]): TaskCandidate --> RunSummary =
@@ -175,10 +174,6 @@ final case class BusinessLogic[-->[_, _]](
       executeTaskArrows.verifyRelatedPullRequestCi >>>
       executeTaskArrows.closeTaskIssue >>>
       executeTaskArrows.checkParentsForCompletion
-
-  // Kleisli convenience
-  private def Kleisli[F]: cats.data.Kleisli = cats.data.Kleisli
-  private type Kleisli[F, A, B] = cats.data.Kleisli[F, A, B]
 
 object BusinessLogic:
   given Functor2K[BusinessLogic] = Functor2K.derived

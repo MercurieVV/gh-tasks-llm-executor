@@ -201,9 +201,11 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     TaskLogger.unsafeTrace(
       s"agent command cwd=$cwd args=${commandForLog(command, promptForRun)} promptChars=${promptForRun.value.length}"
     )
-    val process = ProcessBuilder(command*)
-      .directory(cwd.toIO)
-      .start()
+    val processBuilder = ProcessBuilder(command*).directory(cwd.toIO)
+    runner.invocationEnvironment.foreach { case (name, value) =>
+      processBuilder.environment().put(name, value)
+    }
+    val process = processBuilder.start()
     process.getOutputStream.close()
     val runLogDir =
       os.RelPath(s"agent-${process.pid()}-${fileSafe(runner.agent)}")

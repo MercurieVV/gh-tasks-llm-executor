@@ -1,66 +1,58 @@
 package com.github.mercurievv.ghllm.arrow
 
 import com.github.mercurievv.ghllm.*
-import com.github.mercurievv.ghllm.cli.ParallelExecution
-import com.github.mercurievv.ghllm.agent.*
 
-class FanOutCacheTest extends munit.CatsEffectSuite:
+import cats.data.Kleisli
+import cats.effect.IO
+import cats.effect.Ref
+import munit.CatsEffectSuite
 
-  val minimalIssue = Issue(
-    TaskNumber(1),
-    IssueTitle("Test task"),
-    IssueBody(""),
-    State("open")
-  )
+import BusinessLogicFixture.*
 
-  val minimalRunner = TaskRunner(AgentBinary("test"), None, None, None)
+class FanOutCacheTest extends CatsEffectSuite:
 
-  /** Build a PreparedTask with the given parallelExecution flag. */
-  def prepared(parallel: Boolean): PreparedTask =
-    val context = RunContext(
-      root = os.pwd,
-      inventory = AgentInventory(Nil),
-      taskNumber = None,
-      recursive = Recursive(false),
-      parallelExecution = ParallelExecution(parallel)
+  private val CacheTtlEnvironmentVariable = "ENABLE_PROMPT_CACHING_1H"
+
+  private def selection(numbers: List[Int]) =
+    TaskSelection(
+      context.copy(parallelExecution = ParallelExecution(true)),
+      numbers.map(candidate(_, parallel = true))
     )
-    val claimed = ClaimedTask(
-      context = context,
-      task = minimalIssue,
-      runner = minimalRunner,
-      worktreePath = os.pwd / ".worktrees" / "test-1",
-      branchName = BranchName("task-1"),
-      baseBranch = None
-    )
-    PreparedTask(claimed, dependencyConclusion = None, replayContext = None)
 
-  override def afterEach(context: AfterEach): Unit =
-    // reset the shared store so tests do not leak state
-    Impl.setCurrentBatchSize(0)
+  private def observedInvocationEnvironments(
+      numbers: List[Int]
+  ): IO[List[Map[String, String]]] =
+    Ref[IO].of(List.empty[Map[String, String]]).flatMap { observed =>
+      val runOnce = Kleisli { (candidate: TaskCandidate) =>
+        observed
+          .update(_ :+ candidate.runner.invocationEnvironment)
+          .as(summary(s"ran ${candidate.issue.number.value}"))
+      }
+      val fanOutLogic =
+        logic.copy(
+          programArrows = logic.programArrows.copy(
+            loadOpenIssues = Kleisli(IO.pure),
+            routeParallelExecution = Kleisli(selection => IO.pure(Left(selection))),
+            lastSummary = Kleisli(summaries => IO.pure(summaries.last))
+          ),
+          traversalArrows = logic.traversalArrows.copy(
+            routeRecursiveMode = Kleisli(candidate => IO.pure(Right(candidate))),
+            runOnce = runOnce
+          )
+        )
 
-  test("cache TTL marker is present when batch size >= 3") {
-    Impl.setCurrentBatchSize(3)
-    val task = prepared(parallel = true)
-    val basePrompt = Impl.taskPrompt(
-      task.claimedTask.task,
-      task.claimedTask.runner,
-      task.parentConclusion,
-      task.replayContext
-    )
-    val hinted = Impl.maybePrependCacheHint(basePrompt, extendedCache = true)
-    assert(clue(hinted.value).contains(Impl.CacheTtlExtendedMarker))
-  }
+      fanOutLogic.executeSelectedCandidates
+        .run(selection(numbers))
+        .flatMap(_ => observed.get)
+    }
 
-  test("cache TTL marker is absent when batch size < 3") {
-    Impl.setCurrentBatchSize(2)
-    val task = prepared(parallel = true)
-    val basePrompt = Impl.taskPrompt(
-      task.claimedTask.task,
-      task.claimedTask.runner,
-      task.parentConclusion,
-      task.replayContext
-    )
-    // extendedCache=false because batch <3, so the marker must NOT be added
-    val hinted = Impl.maybePrependCacheHint(basePrompt, extendedCache = false)
-    assert(!clue(hinted.value).contains(Impl.CacheTtlExtendedMarker))
-  }
+  test("three siblings receive the 1-hour cache TTL flag"):
+    observedInvocationEnvironments(List(1, 2, 3)).map { environments =>
+      assertEquals(environments.size, 3)
+      assert(environments.forall(_.get(CacheTtlEnvironmentVariable).contains("1")))
+    }
+
+  test("a single-child edge does not receive the 1-hour cache TTL flag"):
+    observedInvocationEnvironments(List(1)).map { environments =>
+      assertEquals(environments, List(Map.empty[String, String]))
+    }
