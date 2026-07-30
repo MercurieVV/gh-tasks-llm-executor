@@ -49,6 +49,43 @@ wearing a cost ratio's clothes — and with the same constants on both sides, th
 cancelled. `costWith(meanUsage(phase, runner))` closes that: same Stage 0 events the
 fold reads, applied where the decision is actually made.
 
+### Stage 2 tool-ergonomics audit (2026-07-31)
+
+Stage 2's third bullet — "audit tool ergonomics — anywhere an agent needs 3 calls to
+accomplish one thing" — run against the 1,336 recorded runs in
+`.gh-tasks-llm-executor/logs` (1,297 aider, 33 codex, 5 claude). Only the codex and
+claude runs can use MCP: `TaskRunner.shouldInjectScalaSemanticInstruction` gates the
+mandate on `agent.value` being `claude` or `codex`, so aider runs are outside this
+audit and navigate by aider's own repo map.
+
+**Finding 1 — the workspace-root handshake. Fixed.** The mandate told the agent to
+call `set_workspace_root` before its first query, and that tool needs an absolute
+path — which no prompt contained. So each Scala task opened with a discovery round
+trip (`get_workspace_root`, or `pwd`) to learn a directory the executor had chosen
+itself. `taskPrompt` now emits a `Worktree:` line and the mandate points at it. The
+line sits in the volatile tail on purpose: the mandate is prepended at position 0 by
+`TaskRunner.effectivePrompt` and is fully constant, which is what makes it cacheable
+across siblings (T19/T20). Putting a per-task path there would invalidate the shared
+prefix for every task in the run — `WorktreeHandoffSuite` pins that it does not.
+
+**Finding 2 — redundant SemanticDB refreshes.** `refreshSemanticDbBeforeDispatch`
+already refreshes the index in `run.worktreePath`, memoised on a source hash, right
+before the agent starts. Nothing said so, and evaluator-authored issue bodies routinely
+carry a "run `scripts/refresh-semanticdb.sh` first if the index is stale" line, so
+agents re-ran a full recompile on an already-fresh index. The mandate now states that
+the index is fresh. This is a prompt claim, not an interlock; if it turns out agents
+still re-run it, the honest fix is a wrapper that no-ops on a matching hash.
+
+**Finding 3 — MCP reliability, not fixed here.** 6 of the 31 runs that reach
+scala-semantic at all logged `tool call failed`: `set_workspace_root` ×7,
+`find_symbol` ×5, `structure` ×1, `get_workspace_root` ×1. Agents did the right thing
+per the mandate's last line — said so, then fell back to shell text tools — which is
+precisely the spend Stage 3 exists to remove. Finding 1 removes the two most common
+failing calls from the common path, but the underlying transport failures
+(`agent-10235-codex`: "its transport closed during `structure` and could not be
+restarted") are server-side and out of this repo's reach. `ScalaTextToolCallEvent`
+already counts the fallback, so the payoff is measurable once run data accumulates.
+
 Beyond the numbered tasks: Stage 5 has no task breakdown, and four of its leaks
 have been closed directly (the implementer's split instructions, the evaluator's
 verdict/preservation restating, the runner-authored file list, now read from
