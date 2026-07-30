@@ -26,7 +26,7 @@ class TaskRunnerCommandSuite extends munit.FunSuite:
     assert(command.contains("mcp__scala-semantic__annotated_source"))
     assert(command.contains("mcp__scala-semantic__find_symbol"))
     assert(command.last.contains("SCALA SEMANTIC NAVIGATION RULE (must be obeyed):"))
-    assert(command.last.contains("Call `set_workspace_root` for the current worktree first"))
+    assert(command.last.contains("Call `set_workspace_root` ONCE with the absolute `Worktree:` path"))
     assert(command.last.contains(prompt.value))
 
   test("claude command does not add MCP args without workspace MCP config"):

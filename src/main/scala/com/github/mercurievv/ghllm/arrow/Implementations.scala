@@ -73,7 +73,8 @@ object Impl:
        |For any question about symbols, types, signatures, hierarchy, implicits, references, or call paths in `.scala` files, use `mcp__scala-semantic__*` tools.
        |Never use `cat`, `rg`, `sed`, `grep`, `head`, or `tail` against `.scala` files.
        |Use `document_outline` to understand a file's API instead of reading the entire file.
-       |Call `set_workspace_root` for the current worktree first, and `annotated_source` to read a `.scala` file.
+       |Call `set_workspace_root` ONCE with the absolute `Worktree:` path given below before your first query - do not call `get_workspace_root` or `pwd` to discover it, and do not call it again. Use `annotated_source` to read a `.scala` file.
+       |The index there was refreshed for this task immediately before you were dispatched; do not run `scripts/refresh-semanticdb.sh` yourself unless a tool reports the index is stale.
        |If ScalaSemantic MCP is unavailable or failing, say so in your final answer before falling back to shell text tools.
        |""".stripMargin
 
@@ -895,7 +896,8 @@ object Impl:
           run.task,
           run.runner,
           task.parentConclusion,
-          task.replayContext
+          task.replayContext,
+          Some(run.worktreePath)
         )
       val execution =
         for
@@ -1237,7 +1239,8 @@ object Impl:
       task: Issue,
       runner: TaskRunner,
       dependencyConclusion: Option[String],
-      replayContext: Option[String]
+      replayContext: Option[String],
+      worktreePath: Option[os.Path] = None
   ): AgentPrompt =
     val dependencyConclusionStr = dependencyConclusion
       .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
@@ -1259,6 +1262,20 @@ Replay rules:
     // Stage 3 features must agree on what "a Scala task" is, and body-only
     // matching missed tasks that name their files in the title.
     val scalaMandate = if taskTouchesScala(task) then s"\n\n$ScalaSemanticMandate" else ""
+
+    // The mandate tells the agent to hand `set_workspace_root` an absolute
+    // path, so it has to be told which one. Without it the agent opens every
+    // Scala task with a discovery round trip (`get_workspace_root`, `pwd`) that
+    // the executor could have answered for free - it chose the directory.
+    //
+    // It goes HERE, in the volatile tail, and not into the mandate itself: the
+    // mandate is prepended at position 0 (TaskRunner.effectivePrompt) and is
+    // fully constant, which is what lets siblings on one runner share a cached
+    // prefix (T19/T20). A per-task path at position 0 would invalidate that
+    // prefix for every task in the run.
+    val worktreeLine =
+      if taskTouchesScala(task) then worktreePath.fold("")(path => s"\nWorktree: $path")
+      else ""
 
     // Ordered most-stable-first (TOKEN_EFFICIENCY_PLAN.md §2 Stage 6, T19).
     // Prompt caching is prefix-only: one volatile byte early invalidates every
@@ -1298,7 +1315,7 @@ Workflow:
 $scalaMandate$dependencyConclusionStr
 $replayContextStr
 Task ID: #${task.number}
-Title: ${task.title}
+Title: ${task.title}$worktreeLine
 Agent: ${runner.agent}
 Model: ${runner.model.getOrElse("")}
 Effort: ${runner.effort.getOrElse("")}

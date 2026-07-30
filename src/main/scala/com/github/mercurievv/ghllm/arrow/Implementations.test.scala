@@ -46,6 +46,51 @@ class ScalaSemanticMandateSuite extends munit.FunSuite:
     // ordering is what makes it cacheable (T19). See PromptSegmentOrderSuite.
     assert(prompt.indexOf(Impl.ScalaSemanticMandate) < prompt.indexOf(body))
 
+class WorktreeHandoffSuite extends munit.FunSuite:
+  private val runner = TaskRunner(AgentBinary("claude"), Some("opus"), None, None)
+  private val worktree = os.pwd / ".worktrees" / "42-fix-the-router"
+
+  private def promptFor(title: String, body: String, path: Option[os.Path]): String =
+    Impl
+      .taskPrompt(
+        Issue(TaskNumber(42), IssueTitle(title), IssueBody(body), State("open")),
+        runner,
+        None,
+        None,
+        path
+      )
+      .value
+
+  test("a Scala task is told which worktree to hand set_workspace_root"):
+    // The mandate requires an absolute path. Without being given one the agent
+    // opens every Scala task with a discovery round trip - get_workspace_root
+    // or pwd - to learn a directory the executor picked itself.
+    val prompt = promptFor("Fix the router", "Change BusinessLogicRetry.scala", Some(worktree))
+    assert(prompt.contains(s"Worktree: $worktree"), prompt)
+    assert(prompt.contains("do not call `get_workspace_root` or `pwd` to discover it"), prompt)
+
+  test("a non-Scala task is not"):
+    // No mandate, so no path to hand anywhere - the line would be pure payload.
+    // Asserted on the rendered path, not on "Worktree:", which the mandate
+    // itself names when telling the agent what to look for.
+    val prompt = promptFor("Update the README", "Document the flag in README.md", Some(worktree))
+    assert(!prompt.contains(s"Worktree: $worktree"), prompt)
+
+  test("the path stays out of the cacheable prefix"):
+    // The mandate is prepended at position 0 and must stay byte-identical
+    // across siblings (T19/T20). Only the tail may vary with the worktree.
+    val a = promptFor("Fix the router", "Change BusinessLogicRetry.scala", Some(worktree))
+    val b = promptFor("Fix the router", "Change BusinessLogicRetry.scala", Some(os.pwd / "elsewhere"))
+    val shared = a.zip(b).takeWhile((l, r) => l == r).map(_._1).mkString
+    assert(shared.contains(Impl.ScalaSemanticMandateHeader), shared)
+    assert(shared.contains("Workflow:"), shared)
+
+  test("an absent path degrades to the old prompt, not to a broken line"):
+    val prompt = promptFor("Fix the router", "Change BusinessLogicRetry.scala", None)
+    assert(!prompt.contains(s"Worktree: $worktree"), prompt)
+    assert(!prompt.contains("\nWorktree: "), prompt)
+    assert(prompt.contains(Impl.ScalaSemanticMandate), prompt)
+
 class PromptSegmentOrderSuite extends munit.FunSuite:
   private val runner = TaskRunner(AgentBinary("claude"), Some("opus"), None, None)
 
