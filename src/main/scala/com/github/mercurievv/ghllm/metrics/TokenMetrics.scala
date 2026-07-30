@@ -197,13 +197,7 @@ object TokenMetrics:
         "end" -> query.untilMillis.getOrElse(System.currentTimeMillis()).toString
       )
       val response = httpGet(stripTrailingSlash(baseUrl) + "/api/v1/export", params)
-      val events = response.toList
-        .flatMap(_.linesIterator.toList)
-        .flatMap(readExportSeries)
-        .groupMapReduce(_.key)(_.event)((left, right) => left.merge(right))
-        .values
-        .toList
-        .sortBy(_.timestampMillis)
+      val events = parseExport(response.toList.flatMap(_.linesIterator.toList))
       query.limit.fold(events)(limit => events.takeRight(limit.max(0)))
 
     private final case class ExportPointKey(
@@ -211,7 +205,15 @@ object TokenMetrics:
         vendor: TokenUsage.Vendor,
         taskNumber: Option[TaskNumber],
         model: Option[String],
-        scope: String
+        scope: String,
+        // Part of the key, not just the payload: two runs differing only by
+        // phase/runner/outcome are distinct series and must not be merged
+        // into one event, or `successRate` would count them as one sample.
+        phase: Option[String],
+        runner: Option[String],
+        turnCount: Option[Int],
+        escalated: Boolean,
+        outcome: Option[String]
     )
 
     private final case class ExportPoint(key: ExportPointKey, event: TokenMetricsEvent)
@@ -219,6 +221,17 @@ object TokenMetrics:
     extension (left: TokenMetricsEvent)
       private def merge(right: TokenMetricsEvent): TokenMetricsEvent =
         left.copy(usage = left.usage + right.usage)
+
+    // Test seam: the export reader is the read side of the measurement
+    // dimensions, so it needs coverage independent of a live VictoriaMetrics.
+    // `query` delegates here so the tested path is the real one, merge included.
+    private[metrics] def parseExport(lines: List[String]): List[TokenMetricsEvent] =
+      lines
+        .flatMap(readExportSeries)
+        .groupMapReduce(_.key)(_.event)((left, right) => left.merge(right))
+        .values
+        .toList
+        .sortBy(_.timestampMillis)
 
     private def readExportSeries(line: String): List[ExportPoint] =
       val parsed =
@@ -238,10 +251,38 @@ object TokenMetrics:
           yield
             val taskNumber = metric.get("task").flatMap(readLong).map(value => TaskNumber(value.toInt))
             val model = metric.get("model").flatMap(_.strOpt)
-            val key = ExportPointKey(timestamp, vendor, taskNumber, model, scope)
+            val phase = metric.get("phase").flatMap(_.strOpt)
+            val runner = metric.get("runner").flatMap(_.strOpt)
+            val turnCount = metric.get("turn_count").flatMap(readLong).map(_.toInt)
+            val escalated = metric.get("escalated").flatMap(_.strOpt).contains("true")
+            val outcome = metric.get("outcome").flatMap(_.strOpt)
+            val key = ExportPointKey(
+              timestamp,
+              vendor,
+              taskNumber,
+              model,
+              scope,
+              phase,
+              runner,
+              turnCount,
+              escalated,
+              outcome
+            )
             ExportPoint(
               key,
-              TokenMetricsEvent(timestamp, vendor, snapshot(tokenType, value), taskNumber, model, scope)
+              TokenMetricsEvent(
+                timestamp,
+                vendor,
+                snapshot(tokenType, value),
+                taskNumber,
+                model,
+                scope,
+                phase = phase,
+                runner = runner,
+                turnCount = turnCount,
+                escalated = escalated,
+                outcome = outcome
+              )
             )
         }
       parsed.getOrElse(Nil)

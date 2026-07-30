@@ -47,7 +47,11 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       taskNumber: Option[TaskNumber] = None,
       metricsRoot: Option[os.Path] = None,
       metricsScope: String = "agent",
-      deferMetricsOutcome: Boolean = false
+      deferMetricsOutcome: Boolean = false,
+      // The task's `Phase:` metadata, not the metrics scope: `successRate`
+      // is keyed on (phase, runner), so this must carry the phase vocabulary
+      // (plan / source-of-truth / implement / test) to be a usable dimension.
+      phase: Option[String] = None
   ): F[Output] =
     runAttempt(
       runner,
@@ -60,6 +64,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       metricsRoot,
       metricsScope,
       deferMetricsOutcome,
+      phase,
       attempt = 1
     )
 
@@ -74,6 +79,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       metricsRoot: Option[os.Path],
       metricsScope: String,
       deferMetricsOutcome: Boolean,
+      phase: Option[String],
       attempt: Int
   ): F[Output] =
     for
@@ -91,7 +97,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
           taskNumber,
           metricsRoot,
           metricsScope,
-          deferMetricsOutcome
+          deferMetricsOutcome,
+          phase
         )
       )
       output = result.output
@@ -130,6 +137,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
               metricsRoot,
               metricsScope,
               deferMetricsOutcome,
+              phase,
               attempt + 1
             )
         else RuntimeException(s"${runner.agent} exited with ${result.exitCode}").raiseError[F, Output]
@@ -192,7 +200,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       taskNumber: Option[TaskNumber],
       metricsRoot: Option[os.Path],
       metricsScope: String,
-      deferMetricsOutcome: Boolean
+      deferMetricsOutcome: Boolean,
+      phase: Option[String]
   ): AgentResult =
     val started = System.currentTimeMillis()
     val metricsRootResolved = metricsRoot.getOrElse(TokenMetrics.defaultRootForWorktree(cwd))
@@ -218,7 +227,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
             taskNumber = taskNumber,
             model = runner.model,
             scope = metricsScope,
-            phase = Some(metricsScope),
+            phase = phase,
             runner = Some(runner.display)
           )
         )
@@ -329,7 +338,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       beforeUsage = beforeUsage,
       output = reportedOutput.output,
       turnCount = reportedOutput.turnCount,
-      deferMetricsOutcome = deferMetricsOutcome
+      deferMetricsOutcome = deferMetricsOutcome,
+      phase = phase
     )
     timedOut match
       case Some(reason) => throw RuntimeException(reason)
@@ -355,7 +365,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       beforeUsage: Option[TokenUsage.TokenSnapshot],
       output: Output,
       turnCount: Option[Int],
-      deferMetricsOutcome: Boolean
+      deferMetricsOutcome: Boolean,
+      phase: Option[String]
   ): Unit =
     val usage: Option[TokenUsage.TokenSnapshot] =
       usageSource
@@ -378,7 +389,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
             taskNumber = taskNumber,
             model = runner.model,
             scope = metricsScope,
-            phase = Some(metricsScope),
+            phase = phase,
             runner = Some(runner.display),
             turnCount = turnCount
           )

@@ -261,14 +261,21 @@ object Impl:
             }
             .map(hasOpenPr => (task, hasOpenPr))
         }
+        // One backend for the whole selection pass: `selectRunnerFor` reads
+        // observed (phase, runner) success from it to apply the break-even
+        // predicate, and falls back to Priority.score when the sample is short.
+        metricsBackend = TokenMetrics.defaultBackend(context.root)
         candidates = eligibleWithResumeFlag.map { case (task, hasOpenPr) =>
+          val metadata = TaskMetadata.parse(task.body.value)
           TaskCandidate(
             context,
             task,
             context.agentInventory
               .selectRunnerFor(
-                TaskMetadata.parse(task.body.value).requiredAbilities,
-                GitHub.taskRunners(task)
+                metadata.requiredAbilities,
+                GitHub.taskRunners(task),
+                phase = metadata.phase,
+                metricsBackend = Some(metricsBackend)
               )
               .getOrElse(evaluatorRunner),
             resumePullRequest = ResumePullRequest(hasOpenPr)
@@ -506,10 +513,13 @@ object Impl:
     Kleisli { node =>
       val context = node.context
       val issue = node.issue
+      val metadata = TaskMetadata.parse(issue.body.value)
       val runner = context.agentInventory
         .selectRunnerFor(
-          TaskMetadata.parse(issue.body.value).requiredAbilities,
-          GitHub.taskRunners(issue)
+          metadata.requiredAbilities,
+          GitHub.taskRunners(issue),
+          phase = metadata.phase,
+          metricsBackend = Some(TokenMetrics.defaultBackend(context.root))
         )
         .getOrElse(evaluatorRunner)
       val runnable = TaskCandidate(context, issue, runner)
@@ -853,7 +863,8 @@ object Impl:
             taskNumber = Some(run.task.number),
             metricsRoot = Some(run.context.root),
             metricsScope = "implement",
-            deferMetricsOutcome = true
+            deferMetricsOutcome = true,
+            phase = TaskMetadata.parse(run.task.body.value).phase
           )
           _ <- Sync[F]
             .raiseError(

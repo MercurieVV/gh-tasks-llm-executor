@@ -343,3 +343,62 @@ class TokenMetricsSuite extends munit.FunSuite:
     val event = results.head
     assertEquals(event.outcome, Some("red"))
     assertEquals(event.turnCount, Some(3))
+
+  test("victoria export reader recovers the measurement dimensions"):
+    val line = ujson.write(
+      ujson.Obj(
+        "metric" -> ujson.Obj(
+          "__name__" -> "gh_tasks_llm_executor_token_usage_total",
+          "vendor" -> "claude",
+          "token_type" -> "input",
+          "scope" -> "implement",
+          "task" -> "42",
+          "model" -> "sonnet",
+          "phase" -> "test",
+          "runner" -> "claude-haiku",
+          "turn_count" -> "7",
+          "escalated" -> "true",
+          "outcome" -> "green"
+        ),
+        "values" -> ujson.Arr(ujson.Num(1200)),
+        "timestamps" -> ujson.Arr(ujson.Num(9000))
+      )
+    )
+
+    val events = TokenMetrics.VictoriaMetricsBackend.parseExport(List(line))
+
+    assertEquals(events.length, 1)
+    val event = events.head
+    assertEquals(event.phase, Some("test"))
+    assertEquals(event.runner, Some("claude-haiku"))
+    assertEquals(event.turnCount, Some(7))
+    assertEquals(event.escalated, true)
+    assertEquals(event.outcome, Some("green"))
+    assertEquals(event.usage.input, 1200L)
+
+  test("victoria export reader keeps runs with different outcomes as separate samples"):
+    def line(runnerName: String, outcome: String, value: Int): String =
+      ujson.write(
+        ujson.Obj(
+          "metric" -> ujson.Obj(
+            "__name__" -> "gh_tasks_llm_executor_token_usage_total",
+            "vendor" -> "claude",
+            "token_type" -> "input",
+            "scope" -> "implement",
+            "phase" -> "implement",
+            "runner" -> runnerName,
+            "outcome" -> outcome
+          ),
+          "values" -> ujson.Arr(ujson.Num(value)),
+          "timestamps" -> ujson.Arr(ujson.Num(9000))
+        )
+      )
+
+    // Same timestamp and runner, different outcome: merging these would
+    // collapse two samples into one and skew successRate.
+    val events = TokenMetrics.VictoriaMetricsBackend.parseExport(
+      List(line("claude-haiku", "green", 10), line("claude-haiku", "red", 20))
+    )
+
+    assertEquals(events.length, 2)
+    assertEquals(events.flatMap(_.outcome).sorted, List("green", "red"))
