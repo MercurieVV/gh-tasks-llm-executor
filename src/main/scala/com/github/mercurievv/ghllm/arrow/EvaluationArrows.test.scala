@@ -194,3 +194,43 @@ class EvaluationArrowsSuite extends CatsEffectSuite:
       // split-evaluation comment.
       assertEquals(repaired._1.toOption.flatMap(_.swap.toOption).map(_.replayed), Some(false))
       assertEquals(pure._1.toOption.flatMap(_.swap.toOption).map(_.replayed), Some(true))
+
+class EvaluatorOutputScopeSuite extends munit.FunSuite:
+
+  private def prompt: String =
+    EvaluationArrows
+      .evaluateTaskPrompt(
+        Issue(TaskNumber(7), IssueTitle("Fix the router"), IssueBody("Change the fallback"), State("open")),
+        dependencyConclusion = None,
+        agentInventory = AgentInventory(Nil),
+        userAnswer = None
+      )
+      .value
+
+  test("the evaluator is not asked to write the verdict metadata twice"):
+    // persistAndRouteEvaluation always takes Evaluation/Execution from the JSON
+    // status and ignores whatever the body says, so asking for those keys buys
+    // output tokens that are then discarded.
+    assert(!prompt.contains("write this metadata into the body"))
+    assert(!prompt.contains("Execution: needs-input"))
+    assert(prompt.contains("\"status\" field above, and that field alone"))
+
+  test("but subtask bodies still carry their own verdict metadata"):
+    // A subtask is a new issue with no metadata comments behind it, and
+    // completedEvaluation reads Evaluation/Execution straight off that body to
+    // skip re-evaluating a child the evaluator already scoped.
+    assert(prompt.contains("Evaluation: ready"))
+    assert(prompt.contains("Execution: implement"))
+
+  test("the evaluator is told the executor preserves what it omits"):
+    // TaskMetadata's Monoid falls back to the older layer per field, so
+    // restating parent/dependency/runner lines is redundant - and, since the
+    // newer layer wins when present, a mistranscription silently replaces them.
+    assert(prompt.contains("Do NOT restate metadata you are not changing"))
+    assert(!prompt.contains("Preserve existing parent/dependency references"))
+
+  test("subtask metadata instructions are untouched"):
+    // Subtasks are new issues the evaluator writes directly, so their Phase and
+    // required-abilities blocks have no older layer to fall back on.
+    assert(prompt.contains("Required abilities/importance:"))
+    assert(prompt.contains("Phase: implement"))

@@ -435,23 +435,11 @@ Return only JSON, with this shape:
 }
 
 Rules:
-- If the task is simple enough for implementation, write this metadata into the body:
-  Task metadata:
-  Evaluation: ready
-  Execution: implement
-- If the task should be split, create subtasks and write this metadata into the parent body:
-  Task metadata:
-  Evaluation: ready
-  Execution: split
-- If questions are needed, write this metadata into the body:
-  Task metadata:
-  Evaluation: needs-input
-  Execution: needs-input
+- Your verdict is the "status" field above, and that field alone. The executor writes the resulting "Evaluation:"/"Execution:" metadata itself and ignores those two keys if you put them in "body", so do not spend output restating them. "ready" = implement as one task, "split" = decompose into subtasks, "questions" = blocked on the user.
+- Do NOT restate metadata you are not changing - parent references, dependency references, preferred-runner pins, an existing required-abilities block. The executor merges your body over the task's existing metadata and keeps every key you leave out. Restating them cannot help and a mistranscribed dependency silently reorders the task graph.
 - Use Claude/Opus-level judgment to evaluate task clarity, scope, and split-readiness.
 - If the description is missing or weak, create a clear, structured, detailed GitHub issue body.
 - Keep the task narrow and implementation-oriented.
-- Preserve existing parent/dependency references.
-- Preserve existing preferred runner metadata, or existing required-abilities metadata, unchanged.
 - Do NOT pin a concrete runner (agent/model/effort/version). Instead, express what the task needs as abstract abilities with importance coefficients (0..1) - the concrete runner is chosen at RUN time (not now), from live cost/availability/budget data, by matching these abilities against each tool's strengths/jobTypes. This lets the operator retune runner selection later without re-evaluating the task.
   - Write this metadata key exactly:
     Required abilities/importance:
