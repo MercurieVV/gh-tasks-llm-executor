@@ -1170,7 +1170,28 @@ This parent task will not be implemented directly. Run child tasks first; when a
     else if localBranchExists(root, branchName.value) then Some(branchName.value)
     else None
 
+  /** Landing a parent is a follow-up, never a precondition.
+    *
+    * The integration pull request can be conflicted, its checks can fail, GitHub can refuse the merge — all of which
+    * need a human, and none of which is a reason to stop. Raising here killed a whole run before it selected a single
+    * task, because a recovery sweep found a parent whose pull request conflicts with master. The same reasoning applies
+    * to the child path: a task that has already merged its own work must not be failed by its parent's trouble.
+    */
   private def mergeIntegrationBranch[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, (os.Path, TaskNumber), Unit] =
+    Kleisli.apply { case input @ (_, parentId) =>
+      mergeIntegrationBranchOrRaise(progress)
+        .run(input)
+        .handleErrorWith(error =>
+          progress(
+            s"WARNING: could not land the integration branch for parent #$parentId: ${error.getMessage}. " +
+              "Leaving it open for a human; the rest of the run continues."
+          )
+        )
+    }
+
+  private def mergeIntegrationBranchOrRaise[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
   ): Kleisli[F, (os.Path, TaskNumber), Unit] =
     Kleisli.apply { case (root, parentId) =>
