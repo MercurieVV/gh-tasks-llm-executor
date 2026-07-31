@@ -1191,6 +1191,47 @@ This parent task will not be implemented directly. Run child tasks first; when a
         )
     }
 
+  /** Merges the default branch into an integration branch, in a throwaway worktree, and pushes if it merged cleanly.
+    *
+    * An integration branch collects subtask merges over hours or days, so by the time the parent is ready its base has
+    * moved and GitHub reports the pull request as conflicted — which stops checks from running at all, so nothing else
+    * in this path can proceed. Most of those are mechanical, and git resolves them without an agent. A conflict git
+    * cannot resolve is left alone: the merge is aborted, `false` comes back, and the caller warns a human.
+    */
+  def syncIntegrationBranchWithDefault[F[_]](progress: String => F[Unit])(
+      root: os.Path,
+      branchName: BranchName
+  )(using F: Sync[F]): F[Boolean] =
+    val base = defaultBranchRef(root).split('/').last
+    val worktree = os.temp.dir(prefix = s"integration-${branchName.value}")
+
+    def git(cwd: os.Path, args: String*): os.CommandResult =
+      os.proc("git" +: args).call(cwd = cwd, stdout = os.Pipe, stderr = os.Pipe, check = false)
+
+    F.blocking {
+      os.remove.all(worktree)
+      val added = git(root, "worktree", "add", "--force", worktree.toString, branchName.value).exitCode === 0
+      if !added then false
+      else
+        try
+          git(worktree, "fetch", "origin", base)
+          val merged = git(worktree, "merge", s"origin/$base", "--no-edit").exitCode === 0
+          if !merged then
+            git(worktree, "merge", "--abort")
+            false
+          else git(worktree, "push", "origin", s"HEAD:${branchName.value}").exitCode === 0
+        finally
+          git(root, "worktree", "remove", "--force", worktree.toString)
+          os.remove.all(worktree)
+    }.flatTap {
+      case true =>
+        progress(s"Merged $base into ${branchName.value} and pushed it, so its pull request can be checked.")
+      case false =>
+        progress(
+          s"Could not merge $base into ${branchName.value} automatically; its pull request may still be conflicted."
+        )
+    }
+
   private def mergeIntegrationBranchOrRaise[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
   ): Kleisli[F, (os.Path, TaskNumber), Unit] =
@@ -1209,6 +1250,10 @@ This parent task will not be implemented directly. Run child tasks first; when a
           )
         case Some(_) =>
           for
+            // Before the pull request, not after: GitHub will not run checks on a
+            // conflicted pull request, so an out-of-date integration branch stalls
+            // this path at `awaitPullRequestChecks` with nothing to wait for.
+            _ <- syncIntegrationBranchWithDefault(progress)(root, branchName)
             pullRequest <- ensurePullRequest(progress).run(
               (
                 root,

@@ -7,6 +7,9 @@ import com.github.mercurievv.ghllm.cli.*
 import com.github.mercurievv.ghllm.git.*
 import com.github.mercurievv.ghllm.metrics.*
 
+import cats.effect.IO
+import munit.CatsEffectSuite
+
 class GitHubMergeIntegrationBranchSuite extends munit.FunSuite:
 
   private def gitRepo(): os.Path =
@@ -88,3 +91,61 @@ class SettledParentsSuite extends munit.FunSuite:
   test("a closed parent is not reopened by the sweep"):
     val issues = List(issue(10, "CLOSED"), issue(11, "CLOSED", "Parent: #10"))
     assertEquals(GitHub.settledParents(issues), Nil)
+
+class SyncIntegrationBranchSuite extends CatsEffectSuite:
+  private def git(cwd: os.Path, args: String*): os.CommandResult =
+    os.proc("git" +: args).call(cwd = cwd, stdout = os.Pipe, stderr = os.Pipe, check = false)
+
+  /** An origin whose task-4 branched before master moved on. `conflicting` decides whether master's move touches the
+    * same file the branch changed.
+    */
+  private def diverged(conflicting: Boolean): os.Path =
+    val origin = os.temp.dir(prefix = "integration-origin")
+    git(origin, "init", "-q", "-b", "master")
+    git(origin, "config", "user.email", "test@example.com")
+    git(origin, "config", "user.name", "Test")
+    os.write(origin / "shared.txt", "seed\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-q", "-m", "seed")
+
+    git(origin, "checkout", "-q", "-b", "task-4")
+    os.write.over(origin / "shared.txt", "branch work\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-q", "-m", "subtask work")
+
+    git(origin, "checkout", "-q", "master")
+    if conflicting then os.write.over(origin / "shared.txt", "master work\n")
+    else os.write(origin / "elsewhere.txt", "master work\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-q", "-m", "master moved on")
+    origin
+
+  private def cloneOf(origin: os.Path): os.Path =
+    val root = os.temp.dir(prefix = "integration-clone") / "repo"
+    git(root / os.up, "clone", "-q", origin.toString, root.toString)
+    git(root, "config", "user.email", "test@example.com")
+    git(root, "config", "user.name", "Test")
+    root
+
+  test("a mechanically mergeable base is merged in and pushed"):
+    val origin = diverged(conflicting = false)
+    git(origin, "config", "receive.denyCurrentBranch", "ignore")
+    val root = cloneOf(origin)
+
+    GitHub.syncIntegrationBranchWithDefault[IO](_ => IO.unit)(root, BranchName("task-4")).map { synced =>
+      assert(synced)
+      git(root, "fetch", "origin", "task-4")
+      // master's commit is now an ancestor of the integration branch.
+      assertEquals(git(root, "merge-base", "--is-ancestor", "origin/master", "origin/task-4").exitCode, 0)
+    }
+
+  test("a conflict git cannot resolve is left for a human, with no half-merged state"):
+    val origin = diverged(conflicting = true)
+    git(origin, "config", "receive.denyCurrentBranch", "ignore")
+    val root = cloneOf(origin)
+
+    GitHub.syncIntegrationBranchWithDefault[IO](_ => IO.unit)(root, BranchName("task-4")).map { synced =>
+      assert(!synced)
+      git(root, "fetch", "origin", "task-4")
+      assertEquals(git(root, "merge-base", "--is-ancestor", "origin/master", "origin/task-4").exitCode, 1)
+    }
