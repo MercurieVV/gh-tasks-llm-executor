@@ -500,8 +500,8 @@ object Impl:
   def pendingDependencies[F[_]: Sync]: TaskNode => RunF[F][List[TaskNode]] =
     node => collectPendingDependencies[F].run(node).map(_.pending)
 
-  /** The live dependency graph as a task tree, for folds that want the shape as
-    * data (cost estimation, plan comparison) rather than to walk it.
+  /** The live dependency graph as a task tree, for folds that want the shape as data (cost estimation, plan comparison)
+    * rather than to walk it.
     */
   def taskTree[F[_]: Sync]: TaskNode => RunF[F][TaskGraph.Tree] =
     node => TaskGraph.unfold[RunF[F]](pendingDependencies[F])(TaskGraph.seed(node))
@@ -542,11 +542,10 @@ object Impl:
   // instrumented arrow.
   /** The runner a task will route to, decided from the issue alone.
     *
-    * One definition, called from two places: `claimAndRun`, which actually runs
-    * it, and the cache-peer grouping in `collectPendingDependencies`, which only
-    * needs to know whether two siblings will land on the same runner. If these
-    * ever diverged, the grouping would promise a shared prefix that never
-    * materialises and the TTL premium would be paid for nothing.
+    * One definition, called from two places: `claimAndRun`, which actually runs it, and the cache-peer grouping in
+    * `collectPendingDependencies`, which only needs to know whether two siblings will land on the same runner. If these
+    * ever diverged, the grouping would promise a shared prefix that never materialises and the TTL premium would be
+    * paid for nothing.
     */
   def selectRunnerForIssue(context: RunContext, issue: Issue): TaskRunner =
     val metadata = TaskMetadata.parse(issue.body.value)
@@ -912,7 +911,7 @@ object Impl:
             ImplementerAllowedTools,
             taskNumber = Some(run.task.number),
             metricsRoot = Some(run.context.root),
-            metricsScope = "implement",
+            metricsScope = AgentExecutor.MetricsScope.Implement,
             deferMetricsOutcome = true,
             phase = TaskMetadata.parse(run.task.body.value).phase
           )
@@ -930,7 +929,7 @@ object Impl:
           run.context.root,
           run.task.number,
           run.runner,
-          "implement",
+          AgentExecutor.MetricsScope.Implement,
           "error"
         ) *> Sync[F].raiseError(error)
       }
@@ -1035,10 +1034,9 @@ object Impl:
   def recordAgentOutput[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli.ask[F, ExecutedTask]
 
-  /** Rejects a run that changed the tests it is about to be judged by, before
-    * the judgement happens. Raising here puts it on the same path as a failed
-    * validation, so the existing ladder escalates it and, if the stronger
-    * runner does the same, surfaces it to a human.
+  /** Rejects a run that changed the tests it is about to be judged by, before the judgement happens. Raising here puts
+    * it on the same path as a failed validation, so the existing ladder escalates it and, if the stronger runner does
+    * the same, surfaces it to a human.
     */
   def guardTestEdits[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli { task =>
@@ -1057,7 +1055,10 @@ object Impl:
                   task.run.context.root,
                   task.run.task.number,
                   task.run.runner,
-                  phase.getOrElse("implement"),
+                  // The dispatch's scope, not the phase: this argument keys the
+                  // pending-metrics map, and the phase dimension is already on
+                  // the staged event.
+                  AgentExecutor.MetricsScope.Implement,
                   // Not "green": this run is being rejected, and recording it
                   // as anything else would teach successRate that the runner
                   // succeeded at what it was actually caught doing.
@@ -1068,9 +1069,12 @@ object Impl:
 
   def runProjectValidation[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     guardTestEdits[F] >>> Kleisli { task =>
-      // The phase the outcome is attributed to must be the task's own, or
-      // successRate(phase, runner) reads every run as an `implement` sample.
-      val phase = TestEditGuard.phaseOf(task.run.task.body).getOrElse("implement")
+      // The scope keys the pending-metrics map and must match the dispatch's
+      // `metricsScope`; it is deliberately NOT the task's phase. The phase
+      // dimension `successRate(phase, runner)` reads was written onto the
+      // staged event at defer time, from the same TaskMetadata; completion
+      // only attaches the outcome. Keying this on the phase instead dropped
+      // every event whose phase was not literally `implement`.
       git[F].runProjectValidation.run(task.run.worktreePath).attempt.flatMap {
         case Right(_) =>
           AgentExecutor
@@ -1078,7 +1082,7 @@ object Impl:
               task.run.context.root,
               task.run.task.number,
               task.run.runner,
-              phase,
+              AgentExecutor.MetricsScope.Implement,
               "green"
             )
             .as(task)
@@ -1087,7 +1091,7 @@ object Impl:
             task.run.context.root,
             task.run.task.number,
             task.run.runner,
-            phase,
+            AgentExecutor.MetricsScope.Implement,
             "red"
           ) *> Sync[F].raiseError(error)
       }

@@ -1,31 +1,26 @@
 package com.github.mercurievv.ghllm.arrow
 
 import com.github.mercurievv.ghllm.*
-import com.github.mercurievv.ghllm.cli.TaskMetadata
+import com.github.mercurievv.ghllm.cli.{Phase, TaskMetadata}
 
-/** Guards against the false green: a cheap runner that passes verification by
-  * weakening the verifier rather than by solving the problem.
+/** Guards against the false green: a cheap runner that passes verification by weakening the verifier rather than by
+  * solving the problem.
   *
-  * This is the escalation ladder's worst outcome, not merely a bad one. The
-  * ladder's whole premise is that the verifier is free and honest — a run that
-  * edits the tests it is judged by "saves" tokens by shipping wrong code, and
-  * then records `outcome = "green"`, which feeds `successRate(phase, runner)`
-  * and biases selection *toward* the runner that cheated. One such run makes
-  * the measurement worse than no measurement (TOKEN_EFFICIENCY_PLAN.md §2
-  * Stage 1, risk 3).
+  * This is the escalation ladder's worst outcome, not merely a bad one. The ladder's whole premise is that the verifier
+  * is free and honest — a run that edits the tests it is judged by "saves" tokens by shipping wrong code, and then
+  * records `outcome = "green"`, which feeds `successRate(phase, runner)` and biases selection *toward* the runner that
+  * cheated. One such run makes the measurement worse than no measurement (TOKEN_EFFICIENCY_PLAN.md §2 Stage 1, risk 3).
   *
-  * Only modification and deletion are blocked. Adding a test file is not
-  * gaming the verifier — it strengthens it — and blocking additions would stop
-  * an implementer from covering the code it just wrote.
+  * Only modification and deletion are blocked. Adding a test file is not gaming the verifier — it strengthens it — and
+  * blocking additions would stop an implementer from covering the code it just wrote.
   */
 object TestEditGuard:
 
-  /** Phases permitted to change existing tests. `test` owns them outright;
-    * `plan` and `source-of-truth` are exempt because they emit documents, so a
-    * test edit from one of them is out of contract in a way this guard is not
-    * the right place to catch.
+  /** Phases permitted to change existing tests. `test` owns them outright; `plan` and `source-of-truth` are exempt
+    * because they emit documents, so a test edit from one of them is out of contract in a way this guard is not the
+    * right place to catch.
     */
-  val ExemptPhases: Set[String] = Set("test", "plan", "source-of-truth")
+  val ExemptPhases: Set[String] = Phase.All - Phase.Implement
 
   def isTestFile(path: String): Boolean =
     val normalised = path.trim.replace('\\', '/').toLowerCase
@@ -47,10 +42,10 @@ object TestEditGuard:
   def isExempt(phase: Option[String]): Boolean =
     phase.map(normalise).exists(ExemptPhases.contains)
 
-  private def normalise(phase: String): String = phase.trim.toLowerCase
+  private def normalise(phase: String): String = Phase.normalise(phase)
 
-  /** The test files this run changed in a way that could weaken the verifier.
-    * Empty means the run is allowed to proceed to validation.
+  /** The test files this run changed in a way that could weaken the verifier. Empty means the run is allowed to proceed
+    * to validation.
     */
   def violations(phase: Option[String], modifiedOrDeleted: List[String]): List[String] =
     if isExempt(phase) then Nil

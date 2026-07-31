@@ -22,6 +22,20 @@ class TaskMetadataPhaseSuite extends munit.FunSuite:
     assertEquals(md.execution, Some("implement"))
     assertEquals(md.phase, Some("implement"))
 
+  // `Phase:` is a key in three places that never see each other — the
+  // pending-metrics map, successRate/meanUsage, and TestEditGuard's exemption
+  // set. An evaluator that writes "Phase: Implement" would miss at all three.
+  test("parse normalises the phase, because every consumer keys on it"):
+    val md = TaskMetadata.parse(
+      """Task metadata:
+        |Phase:   Source-Of-Truth  """.stripMargin
+    )
+    assertEquals(md.phase, Some(Phase.SourceOfTruth))
+    assert(TestEditGuard.ExemptPhases.contains(md.phase.get))
+
+  test("the exempt phases are the vocabulary minus implement"):
+    assertEquals(TestEditGuard.ExemptPhases, Phase.All - Phase.Implement)
+
   test("absent Phase leaves phase empty (backward compatibility)"):
     val md = TaskMetadata.parse(
       """Task metadata:
