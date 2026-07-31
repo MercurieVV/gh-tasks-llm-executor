@@ -274,12 +274,22 @@ object BusinessLogicRetry:
       else Left(error).pure[F]
     }
 
+  /** Recognises a conflict from whichever layer reported it.
+    *
+    * The three original signatures are GitHub's GraphQL wording, which is what surfaces when the API rejects the merge.
+    * `gh pr merge` phrases the same condition differently ("is not mergeable: the merge commit cannot be cleanly
+    * created", followed by instructions to resolve locally), and on 2026-08-01 that wording fell through to `Left`,
+    * failing task #56 outright with a conflict the repair path exists to resolve.
+    */
   def isMergeConflictError(error: Throwable): Boolean =
     Option(error.getMessage).exists { message =>
       val normalized = message.toLowerCase
       normalized.contains("has merge conflicts with its base branch") ||
       normalized.contains("pull request has merge conflicts") ||
-      normalized.contains("mergepullrequest")
+      normalized.contains("mergepullrequest") ||
+      normalized.contains("is not mergeable") ||
+      normalized.contains("merge commit cannot be cleanly created") ||
+      normalized.contains("resolve the merge conflicts")
     }
 
   def resolveMergeConflict[F[_]](progress: String => F[Unit])(using
