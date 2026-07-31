@@ -81,7 +81,11 @@ object AgenticEvaluationArrows:
       progress: String => F[Unit],
       evaluatorRunner: TaskRunner
   ): AgenticEvaluationArrows[EvaluationArrows.OptionalArrow[F], [A, B] =>> Kleisli[F, A, B]] =
-    def runEvaluator(task: PreparedTask, userAnswer: Option[String]): F[TaskEvaluation] =
+    def runEvaluatorOnce(
+        task: PreparedTask,
+        userAnswer: Option[String],
+        coverageRepair: Option[String]
+    ): F[TaskEvaluation] =
       val claimedTask = task.claimedTask
       progress(
         s"Evaluating task #${claimedTask.task.number} with ${evaluatorRunner.display}..."
@@ -92,13 +96,49 @@ object AgenticEvaluationArrows:
             claimedTask.task,
             task.parentConclusion,
             claimedTask.context.agentInventory,
-            userAnswer
+            userAnswer,
+            coverageRepair
           ),
           claimedTask.context.root,
           EvaluationArrows.EvaluatorAllowedTools,
           Some(EvaluationArrows.EvaluationJsonSchema)
         )
         .map(EvaluationArrows.parseTaskEvaluation(_, claimedTask.task.body))
+
+    /** Evaluate, and hold the result to the 1:1 scope-to-acceptance rule.
+      *
+      * Retries once with the shortfall report - the same retry-once shape `verifySplitExists` uses for missing children
+      * \- and then, rather than raising and killing the task, downgrades to "needs input" with the report as the
+      * question. A body whose scope outruns its criteria is exactly the case a human should look at, and
+      * `persistAndRouteEvaluation` already routes questions ahead of the verdict.
+      *
+      * Only "ready" bodies are checked here. A "split" parent legitimately lists scope its children carry the criteria
+      * for; those children are checked in `verifySplitExists` instead, which is where T20's dropped scope item actually
+      * lived.
+      */
+    def runEvaluator(task: PreparedTask, userAnswer: Option[String]): F[TaskEvaluation] =
+      runEvaluatorOnce(task, userAnswer, None).flatMap { evaluation =>
+        val number = task.claimedTask.task.number
+        AcceptanceCoverage.shortfall(evaluation.body.value) match
+          case None                                               => evaluation.pure[F]
+          case Some(_) if evaluation.execution == Execution.Split => evaluation.pure[F]
+          case Some(report) =>
+            progress(
+              s"Evaluation of task #$number left scope items without acceptance criteria; re-evaluating once..."
+            ) >> runEvaluatorOnce(task, userAnswer, Some(report)).map { retried =>
+              AcceptanceCoverage.shortfall(retried.body.value) match
+                case Some(stillShort) if retried.execution != Execution.Split =>
+                  retried.copy(
+                    execution = Execution.NeedsInput,
+                    questions = Some(
+                      s"""Evaluation of task #$number could not produce acceptance criteria covering its own scope.
+                         |
+                         |$stillShort""".stripMargin
+                    )
+                  )
+                case _ => retried
+            }
+      }
 
     def createMissingSplitSubtasks(
         task: PreparedTask,
@@ -135,6 +175,31 @@ object AgenticEvaluationArrows:
         )
       }
 
+    /** Holds the subtasks a split produced to the same 1:1 scope-to-acceptance rule as the parent.
+      *
+      * The leaves are where uncovered scope actually gets dropped: a subtask with an item no criterion mentions is
+      * implemented partially, closes green, and the gap is invisible from the parent. Raising here matches what a split
+      * that produced no children at all already does - the task surfaces to a human rather than proceeding on a
+      * decomposition that cannot be held to.
+      */
+    def guardChildAcceptanceCoverage(parent: Issue, allIssues: List[Issue]): F[Unit] =
+      val short = GitHub
+        .openChildren(parent, allIssues)
+        .flatMap(child => AcceptanceCoverage.shortfall(child.body.value).map(child -> _))
+      if short.isEmpty then Sync[F].unit
+      else
+        val detail = short
+          .map { case (child, report) => s"#${child.number} (${child.title}):\n$report" }
+          .mkString("\n\n")
+        Sync[F].raiseError(
+          RuntimeException(
+            s"""Split of task #${parent.number} produced ${short.size} subtask(s) whose scope outruns their acceptance criteria.
+               |Each would close green with part of its scope unimplemented.
+               |
+               |$detail""".stripMargin
+          )
+        )
+
     val verifySplitExists
         : Kleisli[[X] =>> OptionT[F, X], EvaluationArrows.EvaluatedTask, EvaluationArrows.VerifiedSplit] =
       Kleisli { evaluated =>
@@ -145,7 +210,8 @@ object AgenticEvaluationArrows:
           val unrepaired = EvaluationArrows.VerifiedSplit(evaluation, repaired = false)
           if evaluation.execution == Execution.Split then
             GitHub.fetchIssues(claimedTask.context.root).flatMap { allIssues =>
-              if GitHub.hasOpenChildren(claimedTask.task, allIssues) then unrepaired.pure[F]
+              if GitHub.hasOpenChildren(claimedTask.task, allIssues) then
+                guardChildAcceptanceCoverage(claimedTask.task, allIssues).as(unrepaired)
               else
                 // The task has already been evaluated. Do not call the
                 // evaluator again; complete the side effect the split verdict
@@ -161,7 +227,8 @@ object AgenticEvaluationArrows:
                   createMissingSplitSubtasks(task, evaluation) *>
                   GitHub.fetchIssues(claimedTask.context.root).flatMap { updatedIssues =>
                     if GitHub.hasOpenChildren(claimedTask.task, updatedIssues) then
-                      EvaluationArrows.VerifiedSplit(evaluation, repaired = true).pure[F]
+                      guardChildAcceptanceCoverage(claimedTask.task, updatedIssues)
+                        .as(EvaluationArrows.VerifiedSplit(evaluation, repaired = true))
                     else
                       Sync[F].raiseError(
                         RuntimeException(
@@ -408,7 +475,10 @@ object EvaluationArrows:
       task: Issue,
       dependencyConclusion: Option[String],
       agentInventory: AgentInventory,
-      userAnswer: Option[String]
+      userAnswer: Option[String],
+      // Set on the one retry AcceptanceCoverage triggers: the previous attempt
+      // returned a body whose scope outran its acceptance criteria.
+      coverageRepair: Option[String] = None
   ): AgentPrompt =
     val dependencyConclusionStr = dependencyConclusion
       .map(comment => s"\nDependency Task Conclusion Comment:\n$comment\n")
@@ -424,6 +494,10 @@ object EvaluationArrows:
       else "weak"
 
     val scalaMandate = if Impl.taskTouchesScala(task) then s"\n\n${Impl.ScalaSemanticMandate}" else ""
+
+    val coverageRepairStr = coverageRepair
+      .map(report => s"\nYour previous attempt at this task was rejected:\n$report\n\nReturn a corrected body.\n")
+      .getOrElse("")
 
     AgentPrompt(s"""Evaluate and prepare this GitHub task before implementation.
 
@@ -450,8 +524,12 @@ Rules:
   - EXCEPTION - pinning a concrete runner is still allowed, and takes priority over required abilities, ONLY when the task genuinely needs one specific tool/version (e.g. reproducing a bug tied to one exact model). In that rare case, keep using "preferred llms/models/efforts/versions" as a ranked list of exact agent/model/effort/version entries (leave effort or version empty when unused, e.g. claude/sonnet//1.0.0).
   - Match the abilities to the job type, scope, and risk: small mechanical tasks need few/low-importance abilities, while broad Scala refactors, failing CI repair, and ambiguous debugging need high-importance capability abilities.
 - Include Context, Goal, Scope, Acceptance Criteria, and Notes/Risks when useful.
+- Scope and Acceptance Criteria are 1:1. EVERY scope item gets its own acceptance criterion, and the executor mechanically rejects a body with fewer criteria than scope items. A scope item with no criterion is not "implied" - it is silently dropped, the task still closes green, and the work is discovered missing later. Prose in Notes/Risks stops nothing; only a criterion does.
+- State each acceptance criterion over the VALUES it accepts, not over the shape of the change. "Every construction site passes `phase`" was satisfied by passing the wrong variable of the right type; "`phase` is one of {plan, source-of-truth, implement, test}" could not have been. Name the value set, the exact function, the named test that must pass - something a wrong-but-well-typed implementation fails.
+- Do not add a "Files" section listing the files that may be modified. Guessing it gets it wrong, and a wrong allowlist either blocks the task or teaches the implementer to ignore the section. Constrain the OUTCOME in the acceptance criteria; let the implementer find the call sites.
 - Evaluate whether the task should be split before implementation. Record the evaluation in the body.
-- If splitting is needed, create GitHub subtasks before returning. Each subtask must have parent, dependencies if needed, acceptance criteria, narrow scope, and a "Required abilities/importance:" block.
+- If splitting is needed, create GitHub subtasks before returning. Each subtask must have parent, dependencies if needed, acceptance criteria, narrow scope, and a "Required abilities/importance:" block. The 1:1 scope-to-acceptance rule applies to every subtask you create, and is checked on them too.
+- If two subtasks land opposite ends of the same boundary - one writes a field and another reads it, one serialises and another parses - emit a THIRD subtask that crosses it, depending on both, whose acceptance criterion is the round trip. Both halves can be individually correct, individually green, and jointly useless; nothing else in the pipeline tests across a subtask boundary.
 - Prefer a target scope that a weaker model such as Haiku could implement without another split.
 - If the task's existing preferred runner metadata pins claude/opus (or any top-tier model) for the whole task, treat that as a signal to split: opus-level judgment is only needed for plan/source-of-truth-shaped work, so carve those parts out and route implement/test leaves to cheaper runners instead of leaving the whole task on opus.
 - If important information is missing and cannot be inferred, set status to "questions" and put concrete user questions in "questions".
@@ -489,7 +567,7 @@ Description state: $descriptionState
 
 Current Task Description:
 ${task.body}
-$dependencyConclusionStr$userAnswerStr""")
+$dependencyConclusionStr$userAnswerStr$coverageRepairStr""")
 
   def splitTaskPrompt(
       task: Issue,

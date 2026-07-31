@@ -342,8 +342,11 @@ object GitHub:
   ): Boolean =
     getDependencies(issue.body).exists(openIssueNumbers.contains)
 
+  def openChildren(issue: Issue, openIssues: List[Issue]): List[Issue] =
+    openIssues.filter(child => parentIds(child).contains(issue.number))
+
   def hasOpenChildren(issue: Issue, openIssues: List[Issue]): Boolean =
-    openIssues.exists(child => parentIds(child).contains(issue.number))
+    openChildren(issue, openIssues).nonEmpty
 
   def dependencyConclusion[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
@@ -356,9 +359,8 @@ object GitHub:
 
   /** Joins dependency conclusions into the block pasted into a child's prompt.
     *
-    * Bounded per dependency, not over the joined block: with several
-    * dependencies a single verbose parent would otherwise consume the whole
-    * budget and silently truncate its siblings away entirely.
+    * Bounded per dependency, not over the joined block: with several dependencies a single verbose parent would
+    * otherwise consume the whole budget and silently truncate its siblings away entirely.
     */
   def renderDependencyConclusions(
       conclusions: List[(TaskNumber, String)]
@@ -404,21 +406,16 @@ object GitHub:
         }
     }
 
-  /** Builds the context block given to the agent when a task has prior execution
-    * history.
+  /** Builds the context block given to the agent when a task has prior execution history.
     *
-    * This exists so reopened, retried, or resumed tasks do not start from a blank
-    * prompt. The executor reads the issue's recent comments and any pull requests
-    * linked from the issue, then enriches those pull requests with their workflow
-    * runs. That gives the next agent run the previous conclusion, restart notes,
-    * related PRs, and CI failures/pending checks it needs to continue or repair the
-    * task instead of repeating already-completed work.
+    * This exists so reopened, retried, or resumed tasks do not start from a blank prompt. The executor reads the
+    * issue's recent comments and any pull requests linked from the issue, then enriches those pull requests with their
+    * workflow runs. That gives the next agent run the previous conclusion, restart notes, related PRs, and CI
+    * failures/pending checks it needs to continue or repair the task instead of repeating already-completed work.
     *
-    * The method returns `None` when the issue has no automation history and no
-    * related pull requests, keeping normal first-run prompts unchanged. If GitHub
-    * history cannot be read, it logs progress and treats the task as having no
-    * replay context so a transient GitHub read problem does not block claiming the
-    * task.
+    * The method returns `None` when the issue has no automation history and no related pull requests, keeping normal
+    * first-run prompts unchanged. If GitHub history cannot be read, it logs progress and treats the task as having no
+    * replay context so a transient GitHub read problem does not block claiming the task.
     */
   def replayContext[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
@@ -795,9 +792,8 @@ $prText
 
   /** The `Files touched:` block a dependent task reads.
     *
-    * Capped, and by count rather than characters: a truncated path list would
-    * hand the next task a path that does not exist. A wide-reaching task is
-    * better summarised by its count than by an arbitrary prefix of its paths.
+    * Capped, and by count rather than characters: a truncated path list would hand the next task a path that does not
+    * exist. A wide-reaching task is better summarised by its count than by an arbitrary prefix of its paths.
     */
   val MaxReportedFiles: Int = 40
 
@@ -806,8 +802,7 @@ $prText
     else
       val shown = files.take(MaxReportedFiles)
       val more =
-        if files.length > MaxReportedFiles then
-          s"\n  ... and ${files.length - MaxReportedFiles} more"
+        if files.length > MaxReportedFiles then s"\n  ... and ${files.length - MaxReportedFiles} more"
         else ""
       s"\nFiles touched:\n${shown.map(file => s"  $file").mkString("\n")}$more\n"
 

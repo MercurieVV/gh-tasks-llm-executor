@@ -235,6 +235,40 @@ class EvaluatorOutputScopeSuite extends munit.FunSuite:
     assert(prompt.contains("Required abilities/importance:"))
     assert(prompt.contains("Phase: implement"))
 
+  // The four defects POSTMORTEM-2026-07-31 documents. Two of them are checked
+  // mechanically after the fact (AcceptanceCoverage); these instructions are
+  // what lets the evaluator pass that check on the first attempt instead of
+  // paying for a re-run, and they are the only handle on the two that cannot
+  // be checked at all.
+  test("the evaluator is told scope and acceptance are 1:1"):
+    assert(prompt.contains("Scope and Acceptance Criteria are 1:1"))
+    assert(prompt.contains("EVERY scope item gets its own acceptance criterion"))
+
+  test("the evaluator is told to constrain values, not shape"):
+    assert(prompt.contains("over the VALUES it accepts"))
+    assert(prompt.contains("{plan, source-of-truth, implement, test}"))
+
+  test("the evaluator is told to cross a serialisation boundary with a third subtask"):
+    assert(prompt.contains("emit a THIRD subtask that crosses it"))
+
+  test("the evaluator is told not to write a Files allowlist"):
+    // It was guessed, it was wrong, and succeeding required ignoring it.
+    assert(prompt.contains("Do not add a \"Files\" section"))
+
+  test("a coverage repair is only in the prompt when there was a shortfall"):
+    assert(!prompt.contains("Your previous attempt at this task was rejected"))
+    val repaired = EvaluationArrows
+      .evaluateTaskPrompt(
+        Issue(TaskNumber(7), IssueTitle("Fix the router"), IssueBody("Change the fallback"), State("open")),
+        dependencyConclusion = None,
+        agentInventory = AgentInventory(Nil),
+        userAnswer = None,
+        coverageRepair = Some("3 scope item(s) but only 2 acceptance criterion(a)")
+      )
+      .value
+    assert(repaired.contains("Your previous attempt at this task was rejected"))
+    assert(repaired.contains("3 scope item(s) but only 2"))
+
 class EvaluatorInventoryScopeSuite extends munit.FunSuite:
 
   private val inventory = AgentInventory(
