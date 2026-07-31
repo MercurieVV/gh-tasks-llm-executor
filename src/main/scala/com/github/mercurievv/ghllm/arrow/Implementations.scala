@@ -347,19 +347,66 @@ object Impl:
   // One root candidate raising an uncaught error must not take down every
   // other queued candidate in the same batch. Report escaped failures against
   // that candidate and keep the outer run moving.
+  //
+  // "Keep moving" used to mean the terminal failure was written to the console
+  // and nowhere else: the issue stayed open, unlabelled and uncommented, so a
+  // human had no way to see the task had failed and the next run re-selected
+  // it and bought the same failure again. On 2026-08-01 #129 failed a
+  // TestEditGuard violation across two runners and left no trace at all.
+  //
+  // Every failure now leaves a comment. A policy rejection additionally routes
+  // the task to needs-input, because it is by construction unfixable by
+  // re-running: the phase forbids the change the task requires, so every
+  // runner reaches the same refusal and only a human editing the spec can
+  // unblock it. Capability and infrastructure failures are left selectable —
+  // retrying those next run is the right behaviour.
   def recoverCandidateFailure[F[_]: Sync]: -->[F, (TaskCandidate, Throwable), RunSummary] =
     Kleisli { case (candidate, error) =>
       val message = Option(error.getMessage).getOrElse(error.toString)
-      progress(
-        s"Task #${candidate.issue.number.value} failed unrecoverably: $message. Skipping and continuing with remaining tasks."
-      ).as(
-        RunSummary(
-          status = Status("error"),
-          message = Message5(message),
-          task = Some(candidate.issue)
-        )
+      val root = candidate.context.root
+      val summary = RunSummary(
+        status = Status("error"),
+        message = Message5(message),
+        task = Some(candidate.issue)
       )
+      for
+        _ <- progress(
+          s"Task #${candidate.issue.number.value} failed unrecoverably: $message. Skipping and continuing with remaining tasks."
+        )
+        // Best-effort throughout: a task that failed must not fail a second
+        // time on the bookkeeping about its failure.
+        _ <- GitHub.commentTaskFailure(progress)(root, candidate.issue, message).attempt.void
+        _ <- if isPolicyRejection(error) then blockTaskForHuman[F](candidate, message) else ().pure[F]
+      yield summary
     }
+
+  /** Delegates to `VerificationResult`'s classifier rather than re-matching on the exception, so the ladder's
+    * "don't escalate this" and this arrow's "don't re-select this" can never drift apart.
+    */
+  def isPolicyRejection(error: Throwable): Boolean =
+    VerificationResult.fromThrowable(error).isPolicyRejection
+
+  /** Marks a task as needing a human before it can run again.
+    *
+    * Both writes are required and neither is sufficient: `selectTask` excludes a task only when the merged metadata
+    * says needs-input AND a "Questions before execution:" comment exists AND no non-script reply follows it. Metadata
+    * alone is treated as stale state, and a question alone is not read at all. The failure comment posted by the caller
+    * cannot be mistaken for the human's answer — "script stopped before closing task" is a recognised script prefix.
+    */
+  private def blockTaskForHuman[F[_]: Sync](candidate: TaskCandidate, reason: String): F[Unit] =
+    val root = candidate.context.root
+    val question =
+      s"""$reason
+         |
+         |This is a policy rejection, not a runner failure: every runner reaches the
+         |same refusal, so re-running cannot fix it. Adjust the task (or its `Phase:`)
+         |and reply here to unblock it.""".stripMargin
+    (GitHub.commentNeedsUserInput(progress)(root, candidate.issue, question) *>
+      GitHub.commentTaskMetadata(progress)(
+        root,
+        candidate.issue.number,
+        TaskMetadata.render(TaskMetadata(evaluation = Some("needs-input")))
+      )).attempt.void
 
   def lastSummary[F[_]: Sync]: -->[F, List[RunSummary], RunSummary] =
     Kleisli.fromFunction { summaries =>

@@ -297,3 +297,27 @@ class AdvancedHeadSuite extends munit.FunSuite:
 
   test("a worktree whose HEAD cannot be read counts as moved, not as empty"):
     assert(Impl.advancedHead(executed(Some("abc123")), None))
+
+/** A terminal failure decides two different things: whether to comment (always) and whether to take the task out of
+  * selection (only for a policy rejection). Getting the second wrong in either direction is expensive — blocking a
+  * transient failure needs a human to unblock work that would have retried itself, and not blocking a policy rejection
+  * buys the identical failure again on every later run.
+  */
+class TerminalFailureClassificationSuite extends munit.FunSuite:
+
+  test("a test-edit violation is a policy rejection: re-running it cannot help"):
+    val violation = TestEditGuard.Violation(Some("implement"), List("src/Foo.test.scala"))
+    assert(Impl.isPolicyRejection(violation))
+
+  test("an ordinary runner failure is not, and stays selectable for the next run"):
+    assert(!Impl.isPolicyRejection(RuntimeException("agent exited with code 1")))
+
+  test("a turn-cap kill is not a policy rejection — it is a verdict on the attempt"):
+    assert(!Impl.isPolicyRejection(TurnCapExceeded(75, 25)))
+
+  test("classification agrees with the escalation ladder's, which is the point of sharing it"):
+    val violation = TestEditGuard.Violation(Some("implement"), List("src/Foo.test.scala"))
+    assertEquals(
+      Impl.isPolicyRejection(violation),
+      VerificationResult.Failed(violation).isPolicyRejection
+    )
