@@ -184,6 +184,31 @@ class TokenMetricsSuite extends munit.FunSuite:
     assert(rendered.contains("No (phase, runner) pair is measured"), rendered)
     assert(rendered.contains("Priority.score"), rendered)
 
+  // Samples accumulating under a phase no selector queries look exactly like
+  // samples accumulating usefully. The difference is only visible if the view
+  // says so.
+  test("readiness names phases outside the vocabulary"):
+    def event(phase: String) =
+      TokenMetrics.TokenMetricsEvent(
+        timestampMillis = 1000,
+        vendor = TokenUsage.Vendor.Codex,
+        usage = TokenUsage.TokenSnapshot.Zero,
+        taskNumber = None,
+        model = None,
+        scope = "agent-run",
+        phase = Some(phase),
+        runner = Some("agent: codex")
+      )
+
+    val rendered = TokenMetrics.renderReadiness(List(event("refactor"), event("implement")))
+
+    assert(rendered.contains("off-vocabulary phase(s): refactor"), rendered)
+    assert(!rendered.contains("off-vocabulary phase(s): implement"), rendered)
+    assertEquals(
+      TokenMetrics.renderReadiness(List(event("implement"))).contains("off-vocabulary"),
+      false
+    )
+
   test("Aider output token line parses as a token snapshot"):
     val output =
       """Some earlier output
@@ -247,22 +272,26 @@ class TokenMetricsSuite extends munit.FunSuite:
     val snap1 = TokenUsage.TokenSnapshot(input = 10, output = 0, cacheRead = 3, cacheWrite = 0, total = 13)
     val snap2 = TokenUsage.TokenSnapshot(input = 0, output = 0, cacheRead = 5, cacheWrite = 0, total = 5)
 
-    backend.record(TokenMetrics.TokenMetricsEvent(
-      timestampMillis = 1000,
-      vendor = TokenUsage.Vendor.Codex,
-      usage = snap1,
-      taskNumber = None,
-      model = None,
-      scope = "test"
-    ))
-    backend.record(TokenMetrics.TokenMetricsEvent(
-      timestampMillis = 2000,
-      vendor = TokenUsage.Vendor.Codex,
-      usage = snap2,
-      taskNumber = None,
-      model = None,
-      scope = "test"
-    ))
+    backend.record(
+      TokenMetrics.TokenMetricsEvent(
+        timestampMillis = 1000,
+        vendor = TokenUsage.Vendor.Codex,
+        usage = snap1,
+        taskNumber = None,
+        model = None,
+        scope = "test"
+      )
+    )
+    backend.record(
+      TokenMetrics.TokenMetricsEvent(
+        timestampMillis = 2000,
+        vendor = TokenUsage.Vendor.Codex,
+        usage = snap2,
+        taskNumber = None,
+        model = None,
+        scope = "test"
+      )
+    )
 
     // total input = 10, total cacheRead = 3+5=8, ratio = 8/18 ≈ 0.444...
     val expected = 8.0 / 18.0
@@ -434,8 +463,10 @@ class TokenMetricsSuite extends munit.FunSuite:
     val event = results.head
     assertEquals(event.timestampMillis, 1000L)
     assertEquals(event.vendor, TokenUsage.Vendor.Gemini)
-    assertEquals(event.usage,
-      TokenUsage.TokenSnapshot(input = 10, output = 20, cacheRead = 0, cacheWrite = 0, total = 30))
+    assertEquals(
+      event.usage,
+      TokenUsage.TokenSnapshot(input = 10, output = 20, cacheRead = 0, cacheWrite = 0, total = 30)
+    )
     assertEquals(event.scope, "legacy")
 
     // new fields must decode to defaults
@@ -580,5 +611,7 @@ class ScalaTextToolCallMetricsSuite extends munit.FunSuite:
     TokenMetrics.recordScalaTextToolCalls(transcript, "claude/opus", "test", backend)
 
     val reloaded = TokenMetrics.JsonlTokenMetricsBackend(path)
-    assertEquals(reloaded.scalaTextToolCalls.map(event => event.runner -> event.count).toSet,
-      Set("codex/mini" -> 2L, "claude/opus" -> 2L))
+    assertEquals(
+      reloaded.scalaTextToolCalls.map(event => event.runner -> event.count).toSet,
+      Set("codex/mini" -> 2L, "claude/opus" -> 2L)
+    )

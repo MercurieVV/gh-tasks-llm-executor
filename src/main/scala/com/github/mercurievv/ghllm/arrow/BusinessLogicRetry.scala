@@ -55,8 +55,7 @@ object BusinessLogicRetry:
           // `routeRunnerFallback`. That is the wrong half: the plan's Stage 1
           // is "run -> compile + test -> red: escalate", and the free verifier
           // is the whole reason a cheap runner can be tried first.
-          runTaskWithRunner =
-            run => retryRunTaskWithRunner(progress)(run.andThen(Impl.runProjectValidation[F]))
+          runTaskWithRunner = run => retryRunTaskWithRunner(progress)(run.andThen(Impl.runProjectValidation[F]))
         ),
         // Already run above, once per attempt. Left in place it would re-run the
         // whole suite on the winning attempt and record a second sample for it.
@@ -140,7 +139,7 @@ object BusinessLogicRetry:
               // Before, not after: the stronger runner must start from HEAD, not
               // from the cheap runner's half-finished edits.
               _ <- Git[F](progress).resetWorktree(claimed.worktreePath).attempt.flatMap {
-                case Right(_) => Sync[F].unit
+                case Right(_)    => Sync[F].unit
                 case Left(error) =>
                   // A worktree we cannot clean is not a reason to abandon the
                   // task — escalate anyway and say so.
@@ -343,7 +342,11 @@ object BusinessLogicRetry:
                 contextFiles = conflictedFiles,
                 taskNumber = Some(request.task.number),
                 metricsRoot = Some(request.root),
-                metricsScope = "merge-repair"
+                metricsScope = AgentExecutor.MetricsScope.MergeRepair,
+                // Without this the repair events are dimensionless: recorded,
+                // but counted by `metrics readiness` as invisible to runner
+                // selection, because meanUsage is keyed on (phase, runner).
+                phase = TestEditGuard.phaseOf(request.task.body)
               )
               .attempt
             _ <-
@@ -500,16 +503,13 @@ object BusinessLogicRetry:
 
   /** Run a repair agent until the project validates, rotating runners on red.
     *
-    * The retry was previously the same runner three times over. That is the
-    * defect `routeRunnerFallback` exists to avoid, on a second route: a runner
-    * that could not fix the build on attempt one is not more likely to fix it on
-    * attempt three, and each identical re-run is paid for. `alternateImplementor`
-    * with the attempted list is exactly what `repairMergeConflictsUntilClean`
-    * already does one function below - the two repair paths now agree.
+    * The retry was previously the same runner three times over. That is the defect `routeRunnerFallback` exists to
+    * avoid, on a second route: a runner that could not fix the build on attempt one is not more likely to fix it on
+    * attempt three, and each identical re-run is paid for. `alternateImplementor` with the attempted list is exactly
+    * what `repairMergeConflictsUntilClean` already does one function below - the two repair paths now agree.
     *
-    * The sequence is precomputed rather than chosen inside the loop because it
-    * does not depend on the error - which makes it a pure function, and the only
-    * part of this effect-heavy loop that can be tested without a live agent.
+    * The sequence is precomputed rather than chosen inside the loop because it does not depend on the error - which
+    * makes it a pure function, and the only part of this effect-heavy loop that can be tested without a live agent.
     */
   def repairRunnerSequence(
       inventory: AgentInventory,
@@ -546,7 +546,8 @@ object BusinessLogicRetry:
           RepairAllowedTools,
           contextFiles = repairContextFiles(worktreePath),
           taskNumber = Some(task.number),
-          metricsScope = "repair"
+          metricsScope = AgentExecutor.MetricsScope.Repair,
+          phase = TestEditGuard.phaseOf(task.body)
         )
         changed <- Impl.git[F].filesChanged(worktreePath)
         // Same false-green hole as the main execute path, on a second route: a

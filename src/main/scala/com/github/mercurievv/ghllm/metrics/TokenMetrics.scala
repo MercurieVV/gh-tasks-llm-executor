@@ -47,8 +47,8 @@ object TokenMetrics:
         sinceMillis.forall(event.timestampMillis >= _) &&
         untilMillis.forall(event.timestampMillis <= _)
 
-  /** One run's count of shell text-tool calls that targeted Scala source —
-    * the Stage 3 measure of whether the ScalaSemantic mandate is obeyed.
+  /** One run's count of shell text-tool calls that targeted Scala source — the Stage 3 measure of whether the
+    * ScalaSemantic mandate is obeyed.
     */
   final case class ScalaTextToolCallEvent(
       timestampMillis: Long,
@@ -62,10 +62,9 @@ object TokenMetrics:
     def record(event: TokenMetricsEvent): Unit
     def query(query: TokenMetricsQuery): List[TokenMetricsEvent]
 
-    /** Kept off `record` because a run can produce this count without producing
-      * any token usage — gemini and a failed aider parse both do — and folding
-      * it into a `TokenMetricsEvent` would lose it in exactly those runs, or
-      * else file a zero-usage event that drags every cost mean down.
+    /** Kept off `record` because a run can produce this count without producing any token usage — gemini and a failed
+      * aider parse both do — and folding it into a `TokenMetricsEvent` would lose it in exactly those runs, or else
+      * file a zero-usage event that drags every cost mean down.
       */
     def record(event: ScalaTextToolCallEvent): Unit
 
@@ -79,18 +78,15 @@ object TokenMetrics:
 
     /** Mean tokens one run of this (phase, runner) actually consumes.
       *
-      * `AgentTool.cost` otherwise assumes a fixed 20k in / 4k out for every
-      * runner and every phase, which turns the ladder's `c/s` into a pure PRICE
-      * ratio. Price is not cost: a cheap model that needs three times the turns
-      * is not three times cheaper, and the constants hide exactly that.
+      * `AgentTool.cost` otherwise assumes a fixed 20k in / 4k out for every runner and every phase, which turns the
+      * ladder's `c/s` into a pure PRICE ratio. Price is not cost: a cheap model that needs three times the turns is not
+      * three times cheaper, and the constants hide exactly that.
       *
-      * Cache reads are counted at their own price by the caller, not folded in
-      * here, and cache writes are counted as input because that is what the
-      * vendor bills them as before the multiplier is applied.
+      * Cache reads are counted at their own price by the caller, not folded in here, and cache writes are counted as
+      * input because that is what the vendor bills them as before the multiplier is applied.
       *
-      * `None` below `minSample` — deliberately the same discipline as
-      * [[successRate]], so an unmeasured pair falls back to the constants rather
-      * than to a mean of two runs.
+      * `None` below `minSample` — deliberately the same discipline as [[successRate]], so an unmeasured pair falls back
+      * to the constants rather than to a mean of two runs.
       */
     def meanUsage(
         phase: String,
@@ -118,9 +114,7 @@ object TokenMetrics:
     // outcome was "green". None when the sample is smaller than `minSample`.
     def successRate(phase: String, runner: String, minSample: Int = 20): Option[Double] =
       val allEvents = this.query(TokenMetricsQuery(limit = None))
-      val relevant = allEvents.filter(e =>
-        e.phase.contains(phase) && e.runner.contains(runner) && e.outcome.isDefined
-      )
+      val relevant = allEvents.filter(e => e.phase.contains(phase) && e.runner.contains(runner) && e.outcome.isDefined)
       val total = relevant.size
       if total < minSample then None
       else
@@ -141,8 +135,7 @@ object TokenMetrics:
       val matching = events.filter(query.matches)
       query.limit.fold(matching)(limit => matching.takeRight(limit.max(0))).toList
 
-    /** Written to a sibling file, not to `path`: `query` there feeds the cost
-      * means, and these carry no tokens.
+    /** Written to a sibling file, not to `path`: `query` there feeds the cost means, and these carry no tokens.
       */
     def record(event: ScalaTextToolCallEvent): Unit =
       val target = JsonlTokenMetricsBackend.scalaTextToolCallPath(path)
@@ -413,10 +406,9 @@ object TokenMetrics:
         case "jsonl" | "file"                                    => Some(Jsonl)
         case _                                                   => None
 
-  /** Counts the run's Scala text-tool calls and files them with whichever
-    * backend is configured. It used to write to VictoriaMetrics unconditionally,
-    * so under the jsonl backend the number was computed and then dropped —
-    * silently, because the write failure was swallowed.
+  /** Counts the run's Scala text-tool calls and files them with whichever backend is configured. It used to write to
+    * VictoriaMetrics unconditionally, so under the jsonl backend the number was computed and then dropped — silently,
+    * because the write failure was swallowed.
     */
   def recordScalaTextToolCalls(
       transcript: String,
@@ -498,16 +490,13 @@ object TokenMetrics:
 
   /** How close each (phase, runner) is to being usable by runner selection.
     *
-    * `meanUsage` and `successRate` both answer `None` below `minSample`, and
-    * `selectRunnerFor` reads that `None` as "no signal" and falls back to
-    * `Priority.score`. That fallback is correct but indistinguishable from the
-    * ladder economics being switched off entirely - which is what happens when
-    * events are recorded without a `phase`/`runner`, or without an `outcome`.
-    * This view is the difference between "not measured yet" and "never will be".
+    * `meanUsage` and `successRate` both answer `None` below `minSample`, and `selectRunnerFor` reads that `None` as "no
+    * signal" and falls back to `Priority.score`. That fallback is correct but indistinguishable from the ladder
+    * economics being switched off entirely - which is what happens when events are recorded without a `phase`/`runner`,
+    * or without an `outcome`. This view is the difference between "not measured yet" and "never will be".
     *
-    * Pure in its inputs so it can be tested without a live backend; the counts
-    * mirror the filters in [[TokenMetricsBackend.meanUsage]] and
-    * [[TokenMetricsBackend.successRate]] exactly, including the requirement that
+    * Pure in its inputs so it can be tested without a live backend; the counts mirror the filters in
+    * [[TokenMetricsBackend.meanUsage]] and [[TokenMetricsBackend.successRate]] exactly, including the requirement that
     * `successRate` only counts events that carry an outcome.
     */
   def renderReadiness(events: List[TokenMetricsEvent], minSample: Int = 20): String =
@@ -541,16 +530,25 @@ object TokenMetrics:
             if withOutcome >= minSample then "yes" else s"no (${minSample - withOutcome} more)"
           ).mkString(" ")
         }
-      (preamble :: header :: rows).mkString(System.lineSeparator())
+      // A phase outside the vocabulary is measured but unreachable: nothing
+      // ever calls successRate("refactor", _), so those samples accumulate
+      // toward a threshold no selector will cross. Indistinguishable from
+      // healthy rows without saying so.
+      val unknownPhases =
+        dimensioned.map(_._1._1).distinct.filterNot(Phase.All.contains).sorted
+      val footer =
+        Option.when(unknownPhases.nonEmpty)(
+          s"off-vocabulary phase(s): ${unknownPhases.mkString(", ")}" +
+            s" - not in {${Phase.All.toList.sorted.mkString(", ")}}, so no selector will ever read them."
+        )
+      (preamble :: header :: rows ::: footer.toList).mkString(System.lineSeparator())
 
-  /** The one JSON encoding of an event, shared by the JSONL backend and the
-    * `metrics --json` view.
+  /** The one JSON encoding of an event, shared by the JSONL backend and the `metrics --json` view.
     *
-    * `main.scala` hand-rolled its own copy of this, and that copy was missing
-    * `phase`, `runner`, `turnCount`, `escalated` and `outcome` — the same five
-    * fields `renderEvents` was missing, for the same reason: a second
-    * serialiser that nobody updates when the event grows. Two encodings of one
-    * record is a way for them to disagree, so there is now one.
+    * `main.scala` hand-rolled its own copy of this, and that copy was missing `phase`, `runner`, `turnCount`,
+    * `escalated` and `outcome` — the same five fields `renderEvents` was missing, for the same reason: a second
+    * serialiser that nobody updates when the event grows. Two encodings of one record is a way for them to disagree, so
+    * there is now one.
     */
   def eventJson(event: TokenMetricsEvent): ujson.Obj =
     ujson.Obj(
