@@ -74,7 +74,7 @@ object Impl:
        |Never use `cat`, `rg`, `sed`, `grep`, `head`, or `tail` against `.scala` files.
        |Use `document_outline` to understand a file's API instead of reading the entire file.
        |Call `set_workspace_root` ONCE with the absolute `Worktree:` path given below before your first query - do not call `get_workspace_root` or `pwd` to discover it, and do not call it again. Use `annotated_source` to read a `.scala` file.
-       |The index there was refreshed for this task immediately before you were dispatched; do not run `scripts/refresh-semanticdb.sh` yourself unless a tool reports the index is stale.
+       |If this repository ships `scripts/refresh-semanticdb.sh`, the index there was refreshed for this task immediately before you were dispatched; do not run it yourself unless a tool reports the index is stale. If it ships no such script, refresh the index however this repository does it.
        |If ScalaSemantic MCP is unavailable or failing, say so in your final answer before falling back to shell text tools.
        |""".stripMargin
 
@@ -961,24 +961,35 @@ object Impl:
 
     Base64.getUrlEncoder.withoutPadding().encodeToString(digest.digest())
 
+  /** The refresh script is repository-owned and optional: a target project that indexes differently, or not at all,
+    * simply does not ship one. Its absence is an environment fact no runner can repair, so it must not surface as a
+    * failed dispatch — before this was a `skip`, a missing script raised an `IOException` that the ladder charged to
+    * the agent and escalated through every runner before abandoning the task.
+    */
   def refreshSemanticDbBeforeDispatch[F[_]: Async](
       env: RunEnv[F],
       task: Issue,
       root: os.Path
   ): F[Unit] =
-    if taskTouchesScala(task) then
-      Async[F]
-        .blocking(scalaSourceHash(root))
-        .flatMap(hash =>
-          refreshSemanticDbIfNeeded(env, SemanticDbSource(root, hash))(
-            Async[F].blocking {
-              os.proc((root / "scripts" / "refresh-semanticdb.sh").toString)
-                .call(cwd = root, stdout = os.Inherit, stderr = os.Inherit)
-              ()
-            }
-          )
-        )
-    else Async[F].unit
+    val script = root / "scripts" / "refresh-semanticdb.sh"
+    if !taskTouchesScala(task) then Async[F].unit
+    else
+      Async[F].blocking(os.exists(script)).flatMap {
+        case false =>
+          progress[F](s"No SemanticDB refresh script at $script. Skipping index refresh.")
+        case true =>
+          Async[F]
+            .blocking(scalaSourceHash(root))
+            .flatMap(hash =>
+              refreshSemanticDbIfNeeded(env, SemanticDbSource(root, hash))(
+                Async[F].blocking {
+                  os.proc(script.toString)
+                    .call(cwd = root, stdout = os.Inherit, stderr = os.Inherit)
+                  ()
+                }
+              )
+            )
+      }
 
   def refreshSemanticDbIfNeeded[F[_]: Async](
       env: RunEnv[F],
@@ -1035,8 +1046,9 @@ object Impl:
     Kleisli.ask[F, ExecutedTask]
 
   /** Rejects a run that changed the tests it is about to be judged by, before the judgement happens. Raising here puts
-    * it on the same path as a failed validation, so the existing ladder escalates it and, if the stronger runner does
-    * the same, surfaces it to a human.
+    * it on the same path as a failed validation, except that it raises [[TestEditGuard.Violation]], which
+    * `routeRunnerFallback` surfaces to a human directly instead of escalating: no runner can satisfy a phase that
+    * forbids the edit the task requires.
     */
   def guardTestEdits[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli { task =>
@@ -1063,7 +1075,7 @@ object Impl:
                   // as anything else would teach successRate that the runner
                   // succeeded at what it was actually caught doing.
                   "red"
-                ) *> Sync[F].raiseError(RuntimeException(message))
+                ) *> Sync[F].raiseError(TestEditGuard.Violation(phase, violations))
           }
     }
 

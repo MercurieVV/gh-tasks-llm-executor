@@ -125,6 +125,14 @@ object BusinessLogicRetry:
         // Green must never reach this arrow. Return it unchanged rather than
         // escalating a success into a paid re-run.
         Left(verdict).pure[F]
+      else if verdict.isPolicyRejection then
+        // Not a capability gap: the task's phase forbids the change the task
+        // needs, so a stronger runner reaches the same refusal. Escalating this
+        // cost three runs (one of them gpt-5 at high effort) before surfacing
+        // the same message the first run already produced.
+        progress(
+          s"Task #${claimed.task.number} was rejected on policy, not capability: $reason. Not escalating - fix the task instead."
+        ).as(Left(verdict))
       else if task.escalationDepth >= MaxEscalationDepth then
         progress(
           s"Task #${claimed.task.number} still failing after $MaxEscalationDepth escalation(s): $reason. Giving up so a human can look at it."
@@ -559,7 +567,7 @@ object BusinessLogicRetry:
           .map(TestEditGuard.violations(TestEditGuard.phaseOf(task.body), _))
         _ <-
           if testEdits.nonEmpty then
-            F.raiseError[Unit](RuntimeException(TestEditGuard.report(TestEditGuard.phaseOf(task.body), testEdits)))
+            F.raiseError[Unit](TestEditGuard.Violation(TestEditGuard.phaseOf(task.body), testEdits))
           else if changed then
             Impl.git[F].runProjectValidation(worktreePath).attempt.flatMap {
               case Right(_) =>

@@ -51,6 +51,14 @@ object TestEditGuard:
     if isExempt(phase) then Nil
     else modifiedOrDeleted.filter(isTestFile).distinct.sorted
 
+  /** Raised instead of a bare `RuntimeException` so the escalation ladder can tell this apart from a runner failure.
+    * The distinction is not cosmetic: the verdict is a property of the *task* (its phase does not permit the edit the
+    * work requires), so every runner in the inventory reaches it identically. Escalating it paid for three runs of a
+    * task whose spec, not whose runner, was wrong.
+    */
+  final case class Violation(phase: Option[String], files: List[String])
+      extends RuntimeException(TestEditGuard.report(phase, files))
+
   def report(phase: Option[String], violations: List[String]): String =
     s"""Refusing to accept this run: it changed existing test files while in phase '${phase
         .getOrElse("unspecified")}'.
