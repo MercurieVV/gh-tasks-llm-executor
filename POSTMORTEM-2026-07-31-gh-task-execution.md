@@ -95,6 +95,33 @@ therefore never been exercised against it:
   the loop re-ran the runner that had just failed, three times over.
 - `7ee6777` — `TestEditGuard`. Landed 07-30 18:18, after the last merge.
 
+## A fifth way, found on 07-31 while fixing the other four
+
+The remedies above all assume the measurements exist. Most of them did not.
+
+`deferTokenMetrics` staged a run's pending event under
+`MetricsKey(root, task, runner, scope)` where `scope` was the dispatch's
+`metricsScope` — the literal `"implement"`. `completeTokenMetrics`, which is
+what attaches the outcome and actually records the event, looked the same key
+up under the task's `Phase:` instead. The two agree only when the phase is
+exactly `implement`. For every `Phase: test`, `Phase: plan` or
+`Phase: source-of-truth` run — and for `Phase: Implement` with a capital I,
+since nothing normalised it — the lookup missed, the staged event was never
+recorded, and no usage sample and no outcome sample existed for that pair.
+
+So `successRate(phase, runner)` and `meanUsage(phase, runner)` could never reach
+`minSample = 20` outside `implement`, and `selectRunnerFor` fell back to
+`Priority.score` while every comment around it described a measured selection.
+Two strings that must be equal, in files that never mention each other, with no
+error when they differ: the same shape as the four failures above, one layer
+down. It is now one enum (`AgentExecutor.MetricsScope`), so a phase cannot be
+passed where a scope belongs — the mistake does not compile.
+
+Worth stating plainly, because it changes how to read the rest of this document:
+the ladder economics this postmortem takes for granted were never actually
+running. `metrics readiness` on the existing store is the way to see how much of
+the recorded history is usable at all.
+
 ## What has to change before the next run
 
 Ordered by leverage.
@@ -109,12 +136,24 @@ Ordered by leverage.
 2. **Require 1:1 scope-to-acceptance.** The evaluator should reject its own
    decomposition when a scope item has no criterion. T20 item 3 died precisely
    in that gap.
+   *Done.* `AcceptanceCoverage.shortfall` counts items under `Scope` against
+   items under `Acceptance criteria`; a shortfall re-runs the evaluator once
+   with the report and then routes the task to needs-input rather than raising.
+   `verifySplitExists` runs the same check over a split's children, which is
+   where T20's item actually was.
 3. **State acceptance over values, not over presence.** See failure 1.
+   *Done*, as a prompt rule in `evaluateTaskPrompt` carrying the T04 example
+   verbatim. This one cannot be checked mechanically — "names a value set" is
+   judgment — so it is instruction, not enforcement.
 4. **Emit a round-trip task whenever two tasks touch opposite ends of a
    serialisation boundary**, depending on both. See failure 4.
+   *Done* as a prompt rule, same caveat as 3.
 5. **Enforce `## Files` or delete the section.** Preferably derive it from
    ScalaSemantic `find_usages` at evaluation time instead of having the model
    guess it, since a guessed list is what made it wrong here.
+   *Resolved by deletion.* Deriving it correctly is a bigger job than the defect
+   and still a guess for non-Scala work. The author-facing field is gone from
+   `TOKEN_EFFICIENCY_TASKS.md`, and the evaluator is now told not to emit one.
 6. **Keep the measurement dimensions visible during the run.** `renderEvents`
    showed none of the five until 07-31 and `metrics readiness` did not exist.
    1338 dispatches with no in-flight view of phase/runner/outcome is

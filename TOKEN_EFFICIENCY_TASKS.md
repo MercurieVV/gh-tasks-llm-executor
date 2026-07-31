@@ -149,12 +149,21 @@ The blocker is therefore a single executor run on current `master`, not code.
 
 | Field | Meaning |
 |---|---|
-| **Files** | The only files that may be modified. Touching others = the task was misread. |
 | **Depends** | Must be merged first. |
 | **Tier** | Suggested runner strength. See the tier legend below. |
 | **Do** | The change, stated so no design choice remains. |
 | **Done when** | The check. Almost always a named munit test that must pass. |
 | **Do NOT** | Explicit scope fence. |
+
+The **Files** field is dead. It used to read "the only files that may be
+modified; touching others = the task was misread", and the entries below still
+carry it because they are the record of what was actually dispatched. It was
+guessed rather than derived, and T04 is the proof: it named
+`Implementations.scala` when the construction sites it required were in
+`AgentExecutor.scala`, so obeying the fence would have made the task impossible.
+A rule that must be broken to succeed teaches the implementer to discount every
+other fence in the issue. Do not write a new one — constrain the outcome in the
+acceptance criteria and let the implementer find the call sites.
 
 ### Tier legend
 

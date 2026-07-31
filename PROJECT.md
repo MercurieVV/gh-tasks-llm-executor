@@ -111,8 +111,19 @@ recurring defects it documents are cheap to avoid and invisible once merged:
 - **Acceptance must constrain values, not shape.** "passes `phase`" was satisfied
   by passing the wrong variable of the right type. Name the value set.
 - **Every scope item needs its own criterion.** An item with none is silently
-  dropped and the task still closes green.
-- **`## Files` is either enforced or deleted.** It was guessed, it was wrong, and
-  succeeding required ignoring it.
+  dropped and the task still closes green. This one is now enforced:
+  `AcceptanceCoverage.shortfall` counts the items under `Scope` against those
+  under `Acceptance criteria`, and fewer criteria than scope items re-runs the
+  evaluator once and then routes the task to needs-input. The same check runs
+  over the children of a split, where the dropped item actually lives.
+- **There is no `## Files` section.** It was guessed, it was wrong, and
+  succeeding required ignoring it, so the guidance to write one was deleted
+  rather than enforced — deriving a correct allowlist is a bigger job than the
+  defect, and a wrong one either blocks the task or teaches the implementer to
+  discount every fence in the issue. Constrain the outcome instead.
 - **A write side and a read side in two tasks need a third that crosses them.**
   Both halves can be individually correct and jointly useless.
+
+The first, second and fourth are now in the evaluator prompt
+(`evaluateTaskPrompt`), so a hand-written spec that ignores them is being held
+to a weaker standard than a generated one.
