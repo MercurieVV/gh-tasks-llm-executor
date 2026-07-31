@@ -212,24 +212,35 @@ object GitHub:
       isOpen(issue) && childrenByParent.get(issue.number).exists(_.forall(child => !isOpen(child)))
     )
 
+  /** Returns the parents whose branch is still unlanded afterwards — the ones whose conflicts git could not resolve
+    * alone, which is what the caller needs an agent for.
+    */
   def mergeSettledIntegrationBranches[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
-  ): Kleisli[F, os.Path, Unit] =
+  ): Kleisli[F, os.Path, List[Issue]] =
     Kleisli.apply { root =>
       fetchAllIssues[F].run(root).flatMap { allIssues =>
-        settledParents(allIssues).traverse_ { parent =>
-          F.blocking(
-            integrationRef(root, BranchName(s"task-${parent.number}")).filter(commitsAheadOfRef(root, _) > 0)
-          ).flatMap {
-            case None => F.unit
-            case Some(ref) =>
-              progress(
-                s"Parent #${parent.number} is open and its integration branch ($ref) is ahead of the default branch, with every child closed. Merging it."
-              ) *> mergeIntegrationBranch(progress)((root, parent.number))
+        settledParents(allIssues)
+          .traverse { parent =>
+            val branchName = BranchName(s"task-${parent.number}")
+            def stillAhead = F.blocking(integrationRef(root, branchName).filter(commitsAheadOfRef(root, _) > 0))
+
+            stillAhead.flatMap {
+              case None => none[Issue].pure[F]
+              case Some(ref) =>
+                progress(
+                  s"Parent #${parent.number} is open and its integration branch ($ref) is ahead of the default branch, with every child closed. Merging it."
+                ) *> mergeIntegrationBranch(progress)((root, parent.number)) *>
+                  stillAhead.map(_.as(parent))
+            }
           }
-        }
+          .map(_.flatten)
       }
     }
+
+  /** The same merge, retried after something else has made the branch mergeable. */
+  def landIntegrationBranch[F[_]: Sync](progress: String => F[Unit]): Kleisli[F, (os.Path, TaskNumber), Unit] =
+    mergeIntegrationBranch(progress)
 
   private def parseIssue(value: ujson.Value): Option[Issue] =
     value match

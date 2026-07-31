@@ -147,7 +147,7 @@ object Impl:
       for
         // Before selection, not after: a parent whose integration branch never
         // landed is not a runnable task and would never be reached otherwise.
-        _ <- GitHub.mergeSettledIntegrationBranches(progress).run(context.root)
+        _ <- landStrandedIntegrationBranches[F](context)
         _ <- progress("Fetching open issues from GitHub...")
         rawIssues <- GitHub.fetchIssues(context.root)
         issues <- rawIssues.traverse(effectiveIssue[F](context.root, _))
@@ -1277,6 +1277,56 @@ object Impl:
         )
         .as(run)
     }
+
+  /** Lands the integration branches of parents that nothing else will land, resolving their conflicts with an agent.
+    *
+    * `GitHub.mergeSettledIntegrationBranches` handles the ones git can merge on its own and hands back the rest. Those
+    * are the parents whose base moved under them while subtasks landed — #34 and #39 held 27 and 17 commits in exactly
+    * that state, behind conflicts a person would resolve in minutes and no part of this program was resolving at all.
+    * The work is the same conflict repair a subtask gets, pointed at the integration branch and its default base.
+    *
+    * Every failure here is a warning: a parent that cannot be landed is a thing to tell someone about, never a reason
+    * to stop before selecting a task.
+    */
+  def landStrandedIntegrationBranches[F[_]: Sync](context: RunContext): F[Unit] =
+    GitHub
+      .mergeSettledIntegrationBranches[F](progress)
+      .run(context.root)
+      .flatMap(_.traverse_(repairAndLandIntegrationBranch[F](context, _)))
+      .handleErrorWith(error => progress(s"WARNING: integration branch sweep failed: ${error.getMessage}"))
+
+  private def repairAndLandIntegrationBranch[F[_]: Sync](context: RunContext, parent: Issue): F[Unit] =
+    val branchName = BranchName(s"task-${parent.number}")
+    val worktreePath = context.root / ".worktrees" / s"integration-task-${parent.number}"
+    val base = BranchName(GitHub.defaultBranchRef(context.root).split('/').last)
+    val request = PublishRequest(
+      root = context.root,
+      worktreePath = worktreePath,
+      branchName = branchName,
+      baseBranch = Some(base),
+      task = parent,
+      finalization = AgentFinalization(None, None),
+      runner = selectRunnerForIssue(context, parent)
+    )
+
+    val worktree = Resource.make(
+      git[F].acquireWorktree(context.root, worktreePath, branchName, None)
+    )(_ => git[F].releaseWorktree(context.root, worktreePath, branchName).attempt.void)
+
+    progress(
+      s"Integration branch $branchName for parent #${parent.number} still conflicts with $base. Repairing it with ${request.runner.display}..."
+    ) *>
+      worktree
+        .use(_ => BusinessLogicRetry.resolveMergeConflict[F](progress).run(request))
+        .flatMap {
+          case false => progress(s"Could not resolve the conflicts on $branchName; leaving parent #${parent.number}.")
+          case true  => GitHub.landIntegrationBranch[F](progress).run((context.root, parent.number))
+        }
+        .handleErrorWith(error =>
+          progress(
+            s"WARNING: could not repair the integration branch for parent #${parent.number}: ${error.getMessage}"
+          )
+        )
 
   def taskRun(
       context: RunContext,
