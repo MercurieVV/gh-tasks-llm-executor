@@ -364,7 +364,11 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       case None         =>
         // Raised only after the metrics above are recorded: the over-budget turn
         // count is exactly the sample the escalation ladder needs to learn from.
-        TurnCap.exceeded(reportedOutput.turnCount, TurnCap.load(metricsRootResolved)) match
+        val cap = metricsScope match
+          case AgentExecutor.MetricsScope.Repair | AgentExecutor.MetricsScope.MergeRepair =>
+            TurnCap.loadRepair(metricsRootResolved)
+          case _ => TurnCap.load(metricsRootResolved)
+        TurnCap.exceeded(reportedOutput.turnCount, cap) match
           case Some(breach) =>
             TaskLogger.unsafeLlm(breach.getMessage)
             throw breach

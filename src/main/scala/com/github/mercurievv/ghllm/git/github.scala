@@ -1074,12 +1074,15 @@ This parent task will not be implemented directly. Run child tasks first; when a
       .getOrElse(if localBranchExists(root, "master") then "master" else "main")
 
   def commitsAhead(root: os.Path, branchName: BranchName): Int =
+    commitsAheadOfRef(root, branchName.value)
+
+  def commitsAheadOfRef(root: os.Path, ref: String): Int =
     Try(
       os.proc(
         "git",
         "rev-list",
         "--count",
-        s"${defaultBranchRef(root)}..${branchName.value}"
+        s"${defaultBranchRef(root)}..$ref"
       ).call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
         .out
         .text()
@@ -1087,27 +1090,38 @@ This parent task will not be implemented directly. Run child tasks first; when a
         .toInt
     ).getOrElse(1)
 
+  /** The ref that actually holds an integration branch's work.
+    *
+    * Subtask pull requests are merged **on GitHub**, so their commits land on `origin/task-N` and the local `task-N`
+    * this process happens to hold is whatever it was last fetched at — often the branch point. Reading the local ref
+    * closed parent #39 as "no commits ahead" moments after merging a subtask into it, stranding 17 commits on a branch
+    * nobody would look at again. Fetch first, and prefer the remote.
+    */
+  def integrationRef(root: os.Path, branchName: BranchName): Option[String] =
+    os.proc("git", "fetch", "origin", branchName.value)
+      .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+    val remote = s"origin/${branchName.value}"
+    if localBranchExists(root, remote) then Some(remote)
+    else if localBranchExists(root, branchName.value) then Some(branchName.value)
+    else None
+
   private def mergeIntegrationBranch[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
   ): Kleisli[F, (os.Path, TaskNumber), Unit] =
     Kleisli.apply { case (root, parentId) =>
       val branchName = BranchName(s"task-$parentId")
-      F.blocking {
-        os.proc("git", "rev-parse", "--verify", branchName.value)
-          .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
-          .exitCode === 0
-      }.flatMap {
-        case false =>
+      F.blocking(integrationRef(root, branchName)).flatMap {
+        case None =>
           progress(
             s"No integration branch $branchName found for parent #$parentId; nothing to merge."
           )
-        case true if commitsAhead(root, branchName) === 0 =>
+        case Some(ref) if commitsAheadOfRef(root, ref) === 0 =>
           progress(
-            s"Integration branch $branchName has no commits ahead of the default branch; closing parent #$parentId without a Pull Request."
+            s"Integration branch $branchName ($ref) has no commits ahead of the default branch; closing parent #$parentId without a Pull Request."
           ) *> setIssueStatus(progress)((root, parentId, "completed")) *> closeIssue(
             (root, parentId)
           )
-        case true =>
+        case Some(_) =>
           for
             pullRequest <- ensurePullRequest(progress).run(
               (
