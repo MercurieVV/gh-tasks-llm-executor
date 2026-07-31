@@ -117,10 +117,10 @@ object Wiring:
         routeRecursiveMode = Impl.routeRecursiveMode,
         untilClosed = UntilClosedArrows[RealArr](
           refreshRoot = Impl.refreshRoot,
-          runRootOnce = Impl.runRootOnce(cycle(logged.executeRecursive)),
+          runRootOnce = Impl.runRootOnce(cycle(HyloExecutionSpike.wire(logged.recursiveArrows))),
           routeContinuation = Impl.routeContinuation
         ),
-        runOnce = Impl.runOnce(cycle(logged.executeRecursive))
+        runOnce = Impl.runOnce(cycle(HyloExecutionSpike.wire(logged.recursiveArrows)))
       )
     )
 
