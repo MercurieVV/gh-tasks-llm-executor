@@ -68,3 +68,23 @@ class GitHubMergeIntegrationBranchSuite extends munit.FunSuite:
       GitHub.labelsToRemove(GitHub.InProgressStatusLabels, current),
       List("status: in progress", "in progress")
     )
+
+class SettledParentsSuite extends munit.FunSuite:
+  private def issue(number: Int, state: String, body: String = "") =
+    Issue(TaskNumber(number), IssueTitle(s"task $number"), IssueBody(body), State(state))
+
+  test("an open parent whose children are all closed is swept"):
+    val issues = List(issue(10, "OPEN"), issue(11, "CLOSED", "Parent: #10"), issue(12, "CLOSED", "Parent: #10"))
+    assertEquals(GitHub.settledParents(issues).map(_.number.value), List(10))
+
+  test("a parent with an open child is left to checkParentsForCompletion"):
+    val issues = List(issue(10, "OPEN"), issue(11, "CLOSED", "Parent: #10"), issue(12, "OPEN", "Parent: #10"))
+    assertEquals(GitHub.settledParents(issues), Nil)
+
+  test("a leaf is never swept — its task-N branch is ahead while its own PR is in flight"):
+    // Sweeping leaves would land unreviewed work straight on the default branch.
+    assertEquals(GitHub.settledParents(List(issue(10, "OPEN"), issue(11, "OPEN"))), Nil)
+
+  test("a closed parent is not reopened by the sweep"):
+    val issues = List(issue(10, "CLOSED"), issue(11, "CLOSED", "Parent: #10"))
+    assertEquals(GitHub.settledParents(issues), Nil)

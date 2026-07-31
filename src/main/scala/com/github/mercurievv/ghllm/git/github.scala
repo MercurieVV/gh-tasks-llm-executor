@@ -166,6 +166,71 @@ object GitHub:
       }
     }
 
+  /** Every issue, closed ones included. Only the sweep needs this: a parent's children are closed by the time its
+    * integration branch matters, so an open-only listing cannot tell a parent from a leaf.
+    */
+  def fetchAllIssues[F[_]: Sync]: Kleisli[F, os.Path, List[Issue]] =
+    Kleisli.apply { root =>
+      Sync[F].blocking {
+        val issuesJson = os
+          .proc(
+            "gh",
+            "issue",
+            "list",
+            "--state",
+            "all",
+            "--limit",
+            "1000",
+            "--json",
+            "number,title,body,state,labels"
+          )
+          .call(cwd = root)
+          .out
+          .text()
+
+        ujson.read(issuesJson).arr.toList.flatMap(parseIssue)
+      }
+    }
+
+  /** Lands integration branches whose parent was left behind.
+    *
+    * `checkParentsForCompletion` only fires when a child finishes, so a parent that was missed once is missed forever:
+    * its children are already closed, nothing will run them again, and the branch sits on origin. That is how #34 kept
+    * 27 commits and #39 kept 17. This sweep runs before task selection and merges what that path should have merged.
+    *
+    * The parent test is deliberate rather than incidental: a leaf's `task-N` branch is also "ahead of master" while its
+    * own pull request is in flight, and merging those would land unreviewed work. Only an issue that some other issue
+    * names as its parent, and that has no open children left, is swept.
+    */
+  /** Open issues that other issues name as their parent, and whose children are all closed. */
+  def settledParents(allIssues: List[Issue]): List[Issue] =
+    val isOpen = (issue: Issue) => issue.state.value.toLowerCase === "open"
+    val childrenByParent = allIssues
+      .flatMap(child => parentIds(child).map(_ -> child))
+      .groupMap(_._1)(_._2)
+    allIssues.filter(issue =>
+      isOpen(issue) && childrenByParent.get(issue.number).exists(_.forall(child => !isOpen(child)))
+    )
+
+  def mergeSettledIntegrationBranches[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, os.Path, Unit] =
+    Kleisli.apply { root =>
+      fetchAllIssues[F].run(root).flatMap { allIssues =>
+        settledParents(allIssues).traverse_ { parent =>
+          F.blocking(
+            integrationRef(root, BranchName(s"task-${parent.number}")).filter(commitsAheadOfRef(root, _) > 0)
+          ).flatMap {
+            case None => F.unit
+            case Some(ref) =>
+              progress(
+                s"Parent #${parent.number} is open and its integration branch ($ref) is ahead of the default branch, with every child closed. Merging it."
+              ) *> mergeIntegrationBranch(progress)((root, parent.number))
+          }
+        }
+      }
+    }
+
   private def parseIssue(value: ujson.Value): Option[Issue] =
     value match
       case ujson.Obj(fields) =>

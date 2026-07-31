@@ -145,6 +145,9 @@ object Impl:
   def selectTask[F[_]: Sync]: -->[F, RunContext, TaskSelection] =
     Kleisli { (context: RunContext) =>
       for
+        // Before selection, not after: a parent whose integration branch never
+        // landed is not a runnable task and would never be reached otherwise.
+        _ <- GitHub.mergeSettledIntegrationBranches(progress).run(context.root)
         _ <- progress("Fetching open issues from GitHub...")
         rawIssues <- GitHub.fetchIssues(context.root)
         issues <- rawIssues.traverse(effectiveIssue[F](context.root, _))
