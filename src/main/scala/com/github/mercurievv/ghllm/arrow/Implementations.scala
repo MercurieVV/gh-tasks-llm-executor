@@ -901,6 +901,11 @@ object Impl:
       val execution =
         for
           _ <- refreshSemanticDbBeforeDispatch(env, run.task, run.worktreePath)
+          // Sampled before the agent can move it: without this, a branch that
+          // arrived already ahead of its base is indistinguishable from one this
+          // run advanced, and a run that changed nothing publishes and closes green
+          // on someone else's commits.
+          headBeforeRun <- git[F].headSha(run.worktreePath)
           _ <- progress(
             s"Running task #${run.task.number} with ${run.runner.display}..."
           )
@@ -922,7 +927,7 @@ object Impl:
               )
             )
             .whenA(looksBlocked(output))
-        yield ExecutedTask(run, output)
+        yield ExecutedTask(run, output, headBeforeRun)
 
       execution.handleErrorWith { error =>
         AgentExecutor.completeTokenMetrics[F](
@@ -1109,31 +1114,62 @@ object Impl:
       }
     }
 
-  def classifyAgentResultForPublication[F[_]: Sync]: -->[F, ExecutedTask, Either[ChangedTask, UnchangedTask]] =
-    (Kleisli.ask[F, ExecutedTask] &&& Kleisli { (task: ExecutedTask) =>
-      git[F].filesChanged(task.run.worktreePath)
-    } &&& Kleisli { (task: ExecutedTask) =>
-      git[F].hasPublishableCommits(
+  /** Commits that were already on the branch when the agent was dispatched are not this run's work.
+    *
+    * A run that ends with an unmoved HEAD and a clean worktree delivered nothing, whatever the branch is ahead of. Until
+    * 2026-08-01 those commits still counted as publishable, so a task whose agent reported itself blocked opened a pull
+    * request over pre-existing commits, merged it, and closed its issue green. `None` (a resumed run, where no sample
+    * was taken) never triggers this: an unmeasured run is not an empty one.
+    */
+  def advancedHead(task: ExecutedTask, current: Option[String]): Boolean =
+    task.headBeforeRun.forall(before => !current.contains(before))
+
+  /** Did this run leave anything behind to publish: uncommitted files, commits of its own, or a pull request already
+    * open on its branch.
+    */
+  def deliveredSomething[F[_]: Sync](task: ExecutedTask): F[Boolean] =
+    for
+      filesChanged <- git[F].filesChanged(task.run.worktreePath)
+      publishable <- git[F].hasPublishableCommits(
         task.run.worktreePath,
         task.run.branchName,
         task.run.baseBranch
       )
-    } &&& Kleisli { (task: ExecutedTask) =>
-      GitHub.hasOpenPullRequestForBranch(
+      ownCommits <-
+        if !publishable then Sync[F].pure(false)
+        else git[F].headSha(task.run.worktreePath).map(advancedHead(task, _))
+      hasOpenPullRequest <- GitHub.hasOpenPullRequestForBranch(
         task.run.worktreePath,
         task.run.branchName
       )
-    }).map({
-      case (
-            ((task, filesChanged), hasPublishableCommits),
-            hasOpenPullRequest
-          ) =>
-        Either.cond(
-          !(filesChanged || hasPublishableCommits || hasOpenPullRequest),
-          UnchangedTask(task),
-          ChangedTask(task)
-        )
-    })
+    yield filesChanged || ownCommits || hasOpenPullRequest
+
+  /** Rejects an empty run from inside the escalation loop, where a rejection still buys a retry on a stronger runner.
+    *
+    * It belongs here rather than at publication time for the same reason `runProjectValidation` does: anything composed
+    * after the agent that can reject its work has to sit inside the retried unit, or the ladder never sees the
+    * rejection and the task dies on the cheapest runner's shrug.
+    */
+  def rejectEmptyRun[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
+    Kleisli { task =>
+      deliveredSomething[F](task).flatMap {
+        case true => Sync[F].pure(task)
+        case false =>
+          Sync[F].raiseError[ExecutedTask](
+            RuntimeException(
+              s"Agent ${task.run.runner.display} finished task #${task.run.task.number} without changing anything: " +
+                "no files, no new commits, no pull request."
+            )
+          )
+      }
+    }
+
+  def classifyAgentResultForPublication[F[_]: Sync]: -->[F, ExecutedTask, Either[ChangedTask, UnchangedTask]] =
+    Kleisli { task =>
+      deliveredSomething[F](task).map(delivered =>
+        Either.cond(!delivered, UnchangedTask(task), ChangedTask(task))
+      )
+    }
 
   def toPublishRequestOfChanged[F[_]: Sync]: -->[F, ChangedTask, PublishRequest] =
     Kleisli.fromFunction { changed =>
@@ -1159,10 +1195,27 @@ object Impl:
       ) *> Sync[F].raiseError(error)
     }
 
+  /** A run that produced no files, no commits of its own and no pull request delivered nothing, and the rest of the
+    * chain — `markTaskImplemented`, `closeTaskIssue`, `checkParentsForCompletion` — would otherwise close it green.
+    * That is the closing move of the postmortem's failure mode: the issue reads as done and nobody looks again.
+    *
+    * Raising instead sends it to the escalation ladder, which is right for the common cause (the runner gave up) and
+    * bounded for the rest: after `MaxEscalationDepth` empty runs the task surfaces to a human still open.
+    */
   def reportUnchangedTask[
       F[_]: Sync
   ]: -->[F, UnchangedTask, ExecutedTask] =
-    TaskLogger.progress[F, UnchangedTask](_ => "No files changed.").map(_.run)
+    Kleisli { unchanged =>
+      val run = unchanged.run.run
+      progress[F](
+        s"Task #${run.task.number} produced no files, no new commits and no pull request. Refusing to close it as done."
+      ) *> Sync[F].raiseError[ExecutedTask](
+        RuntimeException(
+          s"Agent ${run.runner.display} finished task #${run.task.number} without changing anything: " +
+            s"nothing to publish, so the task is not done."
+        )
+      )
+    }
 
   def verifyRelatedPullRequestCi[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli { task =>

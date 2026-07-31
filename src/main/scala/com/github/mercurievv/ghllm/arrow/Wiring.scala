@@ -197,7 +197,7 @@ object Wiring:
             .getOrElse("default")})"
       case PreparedTask(run, parentConclusion, replayContext, escalationDepth) =>
         s"PreparedTask(issue=#${run.task.number},hasDependencyConclusion=${parentConclusion.nonEmpty},hasReplayContext=${replayContext.nonEmpty},escalationDepth=$escalationDepth)"
-      case ExecutedTask(run, output) =>
+      case ExecutedTask(run, output, _) =>
         s"ExecutedTask(issue=#${run.task.number},outputChars=${output.value.length})"
       case NeedsUserInput(run, questions) =>
         s"NeedsUserInput(issue=#${run.task.number},questionChars=${questions.value.length})"

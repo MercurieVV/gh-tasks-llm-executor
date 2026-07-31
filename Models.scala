@@ -143,8 +143,12 @@ final case class PreparedTask(
 )
 
 /** Task after agent execution has produced terminal output to inspect and publish.
+  *
+  * `headBeforeRun` is the worktree HEAD sampled immediately before the agent was dispatched, and it is what makes "this
+  * run delivered nothing" decidable: a branch that was already ahead of its base looks identical to one this run
+  * advanced. `None` means the sample was not taken (a resumed run), which is never read as "unchanged".
   */
-final case class ExecutedTask(run: ClaimedTask, output: AgentOutput)
+final case class ExecutedTask(run: ClaimedTask, output: AgentOutput, headBeforeRun: Option[String] = None)
 
 /** Evaluation result for a task that cannot continue without a human answer. */
 final case class NeedsUserInput(run: ClaimedTask, questions: Questions)

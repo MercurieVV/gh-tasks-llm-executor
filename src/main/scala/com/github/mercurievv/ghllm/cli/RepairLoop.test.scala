@@ -254,6 +254,18 @@ class AgentRunArrowsSuite extends CatsEffectSuite:
       assertEquals(routed, Left(VerificationResult.Green))
     }
 
+  // A stronger runner reaches the same refusal, so escalating a guard rejection
+  // buys nothing but another paid run. This case cost three of them.
+  test("a test-edit guard rejection surfaces to a human instead of escalating"):
+    val verdict = VerificationResult.Failed(TestEditGuard.Violation(Some("implement"), List("src/a.test.scala")))
+    route(onLadder(weak), verdict).map {
+      case (Left(returned), seen) =>
+        assertEquals(returned, verdict)
+        assert(seen.exists(_.contains("policy, not capability")))
+        assert(!seen.exists(_.contains("Escalating")))
+      case (Right(task), _) => fail(s"expected no escalation, got ${task.claimedTask.runner.display}")
+    }
+
 class RepairRunnerSequenceSuite extends munit.FunSuite:
   private def tool(agent: String) =
     AgentTool(

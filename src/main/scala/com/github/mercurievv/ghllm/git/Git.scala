@@ -242,6 +242,20 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       }
     }
 
+  /** The worktree's current HEAD, or `None` if it has no commit yet. Sampled around a dispatch to tell "this run
+    * produced commits" apart from "this branch already had some" — the two are indistinguishable to
+    * `hasPublishableCommits`, which only ever compares against the base.
+    */
+  def headSha: Kleisli[F, os.Path, Option[String]] =
+    Kleisli.apply { worktreePath =>
+      F.blocking {
+        val result = os
+          .proc("git", "rev-parse", "HEAD")
+          .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        Option.when(result.exitCode === 0)(result.out.text().trim).filter(_.nonEmpty)
+      }
+    }
+
   // Resolves what "before this task" means: the pushed branch if there is one,
   // else the task's base, else whichever default branch this repo uses.
   private def baseRefOf(

@@ -55,7 +55,14 @@ object BusinessLogicRetry:
           // `routeRunnerFallback`. That is the wrong half: the plan's Stage 1
           // is "run -> compile + test -> red: escalate", and the free verifier
           // is the whole reason a cheap runner can be tried first.
-          runTaskWithRunner = run => retryRunTaskWithRunner(progress)(run.andThen(Impl.runProjectValidation[F]))
+          // `rejectEmptyRun` joins it for the same reason: a run that delivered
+          // nothing is a rejection of the agent's work, and outside this loop it
+          // would kill the task instead of escalating it - or, worse, reach
+          // publication and close the issue green over commits it never made.
+          runTaskWithRunner = run =>
+            retryRunTaskWithRunner(progress)(
+              run.andThen(Impl.runProjectValidation[F]).andThen(Impl.rejectEmptyRun[F])
+            )
         ),
         // Already run above, once per attempt. Left in place it would re-run the
         // whole suite on the winning attempt and record a second sample for it.
@@ -579,7 +586,26 @@ object BusinessLogicRetry:
               case Left(error) =>
                 F.raiseError(error)
             }
-          else progress(s"Repair agent made no file changes for task #${task.number}.")
+          else
+            // A repair that changed nothing is only a repair if there was nothing
+            // to repair. Taken on trust it returns success to a caller that then
+            // re-pushes the same unrepaired tree into the same rejection, burning
+            // the repair budget without a single edit - which is what task #125
+            // did on 2026-08-01. So ask the verifier: green means the tree was
+            // already sound, red means this runner declined the job and the next
+            // one gets it.
+            Impl.git[F].runProjectValidation(worktreePath).attempt.flatMap {
+              case Right(_) =>
+                progress(
+                  s"Repair agent made no file changes for task #${task.number}, and project checks pass. Nothing to repair."
+                )
+              case Left(error) if remainingRunners.nonEmpty =>
+                progress(
+                  s"Repair agent made no file changes for task #${task.number} but project checks still fail: ${error.getMessage}. Retrying repair with ${remainingRunners.head.display} (${remainingRunners.size} attempt(s) left)..."
+                ) *> loop(remainingRunners.head, remainingRunners.tail)
+              case Left(error) =>
+                F.raiseError(error)
+            }
       yield ()
 
     // +1: MaxRepairBuildCheckAttempts counts RETRIES after the first run, so the

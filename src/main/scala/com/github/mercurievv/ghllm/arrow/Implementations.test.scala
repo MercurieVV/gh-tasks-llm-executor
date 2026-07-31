@@ -265,3 +265,35 @@ class FanOutCachePeersSuite extends CatsEffectSuite:
       env <- RunEnv.create[IO](issues)
       plan <- Impl.collectPendingDependencies[IO].run(TaskNode(context, parent)).run(env)
     yield assert(!plan.node.extendedCacheTtl)
+
+/** The rule that separates "this run produced commits" from "this branch already had some". */
+class AdvancedHeadSuite extends munit.FunSuite:
+  private val runner = TaskRunner(AgentBinary("claude"), Some("opus"), None, None)
+
+  private def executed(headBeforeRun: Option[String]) =
+    ExecutedTask(
+      ClaimedTask(
+        RunContext(os.pwd, AgentInventory(Nil), None),
+        Issue(TaskNumber(1), IssueTitle("t"), IssueBody("b"), State("open")),
+        runner,
+        os.pwd,
+        BranchName("task-1"),
+        None
+      ),
+      AgentOutput(""),
+      headBeforeRun
+    )
+
+  test("an unmoved HEAD means this run committed nothing of its own"):
+    assert(!Impl.advancedHead(executed(Some("abc123")), Some("abc123")))
+
+  test("a moved HEAD is this run's work"):
+    assert(Impl.advancedHead(executed(Some("abc123")), Some("def456")))
+
+  test("an unsampled run is never read as empty"):
+    // A resumed run takes no sample; treating None as "unchanged" would reject
+    // work that was done before the resume.
+    assert(Impl.advancedHead(executed(None), Some("abc123")))
+
+  test("a worktree whose HEAD cannot be read counts as moved, not as empty"):
+    assert(Impl.advancedHead(executed(Some("abc123")), None))
