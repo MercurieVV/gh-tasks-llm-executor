@@ -70,6 +70,32 @@ object Cli:
         }
       case _ => None
 
+  /** `predict-and-run --task=N` — same options as `estimate`, but actually runs the task's dependency tree to
+    * closure afterward and reports the same cost model's estimate against what the run actually billed. See
+    * `PredictedVsActualExecution`: unlike `estimate`, this is not read-only.
+    */
+  final case class PredictAndRunCommand(
+      task: TaskNumber,
+      path: os.Path,
+      backend: TokenMetrics.BackendKind,
+      victoriaUrl: String,
+      costModel: TaskTree.CostModel
+  )
+
+  def parsePredictAndRunCommand(args: List[String], root: os.Path = os.pwd): Option[PredictAndRunCommand] =
+    args match
+      case "predict-and-run" :: rest =>
+        parseEstimateCommand("estimate" :: rest, root).map { estimate =>
+          PredictAndRunCommand(
+            task = estimate.task,
+            path = estimate.path,
+            backend = estimate.backend,
+            victoriaUrl = estimate.victoriaUrl,
+            costModel = estimate.costModel
+          )
+        }
+      case _ => None
+
   private def positiveDouble(args: List[String], name: String): Option[Double] =
     optionValue(args, name).flatMap(_.toDoubleOption).filter(value => value.isFinite && value >= 0.0)
 
@@ -122,7 +148,7 @@ object Cli:
           loop(tail, clean)
         case "--parallel" :: tail =>
           loop(tail, clean)
-        case ("metrics" | "estimate") :: _ =>
+        case ("metrics" | "estimate" | "predict-and-run") :: _ =>
           loop(Nil, clean)
         case head :: tail =>
           loop(tail, head :: clean)

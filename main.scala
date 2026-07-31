@@ -39,9 +39,12 @@ object Main extends IOApp:
       case Some(command) =>
         IO.blocking(renderMetrics(command)).flatMap(IO.println).as(ExitCode.Success)
       case None =>
-        Cli.parseEstimateCommand(args, os.pwd) match
-          case Some(command) => runEstimate(command)
-          case None          => runProgram(args)
+        Cli.parsePredictAndRunCommand(args, os.pwd) match
+          case Some(command) => runPredictAndRun(command)
+          case None =>
+            Cli.parseEstimateCommand(args, os.pwd) match
+              case Some(command) => runEstimate(command)
+              case None          => runProgram(args)
 
   private def runProgram(args: List[String]): IO[ExitCode] =
     val input = AppInput(
@@ -95,6 +98,46 @@ object Main extends IOApp:
             _ <- IO.println(PlanEstimate.render(annotated, command.costModel))
           yield ExitCode.Success
     yield exit
+
+  /** Prices a plan, then actually runs its dependency tree to closure and reports what it billed against that same
+    * estimate. Unlike `runEstimate`, this executes for real - claims issues, runs agents, publishes PRs - via the
+    * fully wired, fully logged `Wiring.businessLogic[IO].recursiveArrows`, so the traversal it measures is the exact
+    * one a plain (non-`--recursive`) run would take for this task.
+    */
+  private def runPredictAndRun(command: Cli.PredictAndRunCommand): IO[ExitCode] =
+    val root = os.pwd
+    for
+      context <- Impl.resolveContext[IO].run(AppInput(root, Some(command.task), Recursive(true), ParallelExecution(false)))
+      rawIssues <- GitHub.fetchIssues[IO](root)
+      issues <- rawIssues.traverse(Impl.effectiveIssue[IO](root, _))
+      target = issues.find(_.number === command.task)
+      exit <- target match
+        case None =>
+          IO.println(s"Task #${command.task.value} is not an open issue.").as(ExitCode.Error)
+        case Some(issue) =>
+          for
+            openIssues <- Ref[IO].of(issues.map(task => task.number -> task).toMap)
+            env <- RunEnv.create[IO](openIssues)
+            backend <- IO.blocking(metricsBackend(command.backend, command.path, command.victoriaUrl))
+            report <- PredictedVsActualExecution
+              .runWithPrediction[IO](
+                TaskNode(context, issue),
+                Wiring.businessLogic[IO].recursiveArrows,
+                command.costModel,
+                backend,
+                root
+              )
+              .run(env)
+            _ <- IO.println(renderPrediction(report))
+          yield ExitCode.Success
+    yield exit
+
+  private def renderPrediction(report: PredictedVsActualExecution.Report): String =
+    val visited = report.visited.map(number => s"#${number.value}").mkString(", ")
+    f"""Predicted: $$${report.predictedUsd}%.4f
+       |Actual:    $$${report.actualUsd}%.4f
+       |Visited:   $visited
+       |Result:    ${report.result.status.value} - ${report.result.message.value}""".stripMargin
 
   private def metricsBackend(
       kind: TokenMetrics.BackendKind,
