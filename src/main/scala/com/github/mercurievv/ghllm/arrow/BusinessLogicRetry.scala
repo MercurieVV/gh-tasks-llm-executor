@@ -59,9 +59,18 @@ object BusinessLogicRetry:
           // nothing is a rejection of the agent's work, and outside this loop it
           // would kill the task instead of escalating it - or, worse, reach
           // publication and close the issue green over commits it never made.
+          //
+          // It runs BEFORE the validation, and the order is not cosmetic. A run
+          // that changed nothing leaves a tree that still compiles and still
+          // passes, so `runProjectValidation` recorded `outcome = "green"` for
+          // it - and since completing the metrics removes the pending event,
+          // the rejection that followed recorded nothing at all. Every empty run
+          // was a success in `successRate`, biasing selection toward whichever
+          // runner shrugs the fastest. Rejecting first records the "red" the
+          // attempt earned, and skips a validation of work that does not exist.
           runTaskWithRunner = run =>
             retryRunTaskWithRunner(progress)(
-              run.andThen(Impl.runProjectValidation[F]).andThen(Impl.rejectEmptyRun[F])
+              run.andThen(Impl.rejectEmptyRun[F]).andThen(Impl.runProjectValidation[F])
             )
         ),
         // Already run above, once per attempt. Left in place it would re-run the

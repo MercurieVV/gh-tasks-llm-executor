@@ -321,3 +321,71 @@ class TerminalFailureClassificationSuite extends munit.FunSuite:
       Impl.isPolicyRejection(violation),
       VerificationResult.Failed(violation).isPolicyRejection
     )
+
+/** An empty run must be recorded as the red it earned.
+  *
+  * A run that changed nothing leaves a tree that still compiles and still passes, so while `runProjectValidation` ran
+  * first it recorded `outcome = "green"` and consumed the pending event — and the rejection that followed recorded
+  * nothing. Every zero-delivery run counted as a success for the runner that delivered nothing, which is precisely
+  * backwards for a `successRate` that decides which runner to try first.
+  */
+class EmptyRunOutcomeSuite extends CatsEffectSuite:
+  private val runner = TaskRunner(AgentBinary("aider"), Some("deepseek/deepseek-reasoner"), None, None)
+
+  private final class CapturingBackend extends TokenMetrics.TokenMetricsBackend:
+    val recorded = scala.collection.mutable.ListBuffer.empty[TokenMetrics.TokenMetricsEvent]
+    def destination: String = "memory"
+    def record(event: TokenMetrics.TokenMetricsEvent): Unit = recorded += event
+    def record(event: TokenMetrics.ScalaTextToolCallEvent): Unit = ()
+    def query(query: TokenMetrics.TokenMetricsQuery): List[TokenMetrics.TokenMetricsEvent] = recorded.toList
+
+  /** A committed repo whose HEAD is exactly where the run started: nothing was delivered. */
+  private def emptyRun(): (os.Path, ExecutedTask) =
+    val root = os.temp.dir(prefix = "empty-run")
+    os.proc("git", "init", "-q", "-b", "master").call(cwd = root)
+    os.proc("git", "config", "user.email", "test@example.com").call(cwd = root)
+    os.proc("git", "config", "user.name", "Test").call(cwd = root)
+    os.write(root / "seed.txt", "seed")
+    os.proc("git", "add", ".").call(cwd = root)
+    os.proc("git", "commit", "-q", "-m", "seed").call(cwd = root)
+    val head = os.proc("git", "rev-parse", "HEAD").call(cwd = root).out.text().trim
+
+    val task = ExecutedTask(
+      ClaimedTask(
+        RunContext(root, AgentInventory(Nil), None),
+        Issue(TaskNumber(130), IssueTitle("t"), IssueBody("Phase: test"), State("open")),
+        runner,
+        root,
+        BranchName("master"),
+        None
+      ),
+      AgentOutput(""),
+      Some(head)
+    )
+    (root, task)
+
+  test("a run that delivered nothing records red, not green"):
+    val (root, task) = emptyRun()
+    val backend = CapturingBackend()
+    AgentExecutor.deferTokenMetrics(
+      root,
+      TaskNumber(130),
+      runner,
+      AgentExecutor.MetricsScope.Implement,
+      backend,
+      TokenMetrics.TokenMetricsEvent(
+        timestampMillis = 0L,
+        vendor = TokenUsage.Vendor.Aider,
+        usage = TokenUsage.TokenSnapshot.Zero,
+        taskNumber = Some(TaskNumber(130)),
+        model = Some("deepseek/deepseek-reasoner"),
+        scope = "implement",
+        phase = Some("test"),
+        runner = Some(runner.display)
+      )
+    )
+
+    Impl.rejectEmptyRun[IO].run(task).attempt.map { result =>
+      assert(result.isLeft, "an empty run must be rejected")
+      assertEquals(backend.recorded.map(_.outcome).toList, List(Some("red")))
+    }

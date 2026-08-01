@@ -1203,9 +1203,20 @@ object Impl:
   def rejectEmptyRun[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli { task =>
       deliveredSomething[F](task).flatMap {
-        case true => Sync[F].pure(task)
+        case true  => Sync[F].pure(task)
         case false =>
-          Sync[F].raiseError[ExecutedTask](
+          // The attempt earned a red and must be recorded as one. An empty run
+          // leaves a tree that still compiles, so when this arrow ran after
+          // `runProjectValidation` the validation had already recorded "green"
+          // and consumed the pending event — teaching `successRate` that the
+          // runner which delivered nothing had succeeded.
+          AgentExecutor.completeTokenMetrics[F](
+            task.run.context.root,
+            task.run.task.number,
+            task.run.runner,
+            AgentExecutor.MetricsScope.Implement,
+            "red"
+          ) *> Sync[F].raiseError[ExecutedTask](
             RuntimeException(
               s"Agent ${task.run.runner.display} finished task #${task.run.task.number} without changing anything: " +
                 "no files, no new commits, no pull request."
