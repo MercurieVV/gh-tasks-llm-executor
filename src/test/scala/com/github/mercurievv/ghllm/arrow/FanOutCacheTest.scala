@@ -8,6 +8,7 @@ import cats.effect.Ref
 import munit.CatsEffectSuite
 
 import BusinessLogicFixture.*
+import cats.syntax.all.*
 
 class FanOutCacheTest extends CatsEffectSuite:
 
@@ -41,9 +42,7 @@ class FanOutCacheTest extends CatsEffectSuite:
           )
         )
 
-      fanOutLogic.executeSelectedCandidates
-        .run(selection(numbers))
-        .flatMap(_ => observed.get)
+      fanOutLogic.executeSelectedCandidates.run(selection(numbers)) *> observed.get
     }
 
   test("three siblings receive the 1-hour cache TTL flag"):

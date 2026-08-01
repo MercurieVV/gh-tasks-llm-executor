@@ -51,7 +51,7 @@ class AgentExecutorMetricsKeySuite extends munit.FunSuite:
     val backend = stage(dir, claudeHaiku, Some("test"))
 
     AgentExecutor
-      .completeTokenMetrics[IO](dir, TaskNumber(7), claudeHaiku, AgentExecutor.MetricsScope.Implement, "green")
+      .completeTokenMetrics[IO]((dir, TaskNumber(7), claudeHaiku, AgentExecutor.MetricsScope.Implement, "green"))
       .unsafeRunSync()
 
     val events = recorded(backend)
@@ -68,13 +68,13 @@ class AgentExecutorMetricsKeySuite extends munit.FunSuite:
     // the event, so the loop this dispatch belongs to still has to be named
     // correctly - it just cannot be confused with a phase.
     AgentExecutor
-      .completeTokenMetrics[IO](dir, TaskNumber(7), claudeHaiku, AgentExecutor.MetricsScope.Repair, "green")
+      .completeTokenMetrics[IO]((dir, TaskNumber(7), claudeHaiku, AgentExecutor.MetricsScope.Repair, "green"))
       .unsafeRunSync()
     assertEquals(recorded(backend), Nil)
 
     // The staged event is still there, and the right key still finds it.
     AgentExecutor
-      .completeTokenMetrics[IO](dir, TaskNumber(7), claudeHaiku, AgentExecutor.MetricsScope.Implement, "green")
+      .completeTokenMetrics[IO]((dir, TaskNumber(7), claudeHaiku, AgentExecutor.MetricsScope.Implement, "green"))
       .unsafeRunSync()
     assertEquals(recorded(backend).map(_.outcome), List(Some("green")))
 

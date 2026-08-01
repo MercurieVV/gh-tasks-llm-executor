@@ -21,6 +21,7 @@ import scala.collection.mutable.StringBuilder
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.Try
+import cats.data.Kleisli
 
 type Output = AgentOutput
 
@@ -657,13 +658,8 @@ object AgentExecutor:
     * metadata; completion only copies `outcome` in, so passing a phase here cannot fix a phase and can only break the
     * key. Use the `*Scope` constants above on both sides.
     */
-  def completeTokenMetrics[F[_]: Sync](
-      root: os.Path,
-      taskNumber: TaskNumber,
-      runner: TaskRunner,
-      scope: MetricsScope,
-      outcome: String
-  ): F[Unit] =
+  def completeTokenMetrics[F[_]: Sync]: Kleisli[F, (os.Path, TaskNumber, TaskRunner, MetricsScope, String), Unit] =
+  Kleisli.apply { case (root, taskNumber, runner, scope, outcome) =>
     Sync[F].blocking {
       val key = MetricsKey(root, taskNumber, runner.metricsIdentity, scope)
       val removed = pendingTokenMetrics.getAndUpdate(_ - key).get(key)
@@ -673,5 +669,6 @@ object AgentExecutor:
         )
       )
     }
+  }
 
   def apply[F[_]: Sync]: AgentExecutor[F] = new AgentExecutor[F]

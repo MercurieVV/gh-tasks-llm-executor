@@ -13,6 +13,7 @@ import higherkindness.droste.Algebra
 import higherkindness.droste.data.Mu
 import higherkindness.droste.scheme
 import munit.CatsEffectSuite
+import cats.syntax.all.*
 
 class TaskGraphSuite extends CatsEffectSuite:
 
@@ -90,9 +91,7 @@ class TaskGraphSuite extends CatsEffectSuite:
       val edges = Map(1 -> List(2), 2 -> List(1))
       val recording: TaskNode => IO[List[TaskNode]] =
         task => asked.update(_ :+ task.issue.number.value) *> pendingFrom(edges)(task)
-      TaskGraph
-        .unfold[IO](recording)(TaskGraph.seed(node(1)))
-        .flatMap(_ => asked.get)
+      TaskGraph.unfold[IO](recording)(TaskGraph.seed(node(1))) *> asked.get
         .map(seen => assertEquals(seen, List(1, 2)))
     }
 

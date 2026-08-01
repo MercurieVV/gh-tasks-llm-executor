@@ -16,6 +16,7 @@ import munit.CatsEffectSuite
 import BusinessLogicFixture.TestFlow
 import BusinessLogicFixture.issue
 import BusinessLogicFixture.runner
+import cats.syntax.all.*
 
 class ArrowAttemptSuite extends CatsEffectSuite:
   private val attempt = ArrowAttempt[TestFlow]
@@ -56,12 +57,7 @@ class PublishRemoteArrowsSuite extends CatsEffectSuite:
   // branch that has not landed yet - so pin the order.
   test("the branch is pushed before the Pull Request is opened"):
     Ref[IO].of(List.empty[String]).flatMap { events =>
-      arrows(
-        pushBranch = Kleisli(_ => events.update(_ :+ "push")),
-        createAndMergePullRequest = Kleisli(_ => events.update(_ :+ "merge"))
-      ).publishRemote
-        .run(remote)
-        .flatMap(_ => events.get.map(seen => assertEquals(seen, List("push", "merge"))))
+      arrows(pushBranch = Kleisli(_ => events.update(_ :+ "push")), createAndMergePullRequest = Kleisli(_ => events.update(_ :+ "merge"))).publishRemote.run(remote) *> events.get.map(seen => assertEquals(seen, List("push", "merge")))
     }
 
   test("a repaired push is retried, and the merge still follows it"):
@@ -83,11 +79,7 @@ class PublishRemoteArrowsSuite extends CatsEffectSuite:
           raiseFailure = Kleisli(IO.raiseError)
         )(base.pushBranch)
 
-        base
-          .copy(pushBranch = retryPush)
-          .publishRemote
-          .run(remote)
-          .flatMap(_ => events.get.map(seen => assertEquals(seen, List("push1", "repair", "push2", "merge"))))
+        base.copy(pushBranch = retryPush).publishRemote.run(remote) *> events.get.map(seen => assertEquals(seen, List("push1", "repair", "push2", "merge")))
       }
     }
 
@@ -120,11 +112,7 @@ class PublishRemoteArrowsSuite extends CatsEffectSuite:
         raiseFailure = Kleisli(IO.raiseError)
       )(base.createAndMergePullRequest)
 
-      base
-        .copy(createAndMergePullRequest = retryMerge)
-        .publishRemote
-        .run(remote)
-        .flatMap(_ => merges.get.map(assertEquals(_, 2)))
+      base.copy(createAndMergePullRequest = retryMerge).publishRemote.run(remote) *> merges.get.map(assertEquals(_, 2))
     }
 
   test("merge conflict repair prompt names unmerged files and requires staging"):

@@ -177,7 +177,7 @@ class EnsureIntegrationBaseSuite extends CatsEffectSuite:
     val root = cloneWithOrigin()
     GitHub
       .ensureIntegrationBase[IO](_ => IO.unit)((root, Some(BranchName("task-5"))))
-      .productR(GitHub.remoteBranchExists[IO](root, BranchName("task-5")))
+      .productR(GitHub.remoteBranchExists[IO]((root, BranchName("task-5"))))
       .map { exists =>
         assert(exists)
         git(root, "fetch", "-q", "origin")

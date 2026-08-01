@@ -10,6 +10,7 @@ import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
 import scala.concurrent.duration.*
+import cats.syntax.all.*
 
 object BusinessLogicRetry:
 
@@ -224,7 +225,7 @@ object BusinessLogicRetry:
             s"Merge conflict detected resuming task #${run.task.number}; attempting automatic resolution..."
           )
           resolved <- resolveMergeConflict(progress).run(request)
-        yield if resolved then Right(resume) else Left(error)
+        yield Either.cond(resolved, resume, error)
       else if isPullRequestChecksFailedError(error) && resume.checksRepairAttemptsRemaining > 0 then
         for
           _ <- progress(
@@ -262,7 +263,7 @@ object BusinessLogicRetry:
             s"Merge conflict detected for task #${request.task.number}; attempting automatic resolution..."
           )
           resolved <- resolveMergeConflict(progress)(request)
-        yield if resolved then Right(request) else Left(error)
+        yield Either.cond(resolved, request, error)
       else if isPullRequestChecksFailedError(error) then
         for
           _ <- progress(
@@ -386,14 +387,7 @@ object BusinessLogicRetry:
             _ <-
               repairResult match
                 case Left(error) =>
-                  continueMergeRepair(
-                    progress,
-                    request,
-                    baseBranch,
-                    runner,
-                    attemptedRunners,
-                    Some(error)
-                  )
+                  continueMergeRepair(progress)((request, baseBranch, runner, attemptedRunners, Some(error)))
                 case Right(_) =>
                   for
                     stillConflicted <- Impl
@@ -403,20 +397,14 @@ object BusinessLogicRetry:
                       )
                     _ <-
                       if stillConflicted then
-                        continueMergeRepair(progress, request, baseBranch, runner, attemptedRunners, None)
+                        continueMergeRepair(progress)((request, baseBranch, runner, attemptedRunners, None))
                       else F.unit
                   yield ()
           yield ()
     yield ()
 
-  private def continueMergeRepair[F[_]](
-      progress: String => F[Unit],
-      request: PublishRequest,
-      baseBranch: BranchName,
-      runner: TaskRunner,
-      attemptedRunners: List[TaskRunner],
-      error: Option[Throwable]
-  )(using F: Sync[F]): F[Unit] =
+  private def continueMergeRepair[F[_]](progress: String => F[Unit])(using F: Sync[F]): Kleisli[F, (PublishRequest, BranchName, TaskRunner, List[TaskRunner], Option[Throwable]), Unit] =
+  Kleisli.apply { case (request, baseBranch, runner, attemptedRunners, error) =>
     val nextAttempted = runner :: attemptedRunners
     val inventory = AgentInventory.load(request.root)
     inventory.alternateImplementor(runner, attemptedRunners) match
@@ -432,6 +420,7 @@ object BusinessLogicRetry:
         RuntimeException(
           s"Merge repair for task #${request.task.number} could not complete: ${runner.display} $suffix and no alternate implementor is available."
         ).raiseError[F, Unit]
+  }
 
   def mergeConflictRepairPrompt(
       task: Issue,
@@ -462,7 +451,7 @@ object BusinessLogicRetry:
   )
 
   def pushBranch[F[_]: Sync]: Flow[F][PushRequest, Unit] =
-    Kleisli(request => Impl.git[F].push(request.worktreePath, request.branchName))
+    Impl.git[F].push.local((request: PushRequest) => (request.worktreePath, request.branchName))
 
   def routePushFailure[F[_]: Sync](
       progress: String => F[Unit]

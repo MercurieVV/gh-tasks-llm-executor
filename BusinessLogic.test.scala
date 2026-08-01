@@ -12,6 +12,7 @@ import cats.effect.IO
 import cats.effect.Ref
 import cats.syntax.all.*
 import munit.CatsEffectSuite
+import cats.syntax.all.*
 
 class RecursiveArrowsSuite extends CatsEffectSuite:
   type TestFlow[A, B] = Kleisli[IO, A, B]
@@ -103,8 +104,7 @@ class UntilClosedArrowsSuite extends CatsEffectSuite:
       },
       routeContinuation = Kleisli { case (walk, summary) =>
         IO.pure(
-          if summary.status.value == "completed" then Left(summary)
-          else Right(walk.copy(iteration = walk.iteration + 1, previous = Some(summary)))
+          Either.cond(!(summary.status.value == "completed"), walk.copy(iteration = walk.iteration + 1, previous = Some(summary)), summary)
         )
       }
     )

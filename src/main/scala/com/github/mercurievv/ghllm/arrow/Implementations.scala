@@ -26,6 +26,8 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.concurrent.CancellationException
+import cats.syntax.all.*
+import cats.syntax.apply._
 
 /** Leaf implementations: every arrow that actually talks to git, GitHub, the filesystem or an agent process.
   *
@@ -84,7 +86,8 @@ object Impl:
   // on-disk snapshot is older than the TTL. A probe failure never blocks
   // task execution - `.attempt.void` swallows it and AgentInventory just
   // reads whatever snapshot (possibly stale, possibly absent) is on disk.
-  def refreshVendorBudgetsIfStale[F[_]: Sync](root: os.Path): F[Unit] =
+  def refreshVendorBudgetsIfStale[F[_]: Sync]: Kleisli[F, os.Path, Unit] =
+  Kleisli.apply { root =>
     Sync[F]
       .blocking {
         val ttlMillis = Cli.envLong("GH_TASKS_VENDOR_BUDGET_TTL_MINUTES", 15).minutes.toMillis
@@ -94,6 +97,7 @@ object Impl:
       }
       .attempt
       .void
+  }
 
   // model-prices.json is hand-reviewed vendor pricing (see
   // scripts/refresh-model-prices.scala), not something to auto-probe. But a
@@ -101,7 +105,8 @@ object Impl:
   // classpath resource bundled with this project (resources/model-prices.json,
   // packaged via `//> using resourceDir resources`) - never overwrites an
   // existing file, so a repo's own reviewed prices are left alone.
-  def seedModelPricesIfMissing[F[_]: Sync](root: os.Path): F[Unit] =
+  def seedModelPricesIfMissing[F[_]: Sync]: Kleisli[F, os.Path, Unit] =
+  Kleisli.apply { root =>
     Sync[F]
       .blocking {
         val destination = root / ".gh-tasks-llm-executor" / "model-prices.json"
@@ -116,13 +121,15 @@ object Impl:
       }
       .attempt
       .void
+  }
 
   // Same TTL-gated, once-per-invocation shape as refreshVendorBudgetsIfStale:
   // probing installed agent CLIs (claude/codex/aider --version) is cheap but
   // not free, so only do it when the on-disk snapshot is missing or older
   // than the TTL. A probe failure never blocks task execution - AgentInventory
   // just reads whatever snapshot (possibly stale, possibly absent) is on disk.
-  def refreshAgentRunnersIfStale[F[_]: Sync](root: os.Path): F[Unit] =
+  def refreshAgentRunnersIfStale[F[_]: Sync]: Kleisli[F, os.Path, Unit] =
+  Kleisli.apply { root =>
     Sync[F]
       .blocking {
         val ttlMillis = Cli.envLong("GH_TASKS_AGENT_RUNNERS_TTL_MINUTES", 60).minutes.toMillis
@@ -131,16 +138,13 @@ object Impl:
       }
       .attempt
       .void
+  }
 
   def resolveContext[F[_]: Sync]: -->[F, AppInput, RunContext] =
-    Kleisli { input =>
-      for
-        _ <- refreshVendorBudgetsIfStale[F](input.root)
-        _ <- seedModelPricesIfMissing[F](input.root)
-        _ <- refreshAgentRunnersIfStale[F](input.root)
-        inventory <- AgentInventory.loadF[F](input.root)
-      yield RunContext(input.root, inventory, input.taskNumber, input.recursive, input.parallelExecution)
-    }
+    refreshVendorBudgetsIfStale[F].local((input: AppInput) => input.root) *> seedModelPricesIfMissing[F].local((input: AppInput) => input.root) *> refreshAgentRunnersIfStale[F].local((input: AppInput) => input.root) *> (Kleisli.ask[F, AppInput] &&& AgentInventory.loadF[F].local((input: AppInput) => input.root)).map({
+  case (input, inventory) =>
+    RunContext(input.root, inventory, input.taskNumber, input.recursive, input.parallelExecution)
+})
 
   def selectTask[F[_]: Sync]: -->[F, RunContext, TaskSelection] =
     Kleisli { (context: RunContext) =>
@@ -187,7 +191,7 @@ object Impl:
         notActivelyClaimed <- filteredByDeps.filterA { task =>
           val labeledInProgress =
             task.labels.exists(label => label === "status: in progress" || label === "in progress")
-          IssueClaim.hasActiveClaim(context.root, task.number, progress).flatMap { claimed =>
+          IssueClaim.hasActiveClaim(progress)((context.root, task.number)).flatMap { claimed =>
             if claimed then
               TaskLogger
                 .trace(s"selectTask excluding #${task.number}: active claim ref exists")
@@ -376,7 +380,7 @@ object Impl:
         // Best-effort throughout: a task that failed must not fail a second
         // time on the bookkeeping about its failure.
         _ <- GitHub.commentTaskFailure(progress)(root, candidate.issue, message).attempt.void
-        _ <- if isPolicyRejection(error) then blockTaskForHuman[F](candidate, message) else ().pure[F]
+        _ <- if isPolicyRejection(error) then blockTaskForHuman[F]((candidate, message)) else ().pure[F]
       yield summary
     }
 
@@ -393,20 +397,22 @@ object Impl:
     * alone is treated as stale state, and a question alone is not read at all. The failure comment posted by the caller
     * cannot be mistaken for the human's answer — "script stopped before closing task" is a recognised script prefix.
     */
-  private def blockTaskForHuman[F[_]: Sync](candidate: TaskCandidate, reason: String): F[Unit] =
+  private def blockTaskForHuman[F[_]: Sync]: Kleisli[F, (TaskCandidate, String), Unit] =
+  Kleisli.apply { case (candidate, reason) =>
     val root = candidate.context.root
     val question =
       s"""$reason
-         |
-         |This is a policy rejection, not a runner failure: every runner reaches the
-         |same refusal, so re-running cannot fix it. Adjust the task (or its `Phase:`)
-         |and reply here to unblock it.""".stripMargin
+
+This is a policy rejection, not a runner failure: every runner reaches the
+same refusal, so re-running cannot fix it. Adjust the task (or its `Phase:`)
+and reply here to unblock it.""".stripMargin
     (GitHub.commentNeedsUserInput(progress)(root, candidate.issue, question) *>
       GitHub.commentTaskMetadata(progress)(
         root,
         candidate.issue.number,
         TaskMetadata.render(TaskMetadata(evaluation = Some("needs-input")))
       )).attempt.void
+  }
 
   def lastSummary[F[_]: Sync]: -->[F, List[RunSummary], RunSummary] =
     Kleisli.fromFunction { summaries =>
@@ -574,17 +580,9 @@ object Impl:
     Kleisli.fromFunction {
       case (_, Left(summary)) => Left(summary)
       case (plan, Right(())) =>
-        if plan.hasOpenChildren then
-          Left(
-            RunSummary(
-              status = Status("split"),
-              message = Message5(
-                s"Task #${plan.node.issue.number} is already split; processed open child tasks before parent replay."
-              ),
-              task = Some(plan.node.issue)
-            )
-          )
-        else Right(plan.node)
+        Either.cond(!(plan.hasOpenChildren), plan.node, RunSummary(status = Status("split"), message = Message5(s"Task #${
+  plan.node.issue.number
+} is already split; processed open child tasks before parent replay."), task = Some(plan.node.issue)))
     }
 
   // Takes the candidate pipeline as a parameter rather than rebuilding the
@@ -768,9 +766,7 @@ object Impl:
   def fetchTaskContext[
       F[_]: Sync
   ]: -->[F, ClaimedTask, PreparedTask] =
-    (Kleisli.ask[F, ClaimedTask] &&& Kleisli { (run: ClaimedTask) =>
-      GitHub.dependencyConclusion(progress)(run.context.root, run.task)
-    }).map({ case (run, dependencyConclusion) =>
+    (Kleisli.ask[F, ClaimedTask] &&& GitHub.dependencyConclusion(progress).local((run: ClaimedTask) => (run.context.root, run.task))).map({ case (run, dependencyConclusion) =>
       PreparedTask(run, dependencyConclusion, replayContext = None)
     })
 
@@ -950,7 +946,7 @@ object Impl:
         )
       val execution =
         for
-          _ <- refreshSemanticDbBeforeDispatch(env, run.task, run.worktreePath)
+          _ <- refreshSemanticDbBeforeDispatch((env, run.task, run.worktreePath))
           // Sampled before the agent can move it: without this, a branch that
           // arrived already ahead of its base is indistinguishable from one this
           // run advanced, and a run that changed nothing publishes and closes green
@@ -980,13 +976,7 @@ object Impl:
         yield ExecutedTask(run, output, headBeforeRun)
 
       execution.handleErrorWith { error =>
-        AgentExecutor.completeTokenMetrics[F](
-          run.context.root,
-          run.task.number,
-          run.runner,
-          AgentExecutor.MetricsScope.Implement,
-          "error"
-        ) *> Sync[F].raiseError(error)
+        AgentExecutor.completeTokenMetrics[F]((run.context.root, run.task.number, run.runner, AgentExecutor.MetricsScope.Implement, "error")) *> Sync[F].raiseError(error)
       }
     }
 
@@ -1021,11 +1011,8 @@ object Impl:
     * failed dispatch — before this was a `skip`, a missing script raised an `IOException` that the ladder charged to
     * the agent and escalated through every runner before abandoning the task.
     */
-  def refreshSemanticDbBeforeDispatch[F[_]: Async](
-      env: RunEnv[F],
-      task: Issue,
-      root: os.Path
-  ): F[Unit] =
+  def refreshSemanticDbBeforeDispatch[F[_]: Async]: Kleisli[F, (RunEnv[F], Issue, os.Path), Unit] =
+  Kleisli.apply { case (env, task, root) =>
     val script = root / "scripts" / "refresh-semanticdb.sh"
     if !taskTouchesScala(task) then Async[F].unit
     else
@@ -1045,6 +1032,7 @@ object Impl:
               )
             )
       }
+  }
 
   def refreshSemanticDbIfNeeded[F[_]: Async](
       env: RunEnv[F],
@@ -1118,19 +1106,7 @@ object Impl:
             case violations =>
               val message = TestEditGuard.report(phase, violations)
               progress(message) *>
-                AgentExecutor.completeTokenMetrics[F](
-                  task.run.context.root,
-                  task.run.task.number,
-                  task.run.runner,
-                  // The dispatch's scope, not the phase: this argument keys the
-                  // pending-metrics map, and the phase dimension is already on
-                  // the staged event.
-                  AgentExecutor.MetricsScope.Implement,
-                  // Not "green": this run is being rejected, and recording it
-                  // as anything else would teach successRate that the runner
-                  // succeeded at what it was actually caught doing.
-                  "red"
-                ) *> Sync[F].raiseError(TestEditGuard.Violation(phase, violations))
+                AgentExecutor.completeTokenMetrics[F]((task.run.context.root, task.run.task.number, task.run.runner, AgentExecutor.MetricsScope.Implement, "red")) *> Sync[F].raiseError(TestEditGuard.Violation(phase, violations))
           }
     }
 
@@ -1153,22 +1129,10 @@ object Impl:
           // not counted as a failure either - the runner did nothing wrong) while
           // still carrying the usage sample `meanUsage` reads.
           AgentExecutor
-            .completeTokenMetrics[F](
-              task.run.context.root,
-              task.run.task.number,
-              task.run.runner,
-              AgentExecutor.MetricsScope.Implement,
-              if verified then "green" else TokenMetrics.UnverifiedOutcome
-            )
+            .completeTokenMetrics[F]((task.run.context.root, task.run.task.number, task.run.runner, AgentExecutor.MetricsScope.Implement, if (verified) "green" else TokenMetrics.UnverifiedOutcome))
             .as(task)
         case Left(error) =>
-          AgentExecutor.completeTokenMetrics[F](
-            task.run.context.root,
-            task.run.task.number,
-            task.run.runner,
-            AgentExecutor.MetricsScope.Implement,
-            "red"
-          ) *> Sync[F].raiseError(error)
+          AgentExecutor.completeTokenMetrics[F]((task.run.context.root, task.run.task.number, task.run.runner, AgentExecutor.MetricsScope.Implement, "red")) *> Sync[F].raiseError(error)
       }
     }
 
@@ -1194,7 +1158,7 @@ object Impl:
         task.run.baseBranch
       )
       ownCommits <-
-        if !publishable then Sync[F].pure(false)
+        if !publishable then false.pure[F]
         else git[F].headSha(task.run.worktreePath).map(advancedHead(task, _))
       hasOpenPullRequest <- GitHub.hasOpenPullRequestForBranch(
         task.run.worktreePath,
@@ -1211,25 +1175,18 @@ object Impl:
   def rejectEmptyRun[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli { task =>
       deliveredSomething[F](task).flatMap {
-        case true  => Sync[F].pure(task)
+        case true  => task.pure[F]
         case false =>
           // The attempt earned a red and must be recorded as one. An empty run
           // leaves a tree that still compiles, so when this arrow ran after
           // `runProjectValidation` the validation had already recorded "green"
           // and consumed the pending event — teaching `successRate` that the
           // runner which delivered nothing had succeeded.
-          AgentExecutor.completeTokenMetrics[F](
-            task.run.context.root,
-            task.run.task.number,
-            task.run.runner,
-            AgentExecutor.MetricsScope.Implement,
-            "red"
-          ) *> Sync[F].raiseError[ExecutedTask](
-            RuntimeException(
-              s"Agent ${task.run.runner.display} finished task #${task.run.task.number} without changing anything: " +
-                "no files, no new commits, no pull request."
-            )
-          )
+          AgentExecutor.completeTokenMetrics[F]((task.run.context.root, task.run.task.number, task.run.runner, AgentExecutor.MetricsScope.Implement, "red")) *> RuntimeException(s"Agent ${
+  task.run.runner.display
+} finished task #${
+  task.run.task.number
+} without changing anything: " + "no files, no new commits, no pull request.").raiseError[F, ExecutedTask]
       }
     }
 
@@ -1276,12 +1233,11 @@ object Impl:
       val run = unchanged.run.run
       progress[F](
         s"Task #${run.task.number} produced no files, no new commits and no pull request. Refusing to close it as done."
-      ) *> Sync[F].raiseError[ExecutedTask](
-        RuntimeException(
-          s"Agent ${run.runner.display} finished task #${run.task.number} without changing anything: " +
-            s"nothing to publish, so the task is not done."
-        )
-      )
+      ) *> RuntimeException(s"Agent ${
+  run.runner.display
+} finished task #${
+  run.task.number
+} without changing anything: " + (s"nothing to publish, so the task is not done.")).raiseError[F, ExecutedTask]
     }
 
   def verifyRelatedPullRequestCi[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
@@ -1333,14 +1289,7 @@ object Impl:
     }
 
   def checkParentsForCompletion[F[_]: Sync]: -->[F, ClaimedTask, ClaimedTask] =
-    Kleisli { run =>
-      GitHub
-        .checkParentsForCompletion(progress)(
-          run.context.root,
-          run.task
-        )
-        .as(run)
-    }
+    Kleisli.ask[F, ClaimedTask] <* GitHub.checkParentsForCompletion(progress).local((run: ClaimedTask) => (run.context.root, run.task))
 
   /** Lands the integration branches of parents that nothing else will land, resolving their conflicts with an agent.
     *
@@ -1352,12 +1301,14 @@ object Impl:
     * Every failure here is a warning: a parent that cannot be landed is a thing to tell someone about, never a reason
     * to stop before selecting a task.
     */
-  def landStrandedIntegrationBranches[F[_]: Sync](context: RunContext): F[Unit] =
+  def landStrandedIntegrationBranches[F[_]: Sync]: Kleisli[F, RunContext, Unit] =
+  Kleisli.apply { context =>
     GitHub
       .mergeSettledIntegrationBranches[F](progress)
       .run(context.root)
       .flatMap(_.traverse_(repairAndLandIntegrationBranch[F](context, _)))
       .handleErrorWith(error => progress(s"WARNING: integration branch sweep failed: ${error.getMessage}"))
+  }
 
   private def repairAndLandIntegrationBranch[F[_]: Sync](context: RunContext, parent: Issue): F[Unit] =
     val branchName = BranchName(s"task-${parent.number}")
@@ -1655,20 +1606,10 @@ ${task.body}
     Kleisli.fromFunction(_.request)
 
   def createAndMergePullRequest[F[_]: Sync]: -->[F, PublishRequest, Unit] =
-    Kleisli { request =>
-      GitHub.createAndMergePr(progress)(
-        request.root,
-        request.worktreePath,
-        request.branchName,
-        request.baseBranch,
-        request.task,
-        request.finalization.commitTitle,
-        request.finalization.pullRequestBody
-      )
-    }
+    GitHub.createAndMergePr(progress).local((request: PublishRequest) => (request.root, request.worktreePath, request.branchName, request.baseBranch, request.task, request.finalization.commitTitle, request.finalization.pullRequestBody))
 
   def pushBranch[F[_]: Sync]: -->[F, PushRequest, Unit] =
-    Kleisli(request => git[F].push(request.worktreePath, request.branchName))
+    git[F].push.local((request: PushRequest) => (request.worktreePath, request.branchName))
 
   def publishLocal[F[_]: Sync]: -->[F, LocalPublication, Unit] =
     Kleisli { local =>
