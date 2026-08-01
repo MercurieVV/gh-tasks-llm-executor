@@ -1040,8 +1040,15 @@ $questions
         )
     }
 
+  /** Leaves a failure comment, unless the newest comment already is that same failure.
+    *
+    * One failure can reach this from two places — the publication handler that saw it first, then the terminal handler
+    * that reports everything that escaped — and #130 got the identical wall of GraphQL text twice. Only consecutive
+    * duplicates are suppressed: the same failure recurring on a later run sits behind other comments and is still worth
+    * recording, because "this failed again" is the interesting part.
+    */
   def commentTaskFailure[F[_]](progress: String => F[Unit])(using
-      Sync[F]
+      F: Sync[F]
   ): Kleisli[F, (os.Path, Issue, String), Unit] =
     Kleisli.apply { case (root, task, reason) =>
       val body =
@@ -1050,16 +1057,24 @@ $questions
 Reason:
 $reason
 """
-      progress(s"Leaving failure comment on task #${task.number}...") *>
-        call(
-          root,
-          "gh",
-          "issue",
-          "comment",
-          task.number.toString,
-          "--body",
-          body
-        )
+      issueHistory((root, task.number))
+        .handleErrorWith(_ => F.pure(IssueHistory(Nil, Nil)))
+        .map(_.comments.lastOption.exists(_.body.value.trim === body.trim))
+        .flatMap {
+          case true =>
+            progress(s"Failure on task #${task.number} is already the newest comment; not repeating it.")
+          case false =>
+            progress(s"Leaving failure comment on task #${task.number}...") *>
+              call(
+                root,
+                "gh",
+                "issue",
+                "comment",
+                task.number.toString,
+                "--body",
+                body
+              )
+        }
     }
 
   def commentSplitMissingWarning[F[_]](progress: String => F[Unit])(using
