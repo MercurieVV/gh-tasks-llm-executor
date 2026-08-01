@@ -197,9 +197,8 @@ final case class PublishRequest(
 
 /** Remote branch push request.
   *
-  * `root` is the repo root, not the worktree: a push failure is repaired by an
-  * agent, and choosing an alternate runner for that repair needs the inventory,
-  * which is discovered per repo (`AgentInventory.load`). Without it the repair
+  * `root` is the repo root, not the worktree: a push failure is repaired by an agent, and choosing an alternate runner
+  * for that repair needs the inventory, which is discovered per repo (`AgentInventory.load`). Without it the repair
   * loop could only re-run the runner that had already failed.
   */
 final case class PushRequest(
@@ -255,8 +254,8 @@ final case class RunSummary(
   *
   * `extendedCacheTtl` is set when this node is one of >= 3 siblings in the same fan-out that will route to the same
   * runner, so the first of them writes the shared prompt prefix with the 1-hour TTL and the rest read it (T20). It
-  * rides on the node rather than being recomputed at claim time because peer-ness is a property of the SET of
-  * siblings, which a single node cannot see.
+  * rides on the node rather than being recomputed at claim time because peer-ness is a property of the SET of siblings,
+  * which a single node cannot see.
   */
 final case class TaskNode(
     context: RunContext,

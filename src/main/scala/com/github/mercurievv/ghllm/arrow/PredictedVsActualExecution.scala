@@ -13,19 +13,18 @@ import cats.effect.Ref
 import cats.effect.kernel.Async
 import cats.syntax.all.*
 
-/** Answers the question this traversal work started from: since `HyloExecutionSpike` now drives both cost
-  * estimation (`TaskTree.estimate`) and real execution (`HyloExecutionSpike.executeRecursive`, wired in
-  * `Wiring.scala` via `HyloExecutionSpike.wire`) off the exact same `collectPendingDependencies` field, a
-  * prediction taken immediately before a run and the run's own set of visited task numbers describe the same
-  * tree - so the predicted `$` and the `$` actually billed for those same task numbers over the run's wall-clock
-  * window are a fair diff, not two numbers computed by different code at different times.
+/** Answers the question this traversal work started from: since `HyloExecutionSpike` now drives both cost estimation
+  * (`TaskTree.estimate`) and real execution (`HyloExecutionSpike.executeRecursive`, wired in `Wiring.scala` via
+  * `HyloExecutionSpike.wire`) off the exact same `collectPendingDependencies` field, a prediction taken immediately
+  * before a run and the run's own set of visited task numbers describe the same tree - so the predicted `$` and the `$`
+  * actually billed for those same task numbers over the run's wall-clock window are a fair diff, not two numbers
+  * computed by different code at different times.
   *
-  * Deliberately takes `recursiveArrows: RecursiveArrows[Flow[RunF[F]]]` rather than calling `Impl.*`/`Wiring`
-  * directly: both the prediction's tree-unfold and the execution's fold read `collectPendingDependencies`/
-  * `checkIfCompleted`/`claimAndRun` off the *same* field values, so passing the production
-  * `logged.recursiveArrows` (already logged, already replay-resolved) makes this a real report, and passing a
-  * test double (as `PredictedVsActualExecution.test.scala` does) makes it a fast, offline one - no separate code
-  * path to keep in sync.
+  * Deliberately takes `recursiveArrows: RecursiveArrows[Flow[RunF[F]]]` rather than calling `Impl.*`/`Wiring` directly:
+  * both the prediction's tree-unfold and the execution's fold read `collectPendingDependencies`/
+  * `checkIfCompleted`/`claimAndRun` off the *same* field values, so passing the production `logged.recursiveArrows`
+  * (already logged, already replay-resolved) makes this a real report, and passing a test double (as
+  * `PredictedVsActualExecution.test.scala` does) makes it a fast, offline one - no separate code path to keep in sync.
   */
 object PredictedVsActualExecution:
 

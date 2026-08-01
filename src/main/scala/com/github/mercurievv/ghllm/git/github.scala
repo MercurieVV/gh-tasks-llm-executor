@@ -1455,6 +1455,38 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
   private final case class PullRequest(number: TaskNumber, state: State)
 
+  /** True if `branchName` exists on origin. */
+  def remoteBranchExists[F[_]: Sync](cwd: os.Path, branchName: BranchName): F[Boolean] =
+    callOutputUnchecked(cwd, "git", "ls-remote", "--heads", "origin", branchName.value)
+      .map(_.trim.nonEmpty)
+
+  /** Creates a subtask's integration base on origin if nothing has created it yet.
+    *
+    * A subtask's PR is opened against `task-<parent>`, but nothing was responsible for that branch existing: it was
+    * only ever created as a side effect of some earlier subtask's worktree, locally. When no earlier subtask had run —
+    * or when its local branch was never pushed — `gh pr create --base task-5` failed with "Base ref must be a branch",
+    * killing the task after the agent had already done all of its work. #129 and #130 both died this way.
+    *
+    * Branching from the default branch is what the integration branch is *for*: it collects subtask merges and is later
+    * merged back by `mergeSettledIntegrationBranches`. Pushed with a `refs/heads/` target so it never depends on a
+    * local branch of that name — a stale local `task-5` from an old worktree must not decide where origin's starts.
+    */
+  def ensureIntegrationBase[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, (os.Path, Option[BranchName]), Unit] =
+    Kleisli.apply {
+      case (_, None) => F.unit
+      case (cwd, Some(base)) =>
+        remoteBranchExists(cwd, base).flatMap {
+          case true => F.unit
+          case false =>
+            val defaultRef = defaultBranchRef(cwd)
+            progress(
+              s"Integration base $base does not exist on origin; creating it from $defaultRef."
+            ) *> call(cwd, "git", "push", "origin", s"$defaultRef:refs/heads/${base.value}")
+        }
+    }
+
   private def ensurePullRequest[F[_]](
       progress: String => F[Unit]
   )(using F: Sync[F]): Kleisli[
@@ -1486,7 +1518,10 @@ This parent task will not be implemented directly. Run child tasks first; when a
               s"Pull Request #${pullRequest.number} for $branchName already exists."
             ).as(pullRequest)
           case _ =>
-            progress("Creating Pull Request...") *>
+            // Before the create call, not after a failure: gh reports a missing
+            // base as an opaque GraphQL error that no retry path recovers from.
+            ensureIntegrationBase(progress)((worktreePath, baseBranch)) *>
+              progress("Creating Pull Request...") *>
               call(
                 worktreePath,
                 Seq(

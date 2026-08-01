@@ -10,19 +10,17 @@ import com.github.mercurievv.ghllm.metrics.TokenMetrics.TokenMetricsEvent
 
 /** Builds the cost fold's `profileFor` out of recorded Stage 0 measurements.
   *
-  * Until now `profileFor` only ever came from a test's hand-written `Map`, so
-  * the cost model computed correct arithmetic over invented numbers. These are
-  * the real coefficients.
+  * Until now `profileFor` only ever came from a test's hand-written `Map`, so the cost model computed correct
+  * arithmetic over invented numbers. These are the real coefficients.
   *
-  * Lookup falls back in three steps, because the useful question is what a plan
-  * will cost and most nodes in a plan have never run:
+  * Lookup falls back in three steps, because the useful question is what a plan will cost and most nodes in a plan have
+  * never run:
   *
-  *   1. this exact task's own history — the only true measurement;
-  *   2. the mean over its phase, for a task not yet run;
-  *   3. the mean over everything, for a task whose phase is unset or unseen.
+  *   1. this exact task's own history — the only true measurement; 2. the mean over its phase, for a task not yet run;
+  *      3. the mean over everything, for a task whose phase is unset or unseen.
   *
-  * An empty history yields zero coefficients, not a guess. A zero estimate is
-  * visibly useless; a fabricated one is not, and would be read as a forecast.
+  * An empty history yields zero coefficients, not a guess. A zero estimate is visibly useless; a fabricated one is not,
+  * and would be read as a forecast.
   */
 object NodeProfiles:
 
@@ -60,9 +58,8 @@ object NodeProfiles:
 
   /** Mean per-run cost of a sample.
     *
-    * The token counts on an event are already cumulative over that run's turns,
-    * so the mean over events is a mean over runs and `turnCount` stays a
-    * diagnostic — multiplying it in would count the same tokens twice.
+    * The token counts on an event are already cumulative over that run's turns, so the mean over events is a mean over
+    * runs and `turnCount` stays a diagnostic — multiplying it in would count the same tokens twice.
     */
   def coefficientsOf(events: List[TokenMetricsEvent]): Stage0Coefficients =
     if events.isEmpty then Zero
@@ -95,8 +92,13 @@ object NodeProfiles:
     )
 
   private def mostCommon(values: List[String]): Option[String] =
-    values.groupBy(identity).toList.sortBy { case (value, occurrences) =>
-      (-occurrences.size, value)
-    }.headOption.map(_._1)
+    values
+      .groupBy(identity)
+      .toList
+      .sortBy { case (value, occurrences) =>
+        (-occurrences.size, value)
+      }
+      .headOption
+      .map(_._1)
 
   private def normalise(value: String): String = value.trim.toLowerCase

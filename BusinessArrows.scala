@@ -9,92 +9,68 @@ import cats.syntax.all.*
 /** T23 runtime task-tree traversal mapping (Issue #72)
   *
   * The runtime traversals in this file are:
-  *  1. `RecursiveArrows.executeRecursive` – dependency‑first recursion
-  *     that short‑circuits on the first incomplete dependency, mutates
-  *     `RunEnv.openIssues`, and discovers dependencies dynamically
-  *     (including split children created between root passes).
-  *  2. `UntilClosedArrows.runUntilClosed` – repeat‑until‑closed loop
-  *     that repeats the whole root walk until no further progress is made.
-  *  3. `TraversalArrows.runCandidate` – selects the single‑pass or
-  *     repeat‑until‑closed path.
+  *   1. `RecursiveArrows.executeRecursive` – dependency‑first recursion that short‑circuits on the first incomplete
+  *      dependency, mutates `RunEnv.openIssues`, and discovers dependencies dynamically (including split children
+  *      created between root passes). 2. `UntilClosedArrows.runUntilClosed` – repeat‑until‑closed loop that repeats the
+  *      whole root walk until no further progress is made. 3. `TraversalArrows.runCandidate` – selects the single‑pass
+  *      or repeat‑until‑closed path.
   *
-  * None of these call sites can be ported to the shared `TaskF`/`TaskTree.Tree`
-  * Droste algebra without breaking behaviour:
-  *  - The dependency tree is not static; its members and order are computed
-  *    at runtime and may change mid‑run when a task splits.
-  *  - The short‑circuiting fold `ArrowTraverse.untilLeft` is list‑based
-  *    and does not correspond to a pure fold over a statically‑known `Branch`.
-  *  - The `runUntilClosed` loop is a temporal control loop, not a structural
-  *    recursion over a tree node.
+  * None of these call sites can be ported to the shared `TaskF`/`TaskTree.Tree` Droste algebra without breaking
+  * behaviour:
+  *   - The dependency tree is not static; its members and order are computed at runtime and may change mid‑run when a
+  *     task splits.
+  *   - The short‑circuiting fold `ArrowTraverse.untilLeft` is list‑based and does not correspond to a pure fold over a
+  *     statically‑known `Branch`.
+  *   - The `runUntilClosed` loop is a temporal control loop, not a structural recursion over a tree node.
   *
-  * Therefore all T23 call sites are classified as **intentionally outside
-  * the task‑tree algebra**.  Future implementation leaves must not replace
-  * them with Droste‑based walks against the existing `TaskF` without first
-  * making the dependency computations static and removing the temporal repeat
-  * — changes that would alter the observed behaviour and break existing tests.
+  * Therefore all T23 call sites are classified as **intentionally outside the task‑tree algebra**. Future
+  * implementation leaves must not replace them with Droste‑based walks against the existing `TaskF` without first
+  * making the dependency computations static and removing the temporal repeat — changes that would alter the observed
+  * behaviour and break existing tests.
   *
-  * This conclusion preserves dependency order, first‑incomplete‑child
-  * short‑circuiting, `RunEnv.openIssues` mutations, split‑parent replay,
-  * and dynamic child discovery semantics.
+  * This conclusion preserves dependency order, first‑incomplete‑child short‑circuiting, `RunEnv.openIssues` mutations,
+  * split‑parent replay, and dynamic child discovery semantics.
   *
-  * Addendum: `HyloExecutionSpike` (arrow package) later re-tested the first
-  * two objections specifically, using `scheme.hyloM` over `TaskGraph.Node`
-  * with `EitherT[F, RunSummary, A]` as the effect. Findings, backed by
-  * `HyloExecutionSpike.test.scala` (both the synthetic doubles matching
-  * `RecursiveArrowsSuite` and an integration suite against the real
-  * `Impl.checkIfCompleted`/`Impl.collectPendingDependencies`):
-  *   - Objection 2 (list-based `untilLeft` short-circuit) does not actually
-  *     block a droste re-expression: `EitherT`'s flatMap-derived `Applicative`
-  *     makes `Traverse[TaskF].traverse` skip constructing a later sibling's
-  *     effect once an earlier one is `Left`, reproducing `untilLeft` for free.
-  *   - Objection 1 (dynamic tree / mid-run splits) is survivable by re-running
-  *     `hyloM` from the root each pass instead of folding one materialised
-  *     tree - each pass's `coalgebra` call reads live `RunEnv.openIssues`, the
-  *     same way `collectPendingDependencies` already does.
-  *   - Objection 3 (`runUntilClosed` is a temporal loop) still holds and is
-  *     unaffected either way: the repeat-until-closed loop stays outside any
-  *     single fold regardless of which traversal mechanism runs one pass.
+  * Addendum: `HyloExecutionSpike` (arrow package) later re-tested the first two objections specifically, using
+  * `scheme.hyloM` over `TaskGraph.Node` with `EitherT[F, RunSummary, A]` as the effect. Findings, backed by
+  * `HyloExecutionSpike.test.scala` (both the synthetic doubles matching `RecursiveArrowsSuite` and an integration suite
+  * against the real `Impl.checkIfCompleted`/`Impl.collectPendingDependencies`):
+  *   - Objection 2 (list-based `untilLeft` short-circuit) does not actually block a droste re-expression: `EitherT`'s
+  *     flatMap-derived `Applicative` makes `Traverse[TaskF].traverse` skip constructing a later sibling's effect once
+  *     an earlier one is `Left`, reproducing `untilLeft` for free.
+  *   - Objection 1 (dynamic tree / mid-run splits) is survivable by re-running `hyloM` from the root each pass instead
+  *     of folding one materialised tree - each pass's `coalgebra` call reads live `RunEnv.openIssues`, the same way
+  *     `collectPendingDependencies` already does.
+  *   - Objection 3 (`runUntilClosed` is a temporal loop) still holds and is unaffected either way: the
+  *     repeat-until-closed loop stays outside any single fold regardless of which traversal mechanism runs one pass.
   *
-  * This did not change the verdict, but the reason is narrower than first
-  * thought. `Wiring.scala`'s `withArrowLogging` and `Replayability.combine`
-  * both derive over `RecursiveArrows`'s five *fields* via `Functor2K` -
-  * `executeRecursive` itself is a plain method, never a field, so it was
-  * never a directly-logged/replayed unit even today: `logged.executeRecursive`
-  * is that method invoked on the five already-wrapped fields. A `hyloM`
-  * version that receives those same already-wrapped fields as parameters
-  * (rather than raw `Impl.*` leaves) preserves per-dependency and per-claim
-  * log/replay granularity exactly as now - `HyloExecutionSpike`'s integration
-  * suite already does this (`Impl.checkIfCompleted[RunF[IO]].run`, not a bare
-  * unwrapped call). So **no instrumentation regression, contrary to what an
-  * earlier version of this note claimed.**
+  * This did not change the verdict, but the reason is narrower than first thought. `Wiring.scala`'s `withArrowLogging`
+  * and `Replayability.combine` both derive over `RecursiveArrows`'s five *fields* via `Functor2K` - `executeRecursive`
+  * itself is a plain method, never a field, so it was never a directly-logged/replayed unit even today:
+  * `logged.executeRecursive` is that method invoked on the five already-wrapped fields. A `hyloM` version that receives
+  * those same already-wrapped fields as parameters (rather than raw `Impl.*` leaves) preserves per-dependency and
+  * per-claim log/replay granularity exactly as now - `HyloExecutionSpike`'s integration suite already does this
+  * (`Impl.checkIfCompleted[RunF[IO]].run`, not a bare unwrapped call). So **no instrumentation regression, contrary to
+  * what an earlier version of this note claimed.**
   *
-  * Both open items above are now closed. `HyloExecutionSpike.executeRecursive`
-  * was loosened from `Sync[F]` to `Monad[F]` (nothing in it needs more), and
-  * `HyloExecutionSpikeReplayLayerSuite` instantiates it at
-  * `F = [X] =>> OptionT[IO, X]` - the same effect `ReplayFlow` wraps a
-  * `Kleisli` around - reproducing `replayFlowMonoid.combine`'s
-  * cache-hit-short-circuits/cache-miss-falls-through-to-real shape for
-  * `claimAndRun` and confirming the traversal is indifferent to which monad
-  * transformer sits under it.
+  * Both open items above are now closed. `HyloExecutionSpike.executeRecursive` was loosened from `Sync[F]` to
+  * `Monad[F]` (nothing in it needs more), and `HyloExecutionSpikeReplayLayerSuite` instantiates it at `F = [X] =>>
+  * OptionT[IO, X]` - the same effect `ReplayFlow` wraps a `Kleisli` around - reproducing `replayFlowMonoid.combine`'s
+  * cache-hit-short-circuits/cache-miss-falls-through-to-real shape for `claimAndRun` and confirming the traversal is
+  * indifferent to which monad transformer sits under it.
   *
-  * So: not blocked by logging, not blocked by replay, not blocked by the
-  * `Monad` vs `Sync` bound. `recordDependencyOutcome`/`routeDependencyOutcome`
-  * are folded into `HyloExecutionSpike`'s algebra rather than kept as separate
-  * fields (fine for logging/replay per above, since they were never
-  * independently meaningful log points - `recordDependencyOutcome` only
-  * decided continue-or-stop), and objection 3's outer `runUntilClosed` loop is
-  * genuinely untouched either way.
+  * So: not blocked by logging, not blocked by replay, not blocked by the `Monad` vs `Sync` bound.
+  * `recordDependencyOutcome`/`routeDependencyOutcome` are folded into `HyloExecutionSpike`'s algebra rather than kept
+  * as separate fields (fine for logging/replay per above, since they were never independently meaningful log points -
+  * `recordDependencyOutcome` only decided continue-or-stop), and objection 3's outer `runUntilClosed` loop is genuinely
+  * untouched either way.
   *
-  * Adopted: `Wiring.scala` now calls `HyloExecutionSpike.wire(logged.recursiveArrows)`
-  * at both call sites that used to read `logged.executeRecursive`
-  * (`runRootOnce`, `runOnce`). `RecursiveArrows.executeRecursive` itself is
-  * untouched and still used by `RecursiveArrowsSuite` directly - this record's
-  * five fields remain the source of truth and the logged/replayed units; only
-  * *how they get composed* into one recursive walk changed. One observable
-  * difference: `recordDependencyOutcome`'s and `routeDependencyOutcome`'s own
-  * enter/exit trace lines no longer appear in the log, since the hylo fold
-  * never calls those two fields directly (their logic is inlined into the
-  * algebra instead).
+  * Adopted: `Wiring.scala` now calls `HyloExecutionSpike.wire(logged.recursiveArrows)` at both call sites that used to
+  * read `logged.executeRecursive` (`runRootOnce`, `runOnce`). `RecursiveArrows.executeRecursive` itself is untouched
+  * and still used by `RecursiveArrowsSuite` directly - this record's five fields remain the source of truth and the
+  * logged/replayed units; only *how they get composed* into one recursive walk changed. One observable difference:
+  * `recordDependencyOutcome`'s and `routeDependencyOutcome`'s own enter/exit trace lines no longer appear in the log,
+  * since the hylo fold never calls those two fields directly (their logic is inlined into the algebra instead).
   */
 /** Top-level arrows that turn application input into a user-visible run summary.
   *

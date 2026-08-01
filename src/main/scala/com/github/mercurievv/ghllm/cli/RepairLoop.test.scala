@@ -154,12 +154,12 @@ class AgentRunArrowsSuite extends CatsEffectSuite:
     // the ladder and killed the task.
     Ref[IO].of(List.empty[AgentBinary]).flatMap { runners =>
       val runTaskWithRunner = Kleisli { (task: PreparedTask) =>
-        runners.update(_ :+ task.claimedTask.runner.agent)
+        runners
+          .update(_ :+ task.claimedTask.runner.agent)
           .as(ExecutedTask(task.claimedTask, AgentOutput("ok")))
       }
       val validate = Kleisli { (executed: ExecutedTask) =>
-        if executed.run.runner.agent.value == weak.agent.value then
-          IO.raiseError(RuntimeException("tests failed"))
+        if executed.run.runner.agent.value == weak.agent.value then IO.raiseError(RuntimeException("tests failed"))
         else IO.pure(executed)
       }
       val retryingRunTask = BusinessLogicRetry.retryRunTaskWithRunner[IO](

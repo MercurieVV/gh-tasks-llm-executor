@@ -280,8 +280,8 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
 
   /** Paths this run modified, deleted or renamed — committed or not.
     *
-    * Additions are deliberately excluded: the caller ([[TestEditGuard]]) blocks
-    * changes that could weaken an existing test, and a new file weakens nothing.
+    * Additions are deliberately excluded: the caller ([[TestEditGuard]]) blocks changes that could weaken an existing
+    * test, and a new file weakens nothing.
     */
   def modifiedOrDeletedFiles: Kleisli[F, (os.Path, BranchName, Option[BranchName]), List[String]] =
     Kleisli.apply { case (worktreePath, branchName, baseBranch) =>
@@ -296,13 +296,11 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       }
     }
 
-  /** Every path this run touched, additions included — what a dependent task
-    * needs in order to start from file names instead of searching for them
-    * (TOKEN_EFFICIENCY_PLAN.md §2 Stage 2, "never 'go find it'").
+  /** Every path this run touched, additions included — what a dependent task needs in order to start from file names
+    * instead of searching for them (TOKEN_EFFICIENCY_PLAN.md §2 Stage 2, "never 'go find it'").
     *
-    * Read from git rather than from the runner's prose: the set is already
-    * known exactly, so asking a model to restate it spends tokens to obtain a
-    * worse answer.
+    * Read from git rather than from the runner's prose: the set is already known exactly, so asking a model to restate
+    * it spends tokens to obtain a worse answer.
     */
   def changedFiles: Kleisli[F, (os.Path, BranchName, Option[BranchName]), List[String]] =
     Kleisli.apply { case (worktreePath, branchName, baseBranch) =>
@@ -329,9 +327,8 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       }
     }
 
-  /** The uncommitted half of [[modifiedOrDeletedFiles]], for callers that judge
-    * a worktree before anything is committed and so have no base ref to diff
-    * against — the repair loop validates and only then commits.
+  /** The uncommitted half of [[modifiedOrDeletedFiles]], for callers that judge a worktree before anything is committed
+    * and so have no base ref to diff against — the repair loop validates and only then commits.
     */
   def modifiedOrDeletedInWorktree: Kleisli[F, os.Path, List[String]] =
     Kleisli.apply(worktreePath => F.blocking(uncommittedModifiedOrDeleted(worktreePath).distinct.sorted))

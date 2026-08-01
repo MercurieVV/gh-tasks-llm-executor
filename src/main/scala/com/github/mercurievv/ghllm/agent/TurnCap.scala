@@ -2,9 +2,8 @@ package com.github.mercurievv.ghllm.agent
 
 /** A leaf that ran past its turn budget.
   *
-  * Deliberately a distinct type rather than a plain `RuntimeException`: the
-  * escalation router pattern-matches on it to produce a `Red` verdict instead of
-  * a `Failed` one, which is the difference between "this cheap runner could not
+  * Deliberately a distinct type rather than a plain `RuntimeException`: the escalation router pattern-matches on it to
+  * produce a `Red` verdict instead of a `Failed` one, which is the difference between "this cheap runner could not
   * finish the leaf" and "the tool is broken".
   */
 final case class TurnCapExceeded(turnCount: Int, cap: Int)
@@ -48,9 +47,8 @@ object TurnCap:
 
   /** The breach, if the reported turn count exceeded `cap`.
     *
-    * Detection is after the fact by necessity: `num_turns` only arrives in the
-    * runner's terminal JSON, so there is no mid-flight counter to trip. It still
-    * pays off — the leaf is re-run on a stronger runner instead of the same weak
+    * Detection is after the fact by necessity: `num_turns` only arrives in the runner's terminal JSON, so there is no
+    * mid-flight counter to trip. It still pays off — the leaf is re-run on a stronger runner instead of the same weak
     * one grinding through another repair round at the same price.
     */
   def exceeded(turnCount: Option[Int], cap: Int): Option[TurnCapExceeded] =

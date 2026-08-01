@@ -149,3 +149,61 @@ class SyncIntegrationBranchSuite extends CatsEffectSuite:
       git(root, "fetch", "origin", "task-4")
       assertEquals(git(root, "merge-base", "--is-ancestor", "origin/master", "origin/task-4").exitCode, 1)
     }
+
+/** A subtask opens its PR against `task-<parent>`. Nothing owned the existence of that branch, so the first subtask of
+  * a parent found no base on origin and `gh pr create` failed after the agent had already done the work.
+  */
+class EnsureIntegrationBaseSuite extends CatsEffectSuite:
+  private def git(cwd: os.Path, args: String*): os.CommandResult =
+    os.proc("git" +: args).call(cwd = cwd, stdout = os.Pipe, stderr = os.Pipe, check = false)
+
+  private def cloneWithOrigin(): os.Path =
+    val origin = os.temp.dir(prefix = "ensure-base-origin")
+    git(origin, "init", "-q", "-b", "master")
+    git(origin, "config", "user.email", "test@example.com")
+    git(origin, "config", "user.name", "Test")
+    git(origin, "config", "receive.denyCurrentBranch", "ignore")
+    os.write(origin / "seed.txt", "seed\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-q", "-m", "seed")
+
+    val root = os.temp.dir(prefix = "ensure-base-clone") / "repo"
+    git(root / os.up, "clone", "-q", origin.toString, root.toString)
+    git(root, "config", "user.email", "test@example.com")
+    git(root, "config", "user.name", "Test")
+    root
+
+  test("a missing integration base is created on origin from the default branch"):
+    val root = cloneWithOrigin()
+    GitHub
+      .ensureIntegrationBase[IO](_ => IO.unit)((root, Some(BranchName("task-5"))))
+      .productR(GitHub.remoteBranchExists[IO](root, BranchName("task-5")))
+      .map { exists =>
+        assert(exists)
+        git(root, "fetch", "-q", "origin")
+        // It starts at the default branch, which is what later merges back.
+        assertEquals(
+          git(root, "rev-parse", "origin/task-5").out.text().trim,
+          git(root, "rev-parse", "origin/master").out.text().trim
+        )
+      }
+
+  test("an existing integration base is left exactly where it is"):
+    val root = cloneWithOrigin()
+    os.write(root / "work.txt", "subtask work\n")
+    git(root, "checkout", "-q", "-b", "task-5")
+    git(root, "add", ".")
+    git(root, "commit", "-q", "-m", "existing integration work")
+    git(root, "push", "-q", "origin", "task-5")
+    val before = git(root, "rev-parse", "origin/task-5").out.text().trim
+
+    GitHub.ensureIntegrationBase[IO](_ => IO.unit)((root, Some(BranchName("task-5")))).map { _ =>
+      git(root, "fetch", "-q", "origin")
+      assertEquals(git(root, "rev-parse", "origin/task-5").out.text().trim, before)
+    }
+
+  test("a task with no parent has no integration base to create"):
+    val root = cloneWithOrigin()
+    GitHub.ensureIntegrationBase[IO](_ => IO.unit)((root, None)).map { _ =>
+      assertEquals(git(root, "ls-remote", "--heads", "origin").out.text().trim.linesIterator.size, 1)
+    }

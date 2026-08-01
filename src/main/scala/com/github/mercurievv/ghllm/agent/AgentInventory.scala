@@ -51,19 +51,16 @@ final case class AgentTool(
 
   /** Expected USD for one run of this tool.
     *
-    * `usage` is the measured mean for the `(phase, runner)` this decision is
-    * about ([[TokenMetrics.TokenMetricsBackend.meanUsage]]). Without it the
-    * volumes fall back to `AssumedInputMTok`/`AssumedOutputMTok` — the original
-    * behaviour, kept so an unmeasured tool ranks exactly as it used to.
+    * `usage` is the measured mean for the `(phase, runner)` this decision is about
+    * ([[TokenMetrics.TokenMetricsBackend.meanUsage]]). Without it the volumes fall back to
+    * `AssumedInputMTok`/`AssumedOutputMTok` — the original behaviour, kept so an unmeasured tool ranks exactly as it
+    * used to.
     *
-    * The distinction matters because `breakEvenRateAgainst` divides two of
-    * these. With assumed volumes on both sides they cancel, and `c/s` collapses
-    * to the ratio of list prices — which is only the ratio of COSTS if both
-    * runners consume the same tokens to do the same job. They do not: the cheap
-    * runner is cheap partly because it is smaller, and a smaller model that
-    * needs more turns spends its price advantage on volume. Measuring both
-    * sides is what stops the ladder from biasing down on a discount that is not
-    * really there.
+    * The distinction matters because `breakEvenRateAgainst` divides two of these. With assumed volumes on both sides
+    * they cancel, and `c/s` collapses to the ratio of list prices — which is only the ratio of COSTS if both runners
+    * consume the same tokens to do the same job. They do not: the cheap runner is cheap partly because it is smaller,
+    * and a smaller model that needs more turns spends its price advantage on volume. Measuring both sides is what stops
+    * the ladder from biasing down on a discount that is not really there.
     */
   def costWith(usage: Option[TokenUsage.TokenSnapshot]): Option[Double] =
     for
@@ -172,16 +169,15 @@ object AgentTool:
 
   val TokensPerMillion = 1000000.0
 
-  /** Volumes used when a (phase, runner) has no measurement yet. These were the
-    * only volumes the cost model ever had; they are a prior now, not the model.
+  /** Volumes used when a (phase, runner) has no measurement yet. These were the only volumes the cost model ever had;
+    * they are a prior now, not the model.
     */
   val AssumedInputMTok = 0.020
   val AssumedOutputMTok = 0.004
 
-  /** Cache reads bill at a fraction of the input rate. Kept here rather than
-    * read from `TaskTree.CostModel` so pricing a runner does not depend on the
-    * plan-estimation module; the two must agree, and this is the value to change
-    * if a vendor's ratio moves.
+  /** Cache reads bill at a fraction of the input rate. Kept here rather than read from `TaskTree.CostModel` so pricing
+    * a runner does not depend on the plan-estimation module; the two must agree, and this is the value to change if a
+    * vendor's ratio moves.
     */
   val CacheReadPriceRatio = 0.1
 
@@ -266,20 +262,16 @@ final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights
       measuredSelection.orElse(priorityFallback).map(_.runner)
     else defaultImplementor
 
-  /** The implementor cheapest to actually RUN this phase — the ladder's bottom
-    * rung.
+  /** The implementor cheapest to actually RUN this phase — the ladder's bottom rung.
     *
-    * Ordering on `AgentTool.cost` alone is the same defect `costWith` exists to
-    * remove, one step earlier: a runner priced 10x lower that burns 20x the
-    * tokens on this phase is not the cheap one, and taking it as the candidate
-    * puts the ladder on the wrong rung before the break-even test ever runs.
+    * Ordering on `AgentTool.cost` alone is the same defect `costWith` exists to remove, one step earlier: a runner
+    * priced 10x lower that burns 20x the tokens on this phase is not the cheap one, and taking it as the candidate puts
+    * the ladder on the wrong rung before the break-even test ever runs.
     *
-    * Measured volumes are used only when EVERY implementor has them, for the
-    * same reason `selectRunnerFor` demands both sides of `c/s`: ranking a
-    * measured tool against an assumed one compares a real number with a
-    * placeholder and moves whichever tool happens to have a sample. With a
-    * partial sample the whole ordering falls back to the assumed volumes, which
-    * is exactly how it ranked before any measurement existed.
+    * Measured volumes are used only when EVERY implementor has them, for the same reason `selectRunnerFor` demands both
+    * sides of `c/s`: ranking a measured tool against an assumed one compares a real number with a placeholder and moves
+    * whichever tool happens to have a sample. With a partial sample the whole ordering falls back to the assumed
+    * volumes, which is exactly how it ranked before any measurement existed.
     */
   def cheapestImplementorToRun(
       phase: String,
@@ -318,15 +310,12 @@ final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights
 
   /** The ability names an evaluator may write, and nothing else.
     *
-    * This replaced a per-tool dump (id, agent, model, effort, version, roles,
-    * jobTypes, strengths, cost, budget for every discovered tool) that both
-    * evaluation prompts carried. The prompts' only real use for it was the
-    * instruction to "name abilities that match the vocabulary already used in
-    * tool strengths/jobTypes", so an evaluator's coefficients actually match a
-    * tool at selection time — that is this list. The rest was priced input
-    * inviting the model to pick a runner, which it must not do: the runner is
-    * chosen at run time from measured cost and success rate, and a pin written
-    * during evaluation overrides that measurement outright.
+    * This replaced a per-tool dump (id, agent, model, effort, version, roles, jobTypes, strengths, cost, budget for
+    * every discovered tool) that both evaluation prompts carried. The prompts' only real use for it was the instruction
+    * to "name abilities that match the vocabulary already used in tool strengths/jobTypes", so an evaluator's
+    * coefficients actually match a tool at selection time — that is this list. The rest was priced input inviting the
+    * model to pick a runner, which it must not do: the runner is chosen at run time from measured cost and success
+    * rate, and a pin written during evaluation overrides that measurement outright.
     */
   def abilityVocabulary: String =
     val names = availableTools.flatMap(tool => tool.strengths ++ tool.jobTypes).distinct.sorted

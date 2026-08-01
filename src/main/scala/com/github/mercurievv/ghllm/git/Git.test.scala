@@ -140,8 +140,7 @@ class ModifiedOrDeletedFilesSuite extends CatsEffectSuite:
     root
 
   private def changed(worktree: os.Path): IO[List[String]] =
-    Git[IO](_ => IO.unit)
-      .modifiedOrDeletedFiles
+    Git[IO](_ => IO.unit).modifiedOrDeletedFiles
       .run((worktree, BranchName("task-1"), Some(BranchName("master"))))
 
   private def branch(root: os.Path): os.Path =

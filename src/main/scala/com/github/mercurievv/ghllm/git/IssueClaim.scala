@@ -75,7 +75,8 @@ object IssueClaim:
             case Nil => result.pure[F]
             case delay :: rest =>
               progress(
-                s"$what failed on a network error: ${stderr.trim.linesIterator.toList.headOption.getOrElse("")}. Retrying in ${delay / 1000}s..."
+                s"$what failed on a network error: ${stderr.trim.linesIterator.toList.headOption
+                    .getOrElse("")}. Retrying in ${delay / 1000}s..."
               ) *> F.blocking(Thread.sleep(delay)) *> loop(rest)
       }
 

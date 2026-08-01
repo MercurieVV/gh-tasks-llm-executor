@@ -174,18 +174,17 @@ object TaskRunner:
 
   /** Prompt-cache flags per vendor — see `ADR-0001-prompt-cache-knobs.md`.
     *
-    * `--exclude-dynamic-system-prompt-sections` moves cwd, env info, memory paths and git status out of claude's
-    * system prompt and into the first user message. Every task here runs in its own worktree, so those sections differ
-    * for every sibling and sit AHEAD of the constant blocks `taskPrompt` orders stable-first — without this, the
-    * shared prefix begins after something that has already diverged.
+    * `--exclude-dynamic-system-prompt-sections` moves cwd, env info, memory paths and git status out of claude's system
+    * prompt and into the first user message. Every task here runs in its own worktree, so those sections differ for
+    * every sibling and sit AHEAD of the constant blocks `taskPrompt` orders stable-first — without this, the shared
+    * prefix begins after something that has already diverged.
     *
     * Both are opt-out rather than opt-in: the flag is newer than some installed claude CLIs, and an unrecognised flag
-    * is a hard failure rather than a warning, so a deployment on an older CLI (`scripts/remote-run.sh` targets
-    * machines this repo does not control) needs a way to turn it off without a code change.
+    * is a hard failure rather than a warning, so a deployment on an older CLI (`scripts/remote-run.sh` targets machines
+    * this repo does not control) needs a way to turn it off without a code change.
     */
   def claudeCacheFlags: Seq[String] =
-    if Cli.envBoolean("GH_TASKS_CLAUDE_STABLE_SYSTEM_PROMPT", true) then
-      Seq("--exclude-dynamic-system-prompt-sections")
+    if Cli.envBoolean("GH_TASKS_CLAUDE_STABLE_SYSTEM_PROMPT", true) then Seq("--exclude-dynamic-system-prompt-sections")
     else Nil
 
   /** aider's own default is `--no-cache-prompts`, i.e. no prompt caching at all.

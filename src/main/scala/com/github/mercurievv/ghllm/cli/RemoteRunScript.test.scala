@@ -10,8 +10,7 @@ import com.github.mercurievv.ghllm.metrics.*
 class RemoteRunScriptSuite extends munit.FunSuite:
   test("remote launcher includes every top-level production Scala source"):
     val script = os.read(os.pwd / "scripts" / "remote-run.sh")
-    val fileBlock = script
-      .linesIterator
+    val fileBlock = script.linesIterator
       .dropWhile(_.trim != "FILES=(")
       .drop(1)
       .takeWhile(_.trim != ")")
@@ -19,7 +18,8 @@ class RemoteRunScriptSuite extends munit.FunSuite:
       .filter(_.nonEmpty)
       .toList
 
-    val rootSources = os.list(os.pwd)
+    val rootSources = os
+      .list(os.pwd)
       .filter(os.isFile)
       .map(_.relativeTo(os.pwd).toString)
 

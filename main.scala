@@ -70,13 +70,15 @@ object Main extends IOApp:
           IO.pure(ExitCode(outcome.exitCode))
       }
 
-  /** Prices a plan without running it. Read-only: it fetches issues and folds
-    * the same dependency tree the executor would walk, and stops there.
+  /** Prices a plan without running it. Read-only: it fetches issues and folds the same dependency tree the executor
+    * would walk, and stops there.
     */
   private def runEstimate(command: Cli.EstimateCommand): IO[ExitCode] =
     val root = os.pwd
     for
-      context <- Impl.resolveContext[IO].run(AppInput(root, Some(command.task), Recursive(true), ParallelExecution(false)))
+      context <- Impl
+        .resolveContext[IO]
+        .run(AppInput(root, Some(command.task), Recursive(true), ParallelExecution(false)))
       rawIssues <- GitHub.fetchIssues[IO](root)
       issues <- rawIssues.traverse(Impl.effectiveIssue[IO](root, _))
       target = issues.find(_.number === command.task)
@@ -100,14 +102,16 @@ object Main extends IOApp:
     yield exit
 
   /** Prices a plan, then actually runs its dependency tree to closure and reports what it billed against that same
-    * estimate. Unlike `runEstimate`, this executes for real - claims issues, runs agents, publishes PRs - via the
-    * fully wired, fully logged `Wiring.businessLogic[IO].recursiveArrows`, so the traversal it measures is the exact
-    * one a plain (non-`--recursive`) run would take for this task.
+    * estimate. Unlike `runEstimate`, this executes for real - claims issues, runs agents, publishes PRs - via the fully
+    * wired, fully logged `Wiring.businessLogic[IO].recursiveArrows`, so the traversal it measures is the exact one a
+    * plain (non-`--recursive`) run would take for this task.
     */
   private def runPredictAndRun(command: Cli.PredictAndRunCommand): IO[ExitCode] =
     val root = os.pwd
     for
-      context <- Impl.resolveContext[IO].run(AppInput(root, Some(command.task), Recursive(true), ParallelExecution(false)))
+      context <- Impl
+        .resolveContext[IO]
+        .run(AppInput(root, Some(command.task), Recursive(true), ParallelExecution(false)))
       rawIssues <- GitHub.fetchIssues[IO](root)
       issues <- rawIssues.traverse(Impl.effectiveIssue[IO](root, _))
       target = issues.find(_.number === command.task)

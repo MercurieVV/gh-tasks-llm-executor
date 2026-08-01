@@ -27,9 +27,8 @@ object Cli:
 
   /** `estimate --task=N` — prices a plan before running it.
     *
-    * Prices are flags rather than a built-in table: a wrong hardcoded price
-    * would still print a confident dollar figure. The rendered report repeats
-    * the prices it used.
+    * Prices are flags rather than a built-in table: a wrong hardcoded price would still print a confident dollar
+    * figure. The rendered report repeats the prices it used.
     */
   final case class EstimateCommand(
       task: TaskNumber,
@@ -70,8 +69,8 @@ object Cli:
         }
       case _ => None
 
-  /** `predict-and-run --task=N` — same options as `estimate`, but actually runs the task's dependency tree to
-    * closure afterward and reports the same cost model's estimate against what the run actually billed. See
+  /** `predict-and-run --task=N` — same options as `estimate`, but actually runs the task's dependency tree to closure
+    * afterward and reports the same cost model's estimate against what the run actually billed. See
     * `PredictedVsActualExecution`: unlike `estimate`, this is not read-only.
     */
   final case class PredictAndRunCommand(

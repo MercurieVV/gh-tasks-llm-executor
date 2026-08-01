@@ -88,8 +88,8 @@ class TaskGraphSuite extends CatsEffectSuite:
   test("discovery is only asked once per node on a path"):
     Ref[IO].of(List.empty[Int]).flatMap { asked =>
       val edges = Map(1 -> List(2), 2 -> List(1))
-      val recording: TaskNode => IO[List[TaskNode]] = task =>
-        asked.update(_ :+ task.issue.number.value) *> pendingFrom(edges)(task)
+      val recording: TaskNode => IO[List[TaskNode]] =
+        task => asked.update(_ :+ task.issue.number.value) *> pendingFrom(edges)(task)
       TaskGraph
         .unfold[IO](recording)(TaskGraph.seed(node(1)))
         .flatMap(_ => asked.get)

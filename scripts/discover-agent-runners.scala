@@ -311,8 +311,7 @@ def tool(
   val geminiTools =
     geminiModels.zipWithIndex.map { case (model, index) =>
       val strengths =
-        if model.contains("pro") then
-          List("complex-reasoning", "scala-code", "plan", "source-of-truth", "implement")
+        if model.contains("pro") then List("complex-reasoning", "scala-code", "plan", "source-of-truth", "implement")
         else List("scala-code", "focused-fixes", "implement", "test")
       val price = modelPrices.get(priceKey("gemini", model))
       tool(

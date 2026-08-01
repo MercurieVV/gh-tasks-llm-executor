@@ -42,10 +42,9 @@ class RetryOnTransientSuite extends CatsEffectSuite:
     }
 
   test("a non-transient failure is returned on the first attempt, unretried"):
-    attemptsOf(List(result(1, "! [rejected] non-fast-forward"), result(0, ""))).flatMap {
-      case (remaining, attempt) =>
-        IssueClaim
-          .retryOnTransient[IO](_ => IO.unit)("claiming", attempt)
-          .flatMap(res => remaining.get.map(left => (res.exitCode, left.size)))
-          .map(assertEquals(_, (1, 1)))
+    attemptsOf(List(result(1, "! [rejected] non-fast-forward"), result(0, ""))).flatMap { case (remaining, attempt) =>
+      IssueClaim
+        .retryOnTransient[IO](_ => IO.unit)("claiming", attempt)
+        .flatMap(res => remaining.get.map(left => (res.exitCode, left.size)))
+        .map(assertEquals(_, (1, 1)))
     }

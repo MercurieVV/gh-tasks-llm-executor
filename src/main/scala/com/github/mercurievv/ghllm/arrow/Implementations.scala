@@ -380,8 +380,8 @@ object Impl:
       yield summary
     }
 
-  /** Delegates to `VerificationResult`'s classifier rather than re-matching on the exception, so the ladder's
-    * "don't escalate this" and this arrow's "don't re-select this" can never drift apart.
+  /** Delegates to `VerificationResult`'s classifier rather than re-matching on the exception, so the ladder's "don't
+    * escalate this" and this arrow's "don't re-select this" can never drift apart.
     */
   def isPolicyRejection(error: Throwable): Boolean =
     VerificationResult.fromThrowable(error).isPolicyRejection
@@ -1166,10 +1166,10 @@ object Impl:
 
   /** Commits that were already on the branch when the agent was dispatched are not this run's work.
     *
-    * A run that ends with an unmoved HEAD and a clean worktree delivered nothing, whatever the branch is ahead of. Until
-    * 2026-08-01 those commits still counted as publishable, so a task whose agent reported itself blocked opened a pull
-    * request over pre-existing commits, merged it, and closed its issue green. `None` (a resumed run, where no sample
-    * was taken) never triggers this: an unmeasured run is not an empty one.
+    * A run that ends with an unmoved HEAD and a clean worktree delivered nothing, whatever the branch is ahead of.
+    * Until 2026-08-01 those commits still counted as publishable, so a task whose agent reported itself blocked opened
+    * a pull request over pre-existing commits, merged it, and closed its issue green. `None` (a resumed run, where no
+    * sample was taken) never triggers this: an unmeasured run is not an empty one.
     */
   def advancedHead(task: ExecutedTask, current: Option[String]): Boolean =
     task.headBeforeRun.forall(before => !current.contains(before))
@@ -1216,9 +1216,7 @@ object Impl:
 
   def classifyAgentResultForPublication[F[_]: Sync]: -->[F, ExecutedTask, Either[ChangedTask, UnchangedTask]] =
     Kleisli { task =>
-      deliveredSomething[F](task).map(delivered =>
-        Either.cond(!delivered, UnchangedTask(task), ChangedTask(task))
-      )
+      deliveredSomething[F](task).map(delivered => Either.cond(!delivered, UnchangedTask(task), ChangedTask(task)))
     }
 
   def toPublishRequestOfChanged[F[_]: Sync]: -->[F, ChangedTask, PublishRequest] =

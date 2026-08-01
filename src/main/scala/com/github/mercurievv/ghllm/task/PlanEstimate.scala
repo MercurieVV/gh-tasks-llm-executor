@@ -11,12 +11,11 @@ import com.github.mercurievv.ghllm.cli.RunF
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
 
-/** Prices a real plan: discover the dependency tree, retag it to cost
-  * identities, fold it with measured coefficients, and print the annotation.
+/** Prices a real plan: discover the dependency tree, retag it to cost identities, fold it with measured coefficients,
+  * and print the annotation.
   *
-  * This is the whole point of the recursion-scheme apparatus being reachable.
-  * Which scheme produces the annotation is a one-line change here — `cata` today,
-  * `para` if a node's cost ever needs its own children's shape, `histo` if it
+  * This is the whole point of the recursion-scheme apparatus being reachable. Which scheme produces the annotation is a
+  * one-line change here — `cata` today, `para` if a node's cost ever needs its own children's shape, `histo` if it
   * needs their history — and nothing about discovery or orchestration moves.
   */
 object PlanEstimate:

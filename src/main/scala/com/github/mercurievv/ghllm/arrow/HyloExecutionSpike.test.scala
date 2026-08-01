@@ -12,9 +12,9 @@ import cats.effect.Ref
 import cats.syntax.all.*
 import munit.CatsEffectSuite
 
-/** Same two cases as `RecursiveArrowsSuite` in `BusinessLogic.test.scala`, run against `HyloExecutionSpike` instead
-  * of `RecursiveArrows.executeRecursive`, to prove the `hyloM`-based traversal is behaviourally equivalent before
-  * anything real switches over.
+/** Same two cases as `RecursiveArrowsSuite` in `BusinessLogic.test.scala`, run against `HyloExecutionSpike` instead of
+  * `RecursiveArrows.executeRecursive`, to prove the `hyloM`-based traversal is behaviourally equivalent before anything
+  * real switches over.
   */
 class HyloExecutionSpikeSuite extends CatsEffectSuite:
   private val context = RunContext(os.pwd, AgentInventory(Nil), None)
@@ -70,8 +70,8 @@ class HyloExecutionSpikeSuite extends CatsEffectSuite:
 /** Same traversal, but driven by the real `Impl.checkIfCompleted`/`Impl.collectPendingDependencies` - real dependency
   * text parsing (`GitHub.getDependencies`), real split/open-children detection (`GitHub.parentIds`), real cache-peer
   * TTL grouping - against `RunEnv`'s in-memory issue map instead of a hand-rolled `DependencyPlan` double. Only
-  * `claimAndRun` stays a test double: exercising the real one means a worktree, a git repo and an agent process,
-  * which `RecursiveArrowsSuite` itself never does either.
+  * `claimAndRun` stays a test double: exercising the real one means a worktree, a git repo and an agent process, which
+  * `RecursiveArrowsSuite` itself never does either.
   */
 class HyloExecutionSpikeIntegrationSuite extends CatsEffectSuite:
   private val context = RunContext(os.pwd, AgentInventory(Nil), None)
@@ -145,12 +145,12 @@ class HyloExecutionSpikeIntegrationSuite extends CatsEffectSuite:
       // The child ran (it has no dependencies/children of its own), the parent did not.
       assertEquals(order, List(child.number))
 
-/** `HyloExecutionSpike.executeRecursive` needs only `Monad[F]`, not `Sync[F]` - checked by instantiating it at
-  * `F = OptionT[IO, *]`, the same effect `Replayability.ReplayFlow` wraps a `Kleisli` around
-  * (`ReplayFlow[F] = Kleisli[[X] =>> OptionT[F, X], A, B]`, `Replayability.scala:39`). `replayFlowMonoid.combine`
-  * (`Replayability.scala:53`) is "try the replay cache (`OptionT.some`), else fall back to the real arrow
-  * (`OptionT.liftF`)" per field; this reproduces exactly that shape for `claimAndRun` and confirms the traversal
-  * itself is indifferent to which monad transformer sits under it.
+/** `HyloExecutionSpike.executeRecursive` needs only `Monad[F]`, not `Sync[F]` - checked by instantiating it at `F =
+  * OptionT[IO, *]`, the same effect `Replayability.ReplayFlow` wraps a `Kleisli` around (`ReplayFlow[F] = Kleisli[[X]
+  * \=>> OptionT[F, X], A, B]`, `Replayability.scala:39`). `replayFlowMonoid.combine` (`Replayability.scala:53`) is "try
+  * the replay cache (`OptionT.some`), else fall back to the real arrow (`OptionT.liftF`)" per field; this reproduces
+  * exactly that shape for `claimAndRun` and confirms the traversal itself is indifferent to which monad transformer
+  * sits under it.
   */
 class HyloExecutionSpikeReplayLayerSuite extends CatsEffectSuite:
   private val context = RunContext(os.pwd, AgentInventory(Nil), None)
@@ -184,8 +184,7 @@ class HyloExecutionSpikeReplayLayerSuite extends CatsEffectSuite:
           IO.pure(DependencyPlan(node, pending, hasOpenChildren = false))
         },
         // Only the dependency has a cache entry; the root always falls through to realClaimAndRun.
-        claimAndRun =
-          replayOrReal(Map(TaskNode(context, dependency) -> cachedDependencySummary), realClaimAndRun)
+        claimAndRun = replayOrReal(Map(TaskNode(context, dependency) -> cachedDependencySummary), realClaimAndRun)
       )
 
       run(TaskNode(context, root)).value.flatMap { result =>

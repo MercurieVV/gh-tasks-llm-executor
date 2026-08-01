@@ -85,8 +85,8 @@ class TaskTreeSuite extends ScalaCheckSuite:
       case NodeRef.Branch("root") => rootProfile
       // Two of the three leaves route to the root's runner; the third does not,
       // so it re-sends the prefix and cannot be counted as amortising it.
-      case NodeRef.Leaf(Some(3))  => NodeProfile(prefix("other"), "test", zeroCoefficients)
-      case _                      => NodeProfile(shared, "implement", zeroCoefficients)
+      case NodeRef.Leaf(Some(3)) => NodeProfile(prefix("other"), "test", zeroCoefficients)
+      case _                     => NodeProfile(shared, "implement", zeroCoefficients)
 
     val cost = estimate(root, model, profileFor)
     assertEqualsDouble(cost.ownUsd, 1.0, 1e-12)
