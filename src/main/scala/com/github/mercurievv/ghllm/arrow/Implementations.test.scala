@@ -46,6 +46,45 @@ class ScalaSemanticMandateSuite extends munit.FunSuite:
     // ordering is what makes it cacheable (T19). See PromptSegmentOrderSuite.
     assert(prompt.indexOf(Impl.ScalaSemanticMandate) < prompt.indexOf(body))
 
+  test("a runner with no MCP wiring does not get the mandate"):
+    // `TaskRunner.command` passes --mcp-config to claude and codex only, so aider,
+    // gemini and agy have none of the `mcp__scala-semantic__*` tools the mandate
+    // names - while the same block forbids cat/rg/sed/grep on `.scala` files. That
+    // leaves such a runner with no sanctioned way to read Scala source at all.
+    // Observed on 2026-08-01 on task #130: aider reported seven fixtures created,
+    // compiled and passing, and changed nothing.
+    val scalaTask = Issue(
+      TaskNumber(130),
+      IssueTitle("Add golden fixtures"),
+      IssueBody("Add fixtures under scalafix/testInput/src/golden/*.scala"),
+      State("open")
+    )
+    List(
+      TaskRunner(AgentBinary("aider"), Some("deepseek/deepseek-reasoner"), None, None),
+      TaskRunner(AgentBinary("gemini"), Some("gemini-3-pro"), None, None),
+      TaskRunner(AgentBinary("agy"), None, None, None)
+    ).foreach { unwired =>
+      val prompt = Impl.taskPrompt(scalaTask, unwired, None, None).value
+      assert(!prompt.contains(Impl.ScalaSemanticMandateHeader), s"${unwired.display}: $prompt")
+      assert(!prompt.contains("Never use `cat`"), s"${unwired.display}: $prompt")
+    }
+
+  test("an MCP-wired runner still gets it"):
+    List(
+      TaskRunner(AgentBinary("claude"), Some("haiku"), None, None),
+      TaskRunner(AgentBinary("codex"), Some("gpt-5"), Some("low"), None)
+    ).foreach { wired =>
+      val prompt = Impl
+        .taskPrompt(
+          Issue(TaskNumber(130), IssueTitle("Fix the router"), IssueBody("Change BusinessLogicRetry.scala"), State("open")),
+          wired,
+          None,
+          None
+        )
+        .value
+      assert(prompt.contains(Impl.ScalaSemanticMandate), s"${wired.display}: $prompt")
+    }
+
 class WorktreeHandoffSuite extends munit.FunSuite:
   private val runner = TaskRunner(AgentBinary("claude"), Some("opus"), None, None)
   private val worktree = os.pwd / ".worktrees" / "42-fix-the-router"

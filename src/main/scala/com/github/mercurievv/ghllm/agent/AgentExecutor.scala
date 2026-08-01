@@ -228,7 +228,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
             model = runner.model,
             scope = metricsScope.wire,
             phase = phase,
-            runner = Some(runner.display)
+            runner = Some(runner.metricsIdentity),
+            runnerVersion = runner.version
           )
         )
     val metricsSource =
@@ -335,7 +336,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     val scalaTextToolCalls =
       TokenMetrics.recordScalaTextToolCalls(
         transcript,
-        runner.display,
+        runner.metricsIdentity,
         phase.getOrElse("unknown"),
         metricsBackend
       )
@@ -362,17 +363,29 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     timedOut match
       case Some(reason) => throw RuntimeException(reason)
       case None         =>
-        // Raised only after the metrics above are recorded: the over-budget turn
-        // count is exactly the sample the escalation ladder needs to learn from.
+        // Reported, not raised. The count only arrives in the terminal JSON, so by
+        // the time it can be read the turns are already bought and the work is
+        // already on disk; throwing here discarded that work BEFORE
+        // `runProjectValidation` had judged it, on a cost signal rather than a
+        // correctness one, and re-bought the same leaf on a pricier runner.
+        // Observed on 2026-08-01: claude haiku reported 88 turns against the leaf
+        // cap of 25 on #130 and ten minutes of finished edits were reset away
+        // unverified.
+        //
+        // Nothing is lost by not raising. The retried unit is
+        // `runAgent >>> rejectEmptyRun >>> runProjectValidation`, so a run that
+        // burned its turns without finishing still fails — on the verifier, which
+        // escalates for both `Red` and `Failed` alike, making the TurnCapExceeded
+        // verdict indistinguishable in routing from the one validation produces.
+        // The turn count keeps its real job: it is on the recorded event, where it
+        // raises this runner's measured `meanUsage` and lets the ladder stop
+        // choosing it on its own evidence.
         val cap = metricsScope match
           case AgentExecutor.MetricsScope.Repair | AgentExecutor.MetricsScope.MergeRepair =>
             TurnCap.loadRepair(metricsRootResolved)
           case _ => TurnCap.load(metricsRootResolved)
-        TurnCap.exceeded(reportedOutput.turnCount, cap) match
-          case Some(breach) =>
-            TaskLogger.unsafeLlm(breach.getMessage)
-            throw breach
-          case None => AgentResult(process.exitValue(), reportedOutput.output)
+        TurnCap.exceeded(reportedOutput.turnCount, cap).foreach(breach => TaskLogger.unsafeLlm(breach.getMessage))
+        AgentResult(process.exitValue(), reportedOutput.output)
 
   private def tokenUsageSource(
       runner: TaskRunner,
@@ -419,7 +432,8 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
             model = runner.model,
             scope = metricsScope.wire,
             phase = phase,
-            runner = Some(runner.display),
+            runner = Some(runner.metricsIdentity),
+            runnerVersion = runner.version,
             turnCount = turnCount
           )
           if deferMetricsOutcome then
@@ -613,7 +627,7 @@ object AgentExecutor:
       backend: TokenMetrics.TokenMetricsBackend,
       event: TokenMetrics.TokenMetricsEvent
   ): Unit =
-    val key = MetricsKey(root, taskNumber, runner.display, scope)
+    val key = MetricsKey(root, taskNumber, runner.metricsIdentity, scope)
     pendingTokenMetrics.updateAndGet { current =>
       current.updatedWith(key) {
         case Some(existing) =>
@@ -651,7 +665,7 @@ object AgentExecutor:
       outcome: String
   ): F[Unit] =
     Sync[F].blocking {
-      val key = MetricsKey(root, taskNumber, runner.display, scope)
+      val key = MetricsKey(root, taskNumber, runner.metricsIdentity, scope)
       val removed = pendingTokenMetrics.getAndUpdate(_ - key).get(key)
       removed.foreach(pending =>
         pending.backend.record(

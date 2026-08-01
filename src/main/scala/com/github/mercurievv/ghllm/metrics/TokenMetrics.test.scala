@@ -396,6 +396,45 @@ class TokenMetricsSuite extends munit.FunSuite:
     val result = backend.successRate(phase, runner, minSample = 5)
     assert(result.isDefined)
     assertEquals(result.get, 2.0 / 5.0, 0.01)
+
+  test("unverified runs are excluded from successRate but still counted by meanUsage"):
+    // A target repository with no validation hook verifies nothing, and recording
+    // those runs as "green" made every runner look perfect there - the sample was
+    // fabricated by the absence of a checker, not earned. They are not failures
+    // either, so they are excluded from the ratio entirely rather than counted red.
+    val dir = os.temp.dir()
+    val backend = TokenMetrics.JsonlTokenMetricsBackend(dir / "metrics.jsonl")
+
+    val phase = "implement"
+    val runner = "agent: aider, model: deepseek/deepseek-reasoner"
+
+    def record(i: Int, outcome: String): Unit =
+      backend.record(
+        TokenMetrics.TokenMetricsEvent(
+          timestampMillis = 1000 + i,
+          vendor = TokenUsage.Vendor.Aider,
+          usage = TokenUsage.TokenSnapshot(input = 100, output = 10, cacheRead = 0, cacheWrite = 0, total = 110),
+          taskNumber = Some(TaskNumber(i)),
+          model = None,
+          scope = "agent-run",
+          phase = Some(phase),
+          runner = Some(runner),
+          outcome = Some(outcome)
+        )
+      )
+
+    for i <- 1 to 2 do record(i, "green")
+    for i <- 3 to 4 do record(i, "red")
+    for i <- 5 to 10 do record(i, TokenMetrics.UnverifiedOutcome)
+
+    // 2 green of the 4 that were actually judged - not 8 of 10.
+    val rate = backend.successRate(phase, runner, minSample = 4)
+    assert(rate.isDefined)
+    assertEquals(rate.get, 0.5, 0.01)
+
+    // The tokens were still spent, so the cost mean must see all ten.
+    val usage = backend.meanUsage(phase, runner, minSample = 10)
+    assertEquals(usage.map(_.total), Some(110L))
   test("jsonl round-trips measurement fields"):
     val dir = os.temp.dir()
     val path = dir / "roundtrip.jsonl"

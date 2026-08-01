@@ -48,8 +48,10 @@ object TurnCap:
   /** The breach, if the reported turn count exceeded `cap`.
     *
     * Detection is after the fact by necessity: `num_turns` only arrives in the runner's terminal JSON, so there is no
-    * mid-flight counter to trip. It still pays off — the leaf is re-run on a stronger runner instead of the same weak
-    * one grinding through another repair round at the same price.
+    * mid-flight counter to trip. Which is why, since 2026-08-01, a breach is reported and recorded but no longer
+    * raised: by the time it is knowable the turns are bought and the edits are on disk, so failing on it discarded
+    * finished work before the verifier had looked at it. See `AgentExecutor.runMonitored`. A run that burned its turns
+    * without finishing still fails, on `runProjectValidation` — which is the check that can tell the two apart.
     */
   def exceeded(turnCount: Option[Int], cap: Int): Option[TurnCapExceeded] =
     turnCount.filter(_ > cap).map(TurnCapExceeded(_, cap))

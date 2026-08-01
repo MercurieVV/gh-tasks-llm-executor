@@ -117,3 +117,29 @@ class TaskRunnerCommandSuite extends munit.FunSuite:
         .command(prompt, contextFiles = Seq(".gitignore"))
 
     assert(!command.contains(".gitignore"))
+
+  test("metricsIdentity is stable across a CLI upgrade"):
+    // `display` carries the version, and keying measurements on it partitioned
+    // every series by installed CLI build. Since minSample is 20 and the claude/
+    // codex CLIs ship far more often than 20 runs of one phase accumulate,
+    // successRate and meanUsage returned None forever and selectRunnerFor never
+    // left the Priority.score fallback.
+    val before = TaskRunner(AgentBinary("claude"), Some("haiku"), None, Some("2.1.220 (Claude Code)"))
+    val after = before.copy(version = Some("2.1.221 (Claude Code)"))
+
+    assertEquals(before.metricsIdentity, after.metricsIdentity)
+    assertNotEquals(before.display, after.display)
+
+  test("metricsIdentity still separates model and effort"):
+    val low = TaskRunner(AgentBinary("codex"), Some("gpt-5"), Some("low"), None)
+    val high = low.copy(effort = Some("high"))
+    val other = low.copy(model = Some("gpt-5-codex"))
+
+    assertNotEquals(low.metricsIdentity, high.metricsIdentity)
+    assertNotEquals(low.metricsIdentity, other.metricsIdentity)
+
+  test("only MCP-wired agents are asked to obey the ScalaSemantic mandate"):
+    assert(TaskRunner(AgentBinary("claude"), Some("opus"), None, None).supportsScalaSemanticMcp)
+    assert(TaskRunner(AgentBinary("codex"), Some("gpt-5"), None, None).supportsScalaSemanticMcp)
+    assert(!TaskRunner(AgentBinary("aider"), Some("deepseek/deepseek-reasoner"), None, None).supportsScalaSemanticMcp)
+    assert(!TaskRunner(AgentBinary("gemini"), Some("gemini-3-pro"), None, None).supportsScalaSemanticMcp)

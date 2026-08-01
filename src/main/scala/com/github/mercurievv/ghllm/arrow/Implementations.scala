@@ -1143,14 +1143,22 @@ object Impl:
       // only attaches the outcome. Keying this on the phase instead dropped
       // every event whose phase was not literally `implement`.
       git[F].runProjectValidation.run(task.run.worktreePath).attempt.flatMap {
-        case Right(_) =>
+        case Right(verified) =>
+          // "green" is a claim about the work, and only a hook that ran can make
+          // it. A repository shipping no hook produces `false` here, and calling
+          // that green handed `successRate` a success nobody checked - on such a
+          // repository EVERY run scored green, so the cheapest runner's measured
+          // rate converged on 1.0 and the ladder learned to stay on it no matter
+          // what it produced. `unverified` is excluded from `successRate` (it is
+          // not counted as a failure either - the runner did nothing wrong) while
+          // still carrying the usage sample `meanUsage` reads.
           AgentExecutor
             .completeTokenMetrics[F](
               task.run.context.root,
               task.run.task.number,
               task.run.runner,
               AgentExecutor.MetricsScope.Implement,
-              "green"
+              if verified then "green" else TokenMetrics.UnverifiedOutcome
             )
             .as(task)
         case Left(error) =>
@@ -1439,7 +1447,12 @@ Replay rules:
     // Same predicate as the SemanticDB refresh gate, deliberately: the two
     // Stage 3 features must agree on what "a Scala task" is, and body-only
     // matching missed tasks that name their files in the title.
-    val scalaMandate = if taskTouchesScala(task) then s"\n\n$ScalaSemanticMandate" else ""
+    // Gated on the RUNNER as well as the task: the mandate names `mcp__scala-semantic__*`
+    // tools and simultaneously bans `cat`/`rg`/`sed`/`grep` on `.scala` files, so a runner
+    // with no MCP wiring (aider, gemini, agy) is left with no way to read Scala source at
+    // all. Until 2026-08-01 this gated on `taskTouchesScala` alone.
+    val scalaMandate =
+      if taskTouchesScala(task) && runner.supportsScalaSemanticMcp then s"\n\n$ScalaSemanticMandate" else ""
 
     // The mandate tells the agent to hand `set_workspace_root` an absolute
     // path, so it has to be told which one. Without it the agent opens every

@@ -20,6 +20,18 @@ import java.nio.charset.StandardCharsets
 import scala.util.Try
 
 object TokenMetrics:
+
+  /** Outcome for a run no verifier ever judged — the target repository ships no validation hook.
+    *
+    * Deliberately neither `green` nor `red`: the runner did nothing wrong, so counting it as a failure would punish it,
+    * and counting it as a success is the fabricated green that made `successRate` meaningless on every repository
+    * without a hook. `successRate` ignores it; `meanUsage` still reads its tokens.
+    */
+  val UnverifiedOutcome: String = "unverified"
+
+  /** Outcomes that are a verdict on the work, and so admissible as `successRate` samples. */
+  val VerifiedOutcomes: Set[String] = Set("green", "red", "error")
+
   final case class TokenMetricsEvent(
       timestampMillis: Long,
       vendor: TokenUsage.Vendor,
@@ -31,7 +43,12 @@ object TokenMetrics:
       runner: Option[String] = None,
       turnCount: Option[Int] = None,
       escalated: Boolean = false,
-      outcome: Option[String] = None
+      outcome: Option[String] = None,
+      // Kept as its own dimension rather than folded into `runner`: the runner
+      // key must stay stable across CLI upgrades (see TaskRunner.metricsIdentity),
+      // but a regression that arrives WITH an upgrade is only diagnosable if the
+      // version is still recorded somewhere.
+      runnerVersion: Option[String] = None
   )
 
   final case class TokenMetricsQuery(
@@ -114,7 +131,10 @@ object TokenMetrics:
     // outcome was "green". None when the sample is smaller than `minSample`.
     def successRate(phase: String, runner: String, minSample: Int = 20): Option[Double] =
       val allEvents = this.query(TokenMetricsQuery(limit = None))
-      val relevant = allEvents.filter(e => e.phase.contains(phase) && e.runner.contains(runner) && e.outcome.isDefined)
+      val relevant =
+        allEvents.filter(e =>
+          e.phase.contains(phase) && e.runner.contains(runner) && e.outcome.exists(VerifiedOutcomes.contains)
+        )
       val total = relevant.size
       if total < minSample then None
       else
@@ -256,7 +276,8 @@ object TokenMetrics:
         event.runner.map(r => Attribute("runner", r)),
         event.turnCount.map(tc => Attribute("turn_count", tc.toLong)),
         Some(Attribute("escalated", event.escalated)),
-        event.outcome.map(o => Attribute("outcome", o))
+        event.outcome.map(o => Attribute("outcome", o)),
+        event.runnerVersion.map(v => Attribute("runner_version", v))
       ).flatten
 
     private def query(query: TokenMetricsQuery, baseUrl: String): List[TokenMetricsEvent] =
@@ -283,7 +304,8 @@ object TokenMetrics:
         runner: Option[String],
         turnCount: Option[Int],
         escalated: Boolean,
-        outcome: Option[String]
+        outcome: Option[String],
+        runnerVersion: Option[String]
     )
 
     private final case class ExportPoint(key: ExportPointKey, event: TokenMetricsEvent)
@@ -326,6 +348,7 @@ object TokenMetrics:
             val turnCount = metric.get("turn_count").flatMap(readLong).map(_.toInt)
             val escalated = metric.get("escalated").flatMap(_.strOpt).contains("true")
             val outcome = metric.get("outcome").flatMap(_.strOpt)
+            val runnerVersion = metric.get("runner_version").flatMap(_.strOpt)
             val key = ExportPointKey(
               timestamp,
               vendor,
@@ -336,7 +359,8 @@ object TokenMetrics:
               runner,
               turnCount,
               escalated,
-              outcome
+              outcome,
+              runnerVersion
             )
             ExportPoint(
               key,
@@ -351,7 +375,8 @@ object TokenMetrics:
                 runner = runner,
                 turnCount = turnCount,
                 escalated = escalated,
-                outcome = outcome
+                outcome = outcome,
+                runnerVersion = runnerVersion
               )
             )
         }
@@ -562,6 +587,7 @@ object TokenMetrics:
       "turnCount" -> event.turnCount.map(count => ujson.Num(count.toDouble)).getOrElse(ujson.Null),
       "escalated" -> ujson.Bool(event.escalated),
       "outcome" -> event.outcome.map(ujson.Str(_)).getOrElse(ujson.Null),
+      "runnerVersion" -> event.runnerVersion.map(ujson.Str(_)).getOrElse(ujson.Null),
       "usage" -> ujson.Obj(
         "input" -> ujson.Num(event.usage.input.toDouble),
         "output" -> ujson.Num(event.usage.output.toDouble),
@@ -613,7 +639,8 @@ object TokenMetrics:
       runner = obj.get("runner").flatMap(_.strOpt),
       turnCount = obj.get("turnCount").flatMap(readLong).map(_.toInt),
       escalated = obj.get("escalated").flatMap(_.boolOpt).getOrElse(false),
-      outcome = obj.get("outcome").flatMap(_.strOpt)
+      outcome = obj.get("outcome").flatMap(_.strOpt),
+      runnerVersion = obj.get("runnerVersion").flatMap(_.strOpt)
     )
 
   private def readSnapshot(json: ujson.Value): Option[TokenUsage.TokenSnapshot] =

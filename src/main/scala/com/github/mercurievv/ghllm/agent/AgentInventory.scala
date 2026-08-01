@@ -246,15 +246,15 @@ final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights
           // Measured volumes on BOTH sides or neither: mixing a measured cheap
           // runner with an assumed strong one would compare a real cost against
           // a placeholder and systematically favour whichever side is measured.
-          candidateUsage = backend.meanUsage(phaseName, candidate.runner.display)
-          strongerUsage = backend.meanUsage(phaseName, nextStronger.runner.display)
+          candidateUsage = backend.meanUsage(phaseName, candidate.runner.metricsIdentity)
+          strongerUsage = backend.meanUsage(phaseName, nextStronger.runner.metricsIdentity)
           bothMeasured = candidateUsage.isDefined && strongerUsage.isDefined
           breakEvenRate <- candidate.breakEvenRateAgainst(
             nextStronger,
             if bothMeasured then candidateUsage else None,
             if bothMeasured then strongerUsage else None
           )
-          observedSuccessRate <- backend.successRate(phaseName, candidate.runner.display)
+          observedSuccessRate <- backend.successRate(phaseName, candidate.runner.metricsIdentity)
         yield
           if observedSuccessRate > breakEvenRate then candidate
           else nextStronger
@@ -277,7 +277,7 @@ final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights
       phase: String,
       backend: TokenMetrics.TokenMetricsBackend
   ): Option[AgentTool] =
-    val measured = availableImplementors.map(tool => tool -> backend.meanUsage(phase, tool.runner.display))
+    val measured = availableImplementors.map(tool => tool -> backend.meanUsage(phase, tool.runner.metricsIdentity))
     val allMeasured = measured.nonEmpty && measured.forall(_._2.isDefined)
     measured
       .sortBy { case (tool, usage) =>
