@@ -523,3 +523,69 @@ class AgentInventorySuite extends CatsEffectSuite:
         minSample: Int
     ): Option[TokenUsage.TokenSnapshot] =
       usage.get((phase, runner))
+
+/** The ladder must go up. `nextStrongerImplementor` decides both where an escalation lands and the `s` in the
+  * break-even predicate `p > c/s`, so a "stronger" runner that is cheaper than the current one does not merely misroute
+  * a retry — it inverts the test that decides whether to try the cheap runner at all.
+  */
+class NextStrongerImplementorSuite extends munit.FunSuite:
+  private def tool(
+      id: String,
+      agent: String,
+      model: String,
+      effort: Option[String],
+      inPrice: Option[Double],
+      outPrice: Option[Double],
+      strengths: List[String] = Nil
+  ) =
+    AgentTool(
+      id = AgentToolId(id),
+      agent = Agent(agent),
+      model = Some(model),
+      effort = effort,
+      version = None,
+      roles = List("implementor"),
+      jobTypes = Nil,
+      strengths = strengths,
+      available = Available(true),
+      inputUsdPerMTok = inPrice,
+      outputUsdPerMTok = outPrice
+    )
+
+  // List prices close enough to the real ones that the ordering under test is
+  // the ordering the executor actually sees: haiku is cheaper than gpt-5-codex
+  // at low effort, which is exactly why escalating from codex to haiku is a
+  // step DOWN the ladder rather than up it.
+  private val aider = tool("aider-deepseek", "aider", "deepseek/deepseek-reasoner", None, Some(0.28), Some(0.42))
+  private val haiku = tool("claude-haiku", "claude", "haiku", None, Some(1.0), Some(5.0))
+  private val codexLow = tool("codex-low", "codex", "gpt-5-codex", Some("low"), Some(1.25), Some(10.0))
+  private val opus = tool("claude-opus", "claude", "opus", None, Some(15.0), Some(75.0), List("architecture"))
+
+  private val inventory = AgentInventory(List(aider, codexLow, haiku, opus))
+
+  test("escalation goes to the cheapest implementor that costs more, not to the worst-ranked one"):
+    // The exact escalation observed on #130: aider must not jump past the rungs
+    // above it, and must never land on a runner cheaper than where it started.
+    assertEquals(inventory.nextStrongerImplementor(aider.runner), Some(haiku.runner))
+
+  test("a mid-ladder runner escalates upward, never back down to a cheaper vendor"):
+    val next = inventory.nextStrongerImplementor(codexLow.runner)
+    assertEquals(next, Some(opus.runner))
+    // haiku is the tool the old worst-priority rule picked here; it is cheaper.
+    assert(next.exists(_ != haiku.runner))
+
+  test("same-agent rungs count: a different effort on the same model is a real escalation"):
+    val codexHigh = tool("codex-high", "codex", "gpt-5-codex", Some("high"), Some(1.25), Some(10.0))
+    val laddered = AgentInventory(List(aider, codexLow, codexHigh, opus))
+    assertEquals(laddered.nextStrongerImplementor(codexLow.runner), Some(codexHigh.runner))
+
+  test("the most expensive implementor is the top of the ladder"):
+    assertEquals(inventory.nextStrongerImplementor(opus.runner), None)
+
+  test("an unpriced runner escalates to the best-ranked other implementor"):
+    val unpriced = tool("mystery", "mystery", "m", None, None, None)
+    val withUnpriced = AgentInventory(List(unpriced, opus))
+    assertEquals(withUnpriced.nextStrongerImplementor(unpriced.runner), Some(opus.runner))
+
+  test("a runner outside the inventory has no rung above it"):
+    assertEquals(inventory.nextStrongerImplementor(TaskRunner(AgentBinary("nope"), None, None, None)), None)

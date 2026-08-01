@@ -286,17 +286,48 @@ final case class AgentInventory(tools: List[AgentTool], weights: PriorityWeights
       .headOption
       .map(_._1)
 
+  /** The next rung up the ladder: the cheapest implementor that costs strictly more than this one.
+    *
+    * This used to take the *worst*-scoring tool of a different agent — `sortBy(_.priority).lastOption` — which reads as
+    * "strongest" only if priority meant capability. It does not: lower is better, and it blends fit, cost, budget
+    * pressure and a vendor penalty, so the last element is the least preferred tool in the inventory, not the most
+    * capable. With `unPreferredVendor = "claude"` that penalty alone was usually enough to decide the escalation, and
+    * on 2026-08-01 an aider leaf escalated to `gpt-5-codex low` and then to `claude haiku` — down the ladder, not up.
+    *
+    * Cost is the ladder's own unit: `breakEvenRateAgainst` reads this same method for the `s` in `p > c/s`, so a
+    * "stronger" runner that is cheaper than the current one does not just misroute an escalation, it inverts the
+    * predicate that decides whether to try the cheap runner at all.
+    *
+    * Same-agent rungs are deliberately allowed — a different effort level on the same model is a real escalation, and
+    * excluding it was what forced the jump to an unrelated vendor. Repair loops that specifically need a *different*
+    * agent use `alternateImplementor`.
+    *
+    * Priced inventory ends the ladder honestly: at the most expensive implementor there is no next rung and this
+    * returns `None`, which `routeRunnerFallback` reports as "no stronger runner". Only an unpriced current tool falls
+    * back to "the next one in best-first order", since nothing can be compared on cost.
+    */
   def nextStrongerImplementor(runner: TaskRunner): Option[TaskRunner] =
     val implementors = availableImplementors
     implementors
       .find(_.matches(runner))
-      .flatMap(current =>
-        implementors
-          .filter(_.agent != current.agent)
-          .sortBy(_.priority)
-          .lastOption
-          .map(_.runner)
-      )
+      .flatMap { current =>
+        current.cost match
+          case Some(currentCost) =>
+            implementors
+              .filter(_.id != current.id)
+              .flatMap(tool => tool.cost.map(cost => (tool, cost)))
+              .filter { case (_, cost) => cost > currentCost }
+              .minByOption { case (_, cost) => cost }
+              .map { case (tool, _) => tool.runner }
+          case None =>
+            // Nothing to compare on, so fall back to the inventory's own
+            // preference order rather than to list position: the best-ranked
+            // implementor that is not the one which just failed.
+            implementors
+              .filter(_.id != current.id)
+              .headOption
+              .map(_.runner)
+      }
 
   def alternateImplementor(
       runner: TaskRunner,
