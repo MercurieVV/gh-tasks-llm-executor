@@ -1,5 +1,3 @@
-//> using test.dependency org.scalameta::munit-scalacheck:1.3.0
-
 package com.github.mercurievv.ghllm
 
 import com.github.mercurievv.ghllm.TaskTree.*

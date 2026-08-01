@@ -5,6 +5,7 @@ import com.github.mercurievv.ghllm.arrow.Impl
 import com.github.mercurievv.ghllm.cli.Cli
 
 import scala.util.Try
+import cats.syntax.all.*
 
 /** Concrete agent invocation choice, including optional model, effort, and version.
   */
@@ -57,7 +58,7 @@ final case class TaskRunner(
       case "claude" =>
         val mcpConfig = workspaceFile(cwd, os.rel / ".agents" / "mcp_config.json")
         val effectiveAllowedTools =
-          allowedTools ++ mcpConfig.toList.flatMap(_ => ScalaSemanticClaudeTools)
+          allowedTools ++ mcpConfig.toList *> ScalaSemanticClaudeTools
         Seq(agent.value) ++ model.toList.flatMap(value => Seq("--model", value)) ++
           TaskRunner.claudeCacheFlags ++
           mcpConfig.toList.flatMap(path => Seq("--mcp-config", path.toString)) ++

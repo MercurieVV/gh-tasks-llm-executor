@@ -12,6 +12,7 @@ import cats.effect.IO
 import cats.effect.Ref
 import cats.syntax.all.*
 import munit.CatsEffectSuite
+import cats.syntax.all.*
 
 class RepairLoopSuite extends CatsEffectSuite:
   type TestFlow[A, B] = Kleisli[IO, A, B]
@@ -82,7 +83,7 @@ class RepairLoopSuite extends CatsEffectSuite:
         action = Kleisli(_ => attempts.update(_ + 1) *> IO.raiseError(boom)),
         // The state IS the remaining budget: exhausting it gives up.
         routeFailure = Kleisli { case (budget, error) =>
-          IO.pure(if budget > 0 then Right(budget - 1) else Left(error))
+          IO.pure(Either.cond(budget > 0, budget - 1, error))
         },
         raiseFailure = Kleisli(IO.raiseError)
       )

@@ -84,11 +84,8 @@ object IssueClaim:
 
   private val StaleThresholdSeconds = 4 * 60 * 60 // 4 hours
 
-  def hasActiveClaim[F[_]: Sync](
-      root: os.Path,
-      taskNumber: TaskNumber,
-      progress: String => F[Unit]
-  ): F[Boolean] =
+  def hasActiveClaim[F[_]: Sync](progress: String => F[Unit]): Kleisli[F, (os.Path, TaskNumber), Boolean] =
+  Kleisli.apply { case (root, taskNumber) =>
     checkAndReleaseIfStale[F](progress).run((root, taskNumber)).flatMap {
       case true => false.pure[F]
       case false =>
@@ -98,6 +95,7 @@ object IssueClaim:
             .exitCode == 0
         }
     }
+  }
 
   private def checkAndReleaseIfStale[F[_]](progress: String => F[Unit])(using
       F: Sync[F]

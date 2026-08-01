@@ -275,8 +275,10 @@ object TaskLogger:
       ("llm", message, ConsoleClass.Normal)
     }
 
-  def trace[F[_]: Sync](message: String): F[Unit] =
+  def trace[F[_]: Sync]: Kleisli[F, String, Unit] =
+  Kleisli.apply { message =>
     log(("trace", message, ConsoleClass.Trace))
+  }
 
   def unsafeTrace(message: String): Unit =
     write("trace", message, ConsoleClass.Trace)

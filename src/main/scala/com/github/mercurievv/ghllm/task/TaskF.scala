@@ -7,6 +7,7 @@ import cats.syntax.all.*
 import higherkindness.droste.Algebra
 import higherkindness.droste.data.Mu
 import higherkindness.droste.scheme
+import cats.syntax.all.*
 
 /** Pattern functor for a task tree.
   *
@@ -59,7 +60,7 @@ object TaskF:
         case Branch(payload, children) =>
           children.traverse(f).map(Branch(payload, _))
         case leaf @ Leaf(_) =>
-          Applicative[G].pure(leaf)
+          leaf.pure[G]
 
     def foldLeft[A, B](fa: TaskF[P, A], b: B)(f: (B, A) => B): B =
       childrenOf(fa).foldLeft(b)(f)

@@ -8,7 +8,7 @@ import com.github.mercurievv.ghllm.git.*
 import com.github.mercurievv.ghllm.metrics.*
 
 import cats.effect.kernel.Sync
-import cats.syntax.all
+import cats.syntax.all.*
 import cats.syntax.all.*
 
 import scala.concurrent.duration.*
@@ -1471,9 +1471,11 @@ This parent task will not be implemented directly. Run child tasks first; when a
   private final case class PullRequest(number: TaskNumber, state: State)
 
   /** True if `branchName` exists on origin. */
-  def remoteBranchExists[F[_]: Sync](cwd: os.Path, branchName: BranchName): F[Boolean] =
+  def remoteBranchExists[F[_]: Sync]: Kleisli[F, (os.Path, BranchName), Boolean] =
+  Kleisli.apply { case (cwd, branchName) =>
     callOutputUnchecked(cwd, "git", "ls-remote", "--heads", "origin", branchName.value)
       .map(_.trim.nonEmpty)
+  }
 
   /** Creates a subtask's integration base on origin if nothing has created it yet.
     *
@@ -1492,7 +1494,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
     Kleisli.apply {
       case (_, None) => F.unit
       case (cwd, Some(base)) =>
-        remoteBranchExists(cwd, base).flatMap {
+        remoteBranchExists((cwd, base)).flatMap {
           case true => F.unit
           case false =>
             val defaultRef = defaultBranchRef(cwd)
@@ -1715,7 +1717,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
           ).pure[F]
         else if failed.nonEmpty then
           failed
-            .traverse(check => pullRequestCheckFailureLog(root, check).map(check -> _))
+            .traverse(check => pullRequestCheckFailureLog((root, check)).map(check -> _))
             .map { failures =>
               PullRequestChecksFailed(
                 Message(
@@ -1739,10 +1741,8 @@ This parent task will not be implemented directly. Run child tasks first; when a
   private val GitHubActionsJobLinkRegex =
     """.*/actions/runs/([0-9]+)/job/([0-9]+).*""".r
 
-  private def pullRequestCheckFailureLog[F[_]: Sync](
-      root: os.Path,
-      check: PullRequestCheck
-  ): F[Option[String]] =
+  private def pullRequestCheckFailureLog[F[_]: Sync]: Kleisli[F, (os.Path, PullRequestCheck), Option[String]] =
+  Kleisli.apply { case (root, check) =>
     check.link
       .flatMap(link =>
         GitHubActionsJobLinkRegex
@@ -1766,6 +1766,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
         }
       }
       .map(_.flatten)
+  }
 
   private def truncateFailureLog(output: String): String =
     if output.length <= PullRequestFailureLogMaxChars then output
@@ -2096,7 +2097,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
         ).handleErrorWith(_ => Sync[F].unit)
 
       val removeExistingLabels =
-        removeIssueLabels(root, taskId, toRemove).handleErrorWith { error =>
+        removeIssueLabels((root, taskId, toRemove)).handleErrorWith { error =>
           progress(
             s"Warning: Failed to update GitHub labels for task #$taskId: ${error.getMessage}"
           )
@@ -2116,7 +2117,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       Sync[F]
   ): Kleisli[F, (os.Path, TaskNumber), Unit] =
     Kleisli.apply { case (root, taskId) =>
-      removeIssueLabels(root, taskId, InProgressStatusLabels).handleErrorWith { error =>
+      removeIssueLabels((root, taskId, InProgressStatusLabels)).handleErrorWith { error =>
         progress(
           s"Warning: Failed to clear in-progress labels for task #$taskId: ${error.getMessage}"
         )
@@ -2127,19 +2128,18 @@ This parent task will not be implemented directly. Run child tasks first; when a
     val currentSet = current.toSet
     expected.distinct.filter(currentSet.contains)
 
-  private def removeIssueLabels[F[_]: Sync](
-      root: os.Path,
-      taskId: TaskNumber,
-      labels: List[String]
-  ): F[Unit] =
-    currentIssueLabels(root, taskId).flatMap { current =>
+  private def removeIssueLabels[F[_]: Sync]: Kleisli[F, (os.Path, TaskNumber, List[String]), Unit] =
+  Kleisli.apply { case (root, taskId, labels) =>
+    currentIssueLabels((root, taskId)).flatMap { current =>
       val existingLabels = labelsToRemove(labels, current)
       val removeFlags = existingLabels.flatMap(label => Seq("--remove-label", label))
       val removeCmd = Seq("gh", "issue", "edit", taskId.toString) ++ removeFlags
       if existingLabels.isEmpty then Sync[F].unit else call(root, removeCmd*)
     }
+  }
 
-  private def currentIssueLabels[F[_]: Sync](root: os.Path, taskId: TaskNumber): F[List[String]] =
+  private def currentIssueLabels[F[_]: Sync]: Kleisli[F, (os.Path, TaskNumber), List[String]] =
+  Kleisli.apply { case (root, taskId) =>
     callOutput(
       root,
       "gh",
@@ -2151,6 +2151,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       "--jq",
       ".labels[].name"
     ).map(_.linesIterator.map(_.trim).filter(_.nonEmpty).toList)
+  }
 
   private def call[F[_]: Sync](cwd: os.Path, command: String*): F[Unit] =
     TaskLogger.trace[F](s"command cwd=$cwd args=${formatCommand(command)}") *>

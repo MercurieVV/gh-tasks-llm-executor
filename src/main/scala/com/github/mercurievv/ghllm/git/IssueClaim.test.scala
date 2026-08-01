@@ -3,6 +3,7 @@ package com.github.mercurievv.ghllm.git
 import cats.effect.IO
 import cats.effect.Ref
 import munit.CatsEffectSuite
+import cats.syntax.all.*
 
 class TransientNetworkSuite extends munit.FunSuite:
 
@@ -35,16 +36,12 @@ class RetryOnTransientSuite extends CatsEffectSuite:
     // that a second attempt happens at all.
     attemptsOf(List(result(128, "Could not resolve host: github.com"), result(0, ""))).flatMap {
       case (remaining, attempt) =>
-        IssueClaim
-          .retryOnTransient[IO](_ => IO.unit)("claiming", attempt)
-          .flatMap(res => remaining.get.map(left => (res.exitCode, left.size)))
+        (IssueClaim.retryOnTransient[IO](_ => IO.unit)("claiming", attempt), remaining.get).mapN((res, left) => (res.exitCode, left.size))
           .map(assertEquals(_, (0, 0)))
     }
 
   test("a non-transient failure is returned on the first attempt, unretried"):
     attemptsOf(List(result(1, "! [rejected] non-fast-forward"), result(0, ""))).flatMap { case (remaining, attempt) =>
-      IssueClaim
-        .retryOnTransient[IO](_ => IO.unit)("claiming", attempt)
-        .flatMap(res => remaining.get.map(left => (res.exitCode, left.size)))
+      (IssueClaim.retryOnTransient[IO](_ => IO.unit)("claiming", attempt), remaining.get).mapN((res, left) => (res.exitCode, left.size))
         .map(assertEquals(_, (1, 1)))
     }

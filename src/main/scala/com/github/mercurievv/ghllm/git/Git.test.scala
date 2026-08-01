@@ -10,6 +10,8 @@ import com.github.mercurievv.ghllm.metrics.*
 import cats.effect.IO
 import cats.effect.Ref
 import munit.CatsEffectSuite
+import cats.data.Kleisli
+import cats.syntax.all.*
 
 class GitSuite extends CatsEffectSuite:
 
@@ -114,9 +116,7 @@ class GitSuite extends CatsEffectSuite:
     commitFile(root, "local.txt", "local 2\n", "local 2")
 
     Ref[IO].of(List.empty[String]).flatMap { messages =>
-      Git[IO](message => messages.update(_ :+ message))
-        .push(root, branch)
-        .flatMap(_ => messages.get)
+      Git[IO](message => messages.update(_ :+ message)).push(root, branch) *> messages.get
         .map { seen =>
           assert(seen.exists(_.contains("rebasing onto origin/task-1")))
           val originHead =
@@ -205,8 +205,8 @@ class ModifiedOrDeletedInWorktreeSuite extends CatsEffectSuite:
     os.proc("git", "commit", "-q", "-m", "seed").call(cwd = root)
     root
 
-  private def changed(path: os.Path): IO[List[String]] =
-    Git[IO](_ => IO.unit).modifiedOrDeletedInWorktree.run(path)
+  private def changed: Kleisli[IO, os.Path, List[String]] =
+  Git[IO](_ => IO.unit).modifiedOrDeletedInWorktree
 
   test("an uncommitted test edit is seen without any base ref"):
     // The repair loop validates before committing, so it has no branch to diff.
