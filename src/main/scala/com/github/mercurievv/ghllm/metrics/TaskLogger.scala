@@ -230,6 +230,20 @@ object TaskLogger:
 
   private val writeLock = new Object
 
+  // Agent completions can dump whole files of generated code; the console is
+  // for at-a-glance progress, not a pager, so it sees a capped preview while
+  // executor.log keeps the untruncated text.
+  private val MaxConsoleLines = 20
+
+  private def truncateForConsole(prefixed: String): String =
+    val lines = prefixed.linesIterator.toVector
+    if lines.length <= MaxConsoleLines then prefixed
+    else
+      val omitted = lines.length - MaxConsoleLines
+      (lines.take(MaxConsoleLines) :+
+        s"... ($omitted more line(s), see executor.log)")
+        .mkString(System.lineSeparator())
+
   private val consoleConfig =
     val loaded = ConsoleConfig.load(sys.env, IsTty(System.console() != null))
     writeLock.synchronized {
@@ -310,7 +324,7 @@ object TaskLogger:
         .map(line => s"${Instant.now()} [$source] $line")
         .mkString(System.lineSeparator())
       os.write.append(logFile, prefixed + System.lineSeparator())
-      consoleOutput(consoleClass, prefixed).foreach { output =>
+      consoleOutput(consoleClass, truncateForConsole(prefixed)).foreach { output =>
         System.err.print(output)
         System.err.flush()
       }
