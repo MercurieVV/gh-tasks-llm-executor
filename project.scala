@@ -15,7 +15,7 @@
 //> using dependency org.typelevel::cats-effect:3.7.0
 //> using dependency org.typelevel::otel4s-oteljava:1.0.1
 
-//> using scalafixDependency io.github.mercurievv:scala-purrism-scalafix_3:0.5.6-166-49ac1e
+//> using scalafixDependency io.github.mercurievv:scala-purrism-scalafix_3:0.6.2
 //> using resourceDirs resources
 
 //> using exclude .bsp
