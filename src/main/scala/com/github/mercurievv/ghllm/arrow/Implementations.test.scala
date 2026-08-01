@@ -10,6 +10,7 @@ import com.github.mercurievv.ghllm.metrics.*
 import cats.effect.IO
 import cats.effect.Ref
 import munit.CatsEffectSuite
+import cats.syntax.all._
 
 class ScalaSemanticMandateSuite extends munit.FunSuite:
   private val runner = TaskRunner(AgentBinary("claude"), Some("opus"), None, None)
@@ -155,7 +156,7 @@ class PromptSegmentOrderSuite extends munit.FunSuite:
       "Task ID: #", // task instruction
       "Task Description:"
     )
-    val positions = expected.map(marker => marker -> prompt.indexOf(marker))
+    val positions = expected.fproduct(prompt.indexOf)
     positions.foreach { case (marker, at) => assert(at >= 0, s"missing segment: $marker") }
     assertEquals(positions.sortBy(_._2).map(_._1), expected)
 

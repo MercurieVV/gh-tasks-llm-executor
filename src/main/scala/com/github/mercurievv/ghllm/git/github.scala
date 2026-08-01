@@ -2134,7 +2134,7 @@ This parent task will not be implemented directly. Run child tasks first; when a
       val existingLabels = labelsToRemove(labels, current)
       val removeFlags = existingLabels.flatMap(label => Seq("--remove-label", label))
       val removeCmd = Seq("gh", "issue", "edit", taskId.toString) ++ removeFlags
-      if existingLabels.isEmpty then Sync[F].unit else call(root, removeCmd*)
+      call(root, removeCmd: _*).unlessA(existingLabels.isEmpty)
     }
   }
 

@@ -325,7 +325,7 @@ object Impl:
   def routeEmptySelection[F[_]: Sync]: -->[F, TaskSelection, Either[NoTask, TaskSelection]] =
     Kleisli.fromFunction { selection =>
       Either.cond(
-        !(selection.candidates.isEmpty),
+        selection.candidates.nonEmpty,
         selection,
         NoTask(selection.context)
       )

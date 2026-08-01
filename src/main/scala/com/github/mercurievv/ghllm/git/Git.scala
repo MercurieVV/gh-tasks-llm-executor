@@ -546,15 +546,13 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
         )
         _ <- baseBranch.traverse_(ensureBranch(root, _, progress))
         _ <-
-          if switchesBranch then call(root, "git", "checkout", targetBranch.value)
-          else F.unit
+          call(root, "git", "checkout", targetBranch.value).whenA(switchesBranch)
         _ <- progress(s"Merging branch $branchName into $targetBranch...")
         _ <- call(root, "git", "merge", branchName.value)
         _ <- progress(s"Deleting local branch $branchName...")
         _ <- call(root, "git", "branch", "-d", branchName.value)
         _ <-
-          if switchesBranch then call(root, "git", "checkout", currentBranch)
-          else F.unit
+          call(root, "git", "checkout", currentBranch).whenA(switchesBranch)
       yield ()
     }
 
