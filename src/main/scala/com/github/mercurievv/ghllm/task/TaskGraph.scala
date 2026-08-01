@@ -10,15 +10,13 @@ import higherkindness.droste.scheme
 
 /** Unfolds the live dependency graph into a task tree.
   *
-  * This is the piece that was missing: `TaskF` and the cost algebra existed but
-  * nothing ever built a tree from real data, so the whole apparatus was
-  * reachable only from tests. With a coalgebra, the shape becomes ordinary
-  * data, and which scheme consumes it (`cata`, `para`, `histo`, a fused
-  * `hylo`) is a separate, swappable decision.
+  * This is the piece that was missing: `TaskF` and the cost algebra existed but nothing ever built a tree from real
+  * data, so the whole apparatus was reachable only from tests. With a coalgebra, the shape becomes ordinary data, and
+  * which scheme consumes it (`cata`, `para`, `histo`, a fused `hylo`) is a separate, swappable decision.
   *
   * Discovery stays a parameter. Production passes the same GitHub-backed lookup
-  * `RecursiveArrows.collectPendingDependencies` uses, so there is one definition
-  * of "what must close before this node"; tests pass a pure map.
+  * `RecursiveArrows.collectPendingDependencies` uses, so there is one definition of "what must close before this node";
+  * tests pass a pure map.
   */
 object TaskGraph:
 
@@ -27,12 +25,10 @@ object TaskGraph:
 
   /** A node plus the ancestors already expanded on this path.
     *
-    * The visited set is not bookkeeping — it is what makes the unfold total. A
-    * dependency graph is not guaranteed acyclic (nothing stops two issues
-    * listing each other), and `anaM` on a cycle does not terminate. The walking
-    * traversal in `RecursiveArrows` never had to care, because it short-circuits
-    * on the first dependency that fails to close rather than materialising the
-    * structure.
+    * The visited set is not bookkeeping — it is what makes the unfold total. A dependency graph is not guaranteed
+    * acyclic (nothing stops two issues listing each other), and `anaM` on a cycle does not terminate. The walking
+    * traversal in `RecursiveArrows` never had to care, because it short-circuits on the first dependency that fails to
+    * close rather than materialising the structure.
     */
   final case class Seed(node: TaskNode, expanded: Set[TaskNumber])
 
@@ -53,8 +49,8 @@ object TaskGraph:
         }
     }
 
-  /** Materialises the tree. Prefer [[fold]] when the tree itself is not wanted:
-    * `hyloM` fuses unfold and fold and never allocates the intermediate.
+  /** Materialises the tree. Prefer [[fold]] when the tree itself is not wanted: `hyloM` fuses unfold and fold and never
+    * allocates the intermediate.
     */
   def unfold[F[_]: Monad](
       pendingOf: TaskNode => F[List[TaskNode]]

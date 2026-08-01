@@ -140,8 +140,7 @@ class ModifiedOrDeletedFilesSuite extends CatsEffectSuite:
     root
 
   private def changed(worktree: os.Path): IO[List[String]] =
-    Git[IO](_ => IO.unit)
-      .modifiedOrDeletedFiles
+    Git[IO](_ => IO.unit).modifiedOrDeletedFiles
       .run((worktree, BranchName("task-1"), Some(BranchName("master"))))
 
   private def branch(root: os.Path): os.Path =
@@ -278,3 +277,65 @@ class ChangedFilesSuite extends CatsEffectSuite:
     os.proc("git", "mv", "Foo.scala", "Renamed.scala").call(cwd = worktree)
 
     touched(worktree).map(files => assert(files.contains("Renamed.scala"), files.toString))
+
+class CommitAllAgentScratchSuite extends CatsEffectSuite:
+  private def repo(): os.Path =
+    val root = os.temp.dir(prefix = "commit-all-scratch")
+    os.proc("git", "init", "-q", "-b", "master").call(cwd = root)
+    os.proc("git", "config", "user.email", "test@example.com").call(cwd = root)
+    os.proc("git", "config", "user.name", "Test").call(cwd = root)
+    os.write(root / "README.md", "seed\n")
+    os.proc("git", "add", "README.md").call(cwd = root)
+    os.proc("git", "commit", "-q", "-m", "seed").call(cwd = root)
+    root
+
+  private def trackedFiles(root: os.Path): Set[String] =
+    os.proc("git", "ls-tree", "-r", "--name-only", "HEAD")
+      .call(cwd = root)
+      .out
+      .lines()
+      .toSet
+
+  test("commitAll stages the agent's work but not the agent's scratch"):
+    // `git add -A` published .aider.chat.history.md (the whole transcript) and a
+    // 778 KB tags cache to a public master on 2026-08-01.
+    val root = repo()
+    os.write(root / "Feature.scala", "object Feature\n")
+    os.write(root / ".aider.chat.history.md", "# aider chat started\n")
+    os.write(root / ".aider.input.history", "prompts\n")
+    os.write(root / ".aider.tags.cache.v4" / "cache.db", "binary", createFolders = true)
+    os.write(root / ".aider.tags.cache.v4" / "7f" / "19" / "e87.val", "blob", createFolders = true)
+
+    val task = Issue(TaskNumber(1), IssueTitle("Add feature"), IssueBody("body"), State("open"))
+
+    Git[IO](_ => IO.unit)
+      .commitAll(root, task)
+      .map { _ =>
+        val tracked = trackedFiles(root)
+        assert(tracked.contains("Feature.scala"), tracked)
+        assert(!tracked.exists(_.startsWith(".aider")), tracked)
+      }
+
+  test("an already-tracked scratch file is not re-staged by a later run"):
+    // The repositories this runs against may already carry committed scratch
+    // (this one did). Excluding at staging must not resurrect it as a change.
+    val root = repo()
+    os.write(root / ".aider.input.history", "old\n")
+    os.proc("git", "add", "-f", ".aider.input.history").call(cwd = root)
+    os.proc("git", "commit", "-q", "-m", "pre-existing scratch").call(cwd = root)
+
+    os.write.over(root / ".aider.input.history", "churned by this run\n")
+    os.write(root / "Feature.scala", "object Feature\n")
+
+    val task = Issue(TaskNumber(2), IssueTitle("Add feature"), IssueBody("body"), State("open"))
+
+    Git[IO](_ => IO.unit)
+      .commitAll(root, task)
+      .map { _ =>
+        val changed = os.proc("git", "show", "--name-only", "--format=", "HEAD")
+          .call(cwd = root)
+          .out
+          .lines()
+          .toSet
+        assertEquals(changed, Set("Feature.scala"))
+      }

@@ -175,9 +175,9 @@ object BusinessLogic:
     * `--parallel`, which meant an ordinary sequential batch paid full price for a prefix it re-sent every time.
     *
     * Also groups same-`(agent, model)` candidates adjacently, which is the half of T20 that applies to everyone the TTL
-    * does not: a group below `MinPeers` and a runner whose CLI exposes no TTL knob both still get the provider's default
-    * 5-minute window, and that window survives `A A B B` but not `A B A B`. Ordering stays stable inside and between
-    * groups, so this reorders the queue without reprioritising it.
+    * does not: a group below `MinPeers` and a runner whose CLI exposes no TTL knob both still get the provider's
+    * default 5-minute window, and that window survives `A A B B` but not `A B A B`. Ordering stays stable inside and
+    * between groups, so this reorders the queue without reprioritising it.
     */
   def markCachePeers(selection: TaskSelection): List[TaskCandidate] =
     // Grouped before marking, not after, so the marks travel with the candidates

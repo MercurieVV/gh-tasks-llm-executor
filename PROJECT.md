@@ -71,10 +71,20 @@ Consequences worth knowing before changing this code:
   `MaxRepairBuildCheckAttempts + 1` runners from `alternateImplementor`, staying
   on the last one when the inventory runs out. Until 2026-07-31 that loop re-ran
   the runner that had just failed, three times over.
-- **The turn cap feeds the same path.** Exceeding `TurnCap` (default 25,
-  overridable in `.gh-tasks-llm-executor/execution-limits.json`) raises
-  `TurnCapExceeded`, which becomes a `Red` rather than a `Failed` — "could not
-  finish" is not "the tool is broken".
+- **The turn cap measures, it does not veto.** Exceeding `TurnCap` (default 25,
+  overridable in `.gh-tasks-llm-executor/execution-limits.json`) is logged and
+  lands on the recorded event as `turnCount`, where it raises that runner's
+  measured `meanUsage` and lets selection stop choosing it on evidence. It is
+  no longer raised. `num_turns` only arrives in the terminal JSON, so a cap
+  checked then bounds no spend — the turns are bought and the edits are on
+  disk. Until 2026-08-01 it threw `TurnCapExceeded` at that point, which reset
+  the worktree before `runProjectValidation` had judged the work: a cost signal
+  discarding output that was never checked for correctness. Observed on #130,
+  where claude haiku reported 88 turns and ten minutes of finished edits were
+  thrown away unverified. Nothing is lost by not raising — a run that burned
+  its turns without finishing still fails on the verifier, and the ladder
+  escalates on `Red` and `Failed` alike, so the verdict was never
+  distinguishable in routing anyway.
 - **Tests are not the implementer's to edit.** `TestEditGuard` rejects a run that
   modified, deleted or renamed an existing test file unless its phase is `test`,
   `plan` or `source-of-truth`. Adding a test is allowed. A task with no `Phase:` is
@@ -100,3 +110,30 @@ Concrete runner ids come from whatever
 `AgentInventory.selectRunner` / `GitHub.taskRunners` match tier/fit automatically.
 Selection is model-agnostic — the cheapest leaf runner may be `codex/*` or
 `gemini/*`, never hardcode `claude/*`.
+
+## Writing a task issue the executor can actually be held to
+
+`POSTMORTEM-2026-07-31-gh-task-execution.md` analyses a run that closed 44 issues
+and merged 25 PRs while delivering about half the work. Every one of those tasks
+passed its own acceptance criteria. Read it before writing task specs; the four
+recurring defects it documents are cheap to avoid and invisible once merged:
+
+- **Acceptance must constrain values, not shape.** "passes `phase`" was satisfied
+  by passing the wrong variable of the right type. Name the value set.
+- **Every scope item needs its own criterion.** An item with none is silently
+  dropped and the task still closes green. This one is now enforced:
+  `AcceptanceCoverage.shortfall` counts the items under `Scope` against those
+  under `Acceptance criteria`, and fewer criteria than scope items re-runs the
+  evaluator once and then routes the task to needs-input. The same check runs
+  over the children of a split, where the dropped item actually lives.
+- **There is no `## Files` section.** It was guessed, it was wrong, and
+  succeeding required ignoring it, so the guidance to write one was deleted
+  rather than enforced — deriving a correct allowlist is a bigger job than the
+  defect, and a wrong one either blocks the task or teaches the implementer to
+  discount every fence in the issue. Constrain the outcome instead.
+- **A write side and a read side in two tasks need a third that crosses them.**
+  Both halves can be individually correct and jointly useless.
+
+The first, second and fourth are now in the evaluator prompt
+(`evaluateTaskPrompt`), so a hand-written spec that ignores them is being held
+to a weaker standard than a generated one.

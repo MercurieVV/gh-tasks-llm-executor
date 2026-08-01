@@ -46,7 +46,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       contextFiles: Seq[String] = Nil,
       taskNumber: Option[TaskNumber] = None,
       metricsRoot: Option[os.Path] = None,
-      metricsScope: String = "agent",
+      metricsScope: AgentExecutor.MetricsScope = AgentExecutor.MetricsScope.Agent,
       deferMetricsOutcome: Boolean = false,
       // The task's `Phase:` metadata, not the metrics scope: `successRate`
       // is keyed on (phase, runner), so this must carry the phase vocabulary
@@ -77,7 +77,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       contextFiles: Seq[String],
       taskNumber: Option[TaskNumber],
       metricsRoot: Option[os.Path],
-      metricsScope: String,
+      metricsScope: AgentExecutor.MetricsScope,
       deferMetricsOutcome: Boolean,
       phase: Option[String],
       attempt: Int
@@ -199,7 +199,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       contextFiles: Seq[String],
       taskNumber: Option[TaskNumber],
       metricsRoot: Option[os.Path],
-      metricsScope: String,
+      metricsScope: AgentExecutor.MetricsScope,
       deferMetricsOutcome: Boolean,
       phase: Option[String]
   ): AgentResult =
@@ -226,9 +226,10 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
             usage = TokenUsage.TokenSnapshot.Zero,
             taskNumber = taskNumber,
             model = runner.model,
-            scope = metricsScope,
+            scope = metricsScope.wire,
             phase = phase,
-            runner = Some(runner.display)
+            runner = Some(runner.metricsIdentity),
+            runnerVersion = runner.version
           )
         )
     val metricsSource =
@@ -239,7 +240,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
           case _                             => "unsupported"
     TaskLogger.unsafeTrace(
       s"token metrics init agent=${runner.agent.value} vendor=${metricsVendor.map(_.toString.toLowerCase).getOrElse("unknown")} model=${runner.model
-          .getOrElse("-")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} cwd=$cwd root=$metricsRootResolved destination=${metricsBackend.destination} source=$metricsSource"
+          .getOrElse("-")} scope=${metricsScope.wire} task=${taskNumber.map(_.value.toString).getOrElse("-")} cwd=$cwd root=$metricsRootResolved destination=${metricsBackend.destination} source=$metricsSource"
     )
     val lastActivity = AtomicLong(started)
     val output = StringBuilder()
@@ -335,13 +336,13 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     val scalaTextToolCalls =
       TokenMetrics.recordScalaTextToolCalls(
         transcript,
-        runner.display,
+        runner.metricsIdentity,
         phase.getOrElse("unknown"),
         metricsBackend
       )
     if scalaTextToolCalls > 0 then
       TaskLogger.unsafeTrace(
-        s"scala text-tool calls agent=${runner.agent.value} scope=$metricsScope phase=${phase
+        s"scala text-tool calls agent=${runner.agent.value} scope=${metricsScope.wire} phase=${phase
             .getOrElse("-")} task=${taskNumber.map(_.value.toString).getOrElse("-")} count=$scalaTextToolCalls"
       )
     val reportedOutput = parseReportedOutput(runner, AgentOutput(transcript))
@@ -362,13 +363,29 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     timedOut match
       case Some(reason) => throw RuntimeException(reason)
       case None         =>
-        // Raised only after the metrics above are recorded: the over-budget turn
-        // count is exactly the sample the escalation ladder needs to learn from.
-        TurnCap.exceeded(reportedOutput.turnCount, TurnCap.load(metricsRootResolved)) match
-          case Some(breach) =>
-            TaskLogger.unsafeLlm(breach.getMessage)
-            throw breach
-          case None => AgentResult(process.exitValue(), reportedOutput.output)
+        // Reported, not raised. The count only arrives in the terminal JSON, so by
+        // the time it can be read the turns are already bought and the work is
+        // already on disk; throwing here discarded that work BEFORE
+        // `runProjectValidation` had judged it, on a cost signal rather than a
+        // correctness one, and re-bought the same leaf on a pricier runner.
+        // Observed on 2026-08-01: claude haiku reported 88 turns against the leaf
+        // cap of 25 on #130 and ten minutes of finished edits were reset away
+        // unverified.
+        //
+        // Nothing is lost by not raising. The retried unit is
+        // `runAgent >>> rejectEmptyRun >>> runProjectValidation`, so a run that
+        // burned its turns without finishing still fails — on the verifier, which
+        // escalates for both `Red` and `Failed` alike, making the TurnCapExceeded
+        // verdict indistinguishable in routing from the one validation produces.
+        // The turn count keeps its real job: it is on the recorded event, where it
+        // raises this runner's measured `meanUsage` and lets the ladder stop
+        // choosing it on its own evidence.
+        val cap = metricsScope match
+          case AgentExecutor.MetricsScope.Repair | AgentExecutor.MetricsScope.MergeRepair =>
+            TurnCap.loadRepair(metricsRootResolved)
+          case _ => TurnCap.load(metricsRootResolved)
+        TurnCap.exceeded(reportedOutput.turnCount, cap).foreach(breach => TaskLogger.unsafeLlm(breach.getMessage))
+        AgentResult(process.exitValue(), reportedOutput.output)
 
   private def tokenUsageSource(
       runner: TaskRunner,
@@ -383,7 +400,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
       runner: TaskRunner,
       taskNumber: Option[TaskNumber],
       metricsRoot: os.Path,
-      metricsScope: String,
+      metricsScope: AgentExecutor.MetricsScope,
       metricsBackend: TokenMetrics.TokenMetricsBackend,
       metricsVendor: Option[TokenUsage.Vendor],
       usageSource: Option[TokenUsage.TokenUsageSource],
@@ -413,9 +430,10 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
             usage = usage,
             taskNumber = taskNumber,
             model = runner.model,
-            scope = metricsScope,
+            scope = metricsScope.wire,
             phase = phase,
-            runner = Some(runner.display),
+            runner = Some(runner.metricsIdentity),
+            runnerVersion = runner.version,
             turnCount = turnCount
           )
           if deferMetricsOutcome then
@@ -432,7 +450,7 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
           else metricsBackend.record(event)
           TaskLogger.unsafeTrace(
             s"token metrics ${if deferMetricsOutcome then "staged" else "recorded"} agent=${runner.agent.value} vendor=${vendor.toString.toLowerCase} model=${runner.model
-                .getOrElse("-")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} destination=${metricsBackend.destination} usage=${TokenMetrics
+                .getOrElse("-")} scope=${metricsScope.wire} task=${taskNumber.map(_.value.toString).getOrElse("-")} destination=${metricsBackend.destination} usage=${TokenMetrics
                 .renderSummary(usage)}"
           )
         }
@@ -440,14 +458,14 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
         TaskLogger.unsafeTrace(
           s"token metrics skipped reason=zero-usage agent=${runner.agent.value} vendor=${metricsVendor
               .map(_.toString.toLowerCase)
-              .getOrElse("unknown")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} destination=${metricsBackend.destination} usage=${TokenMetrics
+              .getOrElse("unknown")} scope=${metricsScope.wire} task=${taskNumber.map(_.value.toString).getOrElse("-")} destination=${metricsBackend.destination} usage=${TokenMetrics
               .renderSummary(usage)}"
         )
       case None =>
         TaskLogger.unsafeTrace(
           s"token metrics skipped reason=no-usage agent=${runner.agent.value} vendor=${metricsVendor
               .map(_.toString.toLowerCase)
-              .getOrElse("unknown")} scope=$metricsScope task=${taskNumber.map(_.value.toString).getOrElse("-")} destination=${metricsBackend.destination}"
+              .getOrElse("unknown")} scope=${metricsScope.wire} task=${taskNumber.map(_.value.toString).getOrElse("-")} destination=${metricsBackend.destination}"
         )
 
   private def streamReader(
@@ -570,11 +588,24 @@ final class AgentExecutor[F[_]](using F: Sync[F]):
     }
 
 object AgentExecutor:
+  /** Which loop a dispatch belongs to, and the key of its pending metrics.
+    *
+    * A type rather than a string because the string was the bug: the dispatch staged its event under the scope and the
+    * completion looked it up under the task's `Phase:`, which type-checked, matched only for `Phase: implement`, and
+    * silently dropped every other event — the phases the ladder most needs measurements for. A phase is not a scope,
+    * and now cannot be passed as one.
+    */
+  enum MetricsScope(val wire: String):
+    case Agent extends MetricsScope("agent")
+    case Implement extends MetricsScope("implement")
+    case Repair extends MetricsScope("repair")
+    case MergeRepair extends MetricsScope("merge-repair")
+
   private final case class MetricsKey(
       root: os.Path,
       taskNumber: TaskNumber,
       runner: String,
-      scope: String
+      scope: MetricsScope
   )
 
   private final case class PendingTokenMetrics(
@@ -585,15 +616,18 @@ object AgentExecutor:
   private val pendingTokenMetrics =
     AtomicReference(Map.empty[MetricsKey, PendingTokenMetrics])
 
-  private def deferTokenMetrics(
+  // Package-visible so the defer/complete key contract can be tested
+  // directly: the failure it guards against is silent, and every observable
+  // path to it goes through a live agent dispatch.
+  private[ghllm] def deferTokenMetrics(
       root: os.Path,
       taskNumber: TaskNumber,
       runner: TaskRunner,
-      scope: String,
+      scope: MetricsScope,
       backend: TokenMetrics.TokenMetricsBackend,
       event: TokenMetrics.TokenMetricsEvent
   ): Unit =
-    val key = MetricsKey(root, taskNumber, runner.display, scope)
+    val key = MetricsKey(root, taskNumber, runner.metricsIdentity, scope)
     pendingTokenMetrics.updateAndGet { current =>
       current.updatedWith(key) {
         case Some(existing) =>
@@ -615,15 +649,23 @@ object AgentExecutor:
     }
     ()
 
+  /** Attaches the outcome to the event `deferTokenMetrics` staged for this run.
+    *
+    * `scope` is map-key material and nothing else: it must be the SAME `metricsScope` string the dispatch passed, or
+    * the lookup misses and the staged event is dropped without ever being recorded — no usage sample, no outcome
+    * sample. It is not the phase. The event's `phase` dimension was already set at defer time from the task's `Phase:`
+    * metadata; completion only copies `outcome` in, so passing a phase here cannot fix a phase and can only break the
+    * key. Use the `*Scope` constants above on both sides.
+    */
   def completeTokenMetrics[F[_]: Sync](
       root: os.Path,
       taskNumber: TaskNumber,
       runner: TaskRunner,
-      scope: String,
+      scope: MetricsScope,
       outcome: String
   ): F[Unit] =
     Sync[F].blocking {
-      val key = MetricsKey(root, taskNumber, runner.display, scope)
+      val key = MetricsKey(root, taskNumber, runner.metricsIdentity, scope)
       val removed = pendingTokenMetrics.getAndUpdate(_ - key).get(key)
       removed.foreach(pending =>
         pending.backend.record(

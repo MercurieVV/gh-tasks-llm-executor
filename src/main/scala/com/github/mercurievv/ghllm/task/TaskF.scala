@@ -12,16 +12,13 @@ import higherkindness.droste.scheme
   *
   * `P` is the node's own payload, `A` the placeholder for child subtrees.
   *
-  * The payload is a parameter rather than a fixed type because the same shape
-  * has to carry different things depending on what is being folded: cost
-  * estimation wants a node's measured identity, orchestration wants the live
-  * `TaskNode` (the issue plus the run context that travels down the walk).
-  * Pinning it to one of those, as the original `Leaf(task: Option[Int])` did,
-  * left the functor unable to carry a real task at all.
+  * The payload is a parameter rather than a fixed type because the same shape has to carry different things depending
+  * on what is being folded: cost estimation wants a node's measured identity, orchestration wants the live `TaskNode`
+  * (the issue plus the run context that travels down the walk). Pinning it to one of those, as the original `Leaf(task:
+  * Option[Int])` did, left the functor unable to carry a real task at all.
   *
-  * `Traverse` rather than plain `Functor`: droste's effectful schemes (`anaM`,
-  * `hyloM`) require it, and unfolding a task tree means asking GitHub for each
-  * node's dependencies, which is an effect.
+  * `Traverse` rather than plain `Functor`: droste's effectful schemes (`anaM`, `hyloM`) require it, and unfolding a
+  * task tree means asking GitHub for each node's dependencies, which is an effect.
   */
 sealed trait TaskF[+P, +A]
 
@@ -37,8 +34,8 @@ object TaskF:
     case Branch(_, children) => children
     case Leaf(_)             => Nil
 
-  /** Maps the payload of a single node. `A` is untouched — this is the other
-    * half of the bifunctor, the half `Traverse` cannot express.
+  /** Maps the payload of a single node. `A` is untouched — this is the other half of the bifunctor, the half `Traverse`
+    * cannot express.
     */
   def mapPayload[P, Q, A](node: TaskF[P, A])(f: P => Q): TaskF[Q, A] = node match
     case Branch(payload, children) => Branch(f(payload), children)
@@ -46,9 +43,8 @@ object TaskF:
 
   /** Lifts [[mapPayload]] to a whole fixpoint tree.
     *
-    * This is what lets one unfold feed differently-payloaded folds: the graph is
-    * discovered once at `TaskNode` and retagged to whatever identity a given
-    * analysis folds over, without re-walking GitHub.
+    * This is what lets one unfold feed differently-payloaded folds: the graph is discovered once at `TaskNode` and
+    * retagged to whatever identity a given analysis folds over, without re-walking GitHub.
     */
   def retag[P, Q](tree: Mu[[A] =>> TaskF[P, A]])(f: P => Q): Mu[[A] =>> TaskF[Q, A]] =
     scheme

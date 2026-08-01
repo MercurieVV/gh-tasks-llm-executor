@@ -151,3 +151,23 @@ class PublishRemoteArrowsSuite extends CatsEffectSuite:
     )
 
     assertEquals(BusinessLogicRetry.isMergeConflictError(error), true)
+
+  test("gh's own wording for the same conflict is repairable too"):
+    // The CLI does not use GitHub's GraphQL phrasing. Missing this one failed
+    // task #56 outright on a conflict the repair path resolves routinely.
+    val error = RuntimeException(
+      """Command failed with exit code 1: "gh" "pr" "merge" "85" "--merge"
+        |stderr: X Pull request MercurieVV/scala-purrism#85 is not mergeable: the merge commit cannot be cleanly created.
+        |Run the following to resolve the merge conflicts locally:
+        |  gh pr checkout 85 && git fetch origin task-39 && git merge origin/task-39""".stripMargin
+    )
+
+    assertEquals(BusinessLogicRetry.isMergeConflictError(error), true)
+
+  test("an unrelated merge failure stays unrepairable"):
+    val error = RuntimeException(
+      """Command failed with exit code 1: "gh" "pr" "merge" "85" "--merge"
+        |stderr: GraphQL: Base branch was modified. Review and try the merge again.""".stripMargin
+    )
+
+    assertEquals(BusinessLogicRetry.isMergeConflictError(error), false)

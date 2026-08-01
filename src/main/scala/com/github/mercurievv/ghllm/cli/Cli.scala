@@ -27,9 +27,8 @@ object Cli:
 
   /** `estimate --task=N` — prices a plan before running it.
     *
-    * Prices are flags rather than a built-in table: a wrong hardcoded price
-    * would still print a confident dollar figure. The rendered report repeats
-    * the prices it used.
+    * Prices are flags rather than a built-in table: a wrong hardcoded price would still print a confident dollar
+    * figure. The rendered report repeats the prices it used.
     */
   final case class EstimateCommand(
       task: TaskNumber,
@@ -66,6 +65,32 @@ object Cli:
               outputUsdPerMillionTokens = positiveDouble(rest, "--output-usd-per-mtok")
                 .getOrElse(DefaultOutputUsdPerMillionTokens)
             )
+          )
+        }
+      case _ => None
+
+  /** `predict-and-run --task=N` — same options as `estimate`, but actually runs the task's dependency tree to closure
+    * afterward and reports the same cost model's estimate against what the run actually billed. See
+    * `PredictedVsActualExecution`: unlike `estimate`, this is not read-only.
+    */
+  final case class PredictAndRunCommand(
+      task: TaskNumber,
+      path: os.Path,
+      backend: TokenMetrics.BackendKind,
+      victoriaUrl: String,
+      costModel: TaskTree.CostModel
+  )
+
+  def parsePredictAndRunCommand(args: List[String], root: os.Path = os.pwd): Option[PredictAndRunCommand] =
+    args match
+      case "predict-and-run" :: rest =>
+        parseEstimateCommand("estimate" :: rest, root).map { estimate =>
+          PredictAndRunCommand(
+            task = estimate.task,
+            path = estimate.path,
+            backend = estimate.backend,
+            victoriaUrl = estimate.victoriaUrl,
+            costModel = estimate.costModel
           )
         }
       case _ => None
@@ -122,7 +147,7 @@ object Cli:
           loop(tail, clean)
         case "--parallel" :: tail =>
           loop(tail, clean)
-        case ("metrics" | "estimate") :: _ =>
+        case ("metrics" | "estimate" | "predict-and-run") :: _ =>
           loop(Nil, clean)
         case head :: tail =>
           loop(tail, head :: clean)

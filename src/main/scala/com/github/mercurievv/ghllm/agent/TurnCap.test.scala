@@ -34,3 +34,23 @@ class TurnCapSuite extends munit.FunSuite:
     assertEquals(TurnCap.load(root), TurnCap.Default)
     os.write.over(root / TurnCap.RelativePath, "not json")
     assertEquals(TurnCap.load(root), TurnCap.Default)
+
+class RepairTurnCapSuite extends munit.FunSuite:
+  test("a repair gets a multiple of the leaf cap by default"):
+    val root = os.temp.dir(prefix = "repair-turn-cap")
+    assertEquals(TurnCap.loadRepair(root), TurnCap.Default * TurnCap.RepairMultiplier)
+
+  test("a stated leaf cap scales the repair cap with it"):
+    val root = os.temp.dir(prefix = "repair-turn-cap-scaled")
+    os.write.over(root / TurnCap.RelativePath, """{"turnCap": 10}""", createFolders = true)
+    assertEquals(TurnCap.loadRepair(root), 30)
+
+  test("a stated repair cap wins over the multiple"):
+    val root = os.temp.dir(prefix = "repair-turn-cap-explicit")
+    os.write.over(root / TurnCap.RelativePath, """{"turnCap": 10, "repairTurnCap": 12}""", createFolders = true)
+    assertEquals(TurnCap.loadRepair(root), 12)
+    assertEquals(TurnCap.load(root), 10)
+
+  test("the four-file merge repair that motivated this is no longer a breach"):
+    val root = os.temp.dir(prefix = "repair-turn-cap-observed")
+    assertEquals(TurnCap.exceeded(Some(75), TurnCap.loadRepair(root)), None)

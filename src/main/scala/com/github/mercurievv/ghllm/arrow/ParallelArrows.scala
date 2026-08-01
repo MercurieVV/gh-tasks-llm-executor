@@ -38,9 +38,9 @@ object ParallelArrows:
   ): Kleisli[F, A, (B, C)] =
     Kleisli(a => (left.run(a), right.run(a)).parTupled)
 
-  /** Root candidates commonly hit the same shared resources (issue tracker rate limits, vendor budgets) - running
-    * every candidate side by side risks a thundering herd, so this caps how many run at once rather than letting
-    * `parAll` fan out unbounded.
+  /** Root candidates commonly hit the same shared resources (issue tracker rate limits, vendor budgets) - running every
+    * candidate side by side risks a thundering herd, so this caps how many run at once rather than letting `parAll` fan
+    * out unbounded.
     */
   val MaxParallelism: Int = 2
 

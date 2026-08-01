@@ -242,6 +242,20 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       }
     }
 
+  /** The worktree's current HEAD, or `None` if it has no commit yet. Sampled around a dispatch to tell "this run
+    * produced commits" apart from "this branch already had some" — the two are indistinguishable to
+    * `hasPublishableCommits`, which only ever compares against the base.
+    */
+  def headSha: Kleisli[F, os.Path, Option[String]] =
+    Kleisli.apply { worktreePath =>
+      F.blocking {
+        val result = os
+          .proc("git", "rev-parse", "HEAD")
+          .call(cwd = worktreePath, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        Option.when(result.exitCode === 0)(result.out.text().trim).filter(_.nonEmpty)
+      }
+    }
+
   // Resolves what "before this task" means: the pushed branch if there is one,
   // else the task's base, else whichever default branch this repo uses.
   private def baseRefOf(
@@ -266,8 +280,8 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
 
   /** Paths this run modified, deleted or renamed — committed or not.
     *
-    * Additions are deliberately excluded: the caller ([[TestEditGuard]]) blocks
-    * changes that could weaken an existing test, and a new file weakens nothing.
+    * Additions are deliberately excluded: the caller ([[TestEditGuard]]) blocks changes that could weaken an existing
+    * test, and a new file weakens nothing.
     */
   def modifiedOrDeletedFiles: Kleisli[F, (os.Path, BranchName, Option[BranchName]), List[String]] =
     Kleisli.apply { case (worktreePath, branchName, baseBranch) =>
@@ -282,13 +296,11 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       }
     }
 
-  /** Every path this run touched, additions included — what a dependent task
-    * needs in order to start from file names instead of searching for them
-    * (TOKEN_EFFICIENCY_PLAN.md §2 Stage 2, "never 'go find it'").
+  /** Every path this run touched, additions included — what a dependent task needs in order to start from file names
+    * instead of searching for them (TOKEN_EFFICIENCY_PLAN.md §2 Stage 2, "never 'go find it'").
     *
-    * Read from git rather than from the runner's prose: the set is already
-    * known exactly, so asking a model to restate it spends tokens to obtain a
-    * worse answer.
+    * Read from git rather than from the runner's prose: the set is already known exactly, so asking a model to restate
+    * it spends tokens to obtain a worse answer.
     */
   def changedFiles: Kleisli[F, (os.Path, BranchName, Option[BranchName]), List[String]] =
     Kleisli.apply { case (worktreePath, branchName, baseBranch) =>
@@ -315,9 +327,8 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
       }
     }
 
-  /** The uncommitted half of [[modifiedOrDeletedFiles]], for callers that judge
-    * a worktree before anything is committed and so have no base ref to diff
-    * against — the repair loop validates and only then commits.
+  /** The uncommitted half of [[modifiedOrDeletedFiles]], for callers that judge a worktree before anything is committed
+    * and so have no base ref to diff against — the repair loop validates and only then commits.
     */
   def modifiedOrDeletedInWorktree: Kleisli[F, os.Path, List[String]] =
     Kleisli.apply(worktreePath => F.blocking(uncommittedModifiedOrDeleted(worktreePath).distinct.sorted))
@@ -366,13 +377,25 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
   // and before the executor commits/publishes/closes the task. The executor cannot
   // know each project's correct build, lint, format, test, or policy checks, so the
   // project supplies one executable hook that acts as the local quality gate.
-  def runProjectValidation: Kleisli[F, (os.Path), Unit] =
+  /** `true` when a hook actually ran and passed; `false` when the repository ships none. Raises when a hook ran and
+    * failed.
+    *
+    * The distinction is not cosmetic. Every claim the escalation ladder makes rests on the verifier running inside the
+    * retry loop, and on a repository with no hook it does not run at all — so `false` here means the run is UNVERIFIED,
+    * not verified-good. Recording it as `green` (which is what returning `Unit` forced) fed `successRate` a success
+    * nobody checked, and the cheapest runner's measured success rate converged on 100% because nothing could ever mark
+    * it wrong. That is the same corruption `TestEditGuard` exists to prevent, arriving through a different door.
+    */
+  def runProjectValidation: Kleisli[F, (os.Path), Boolean] =
     Kleisli.apply { case (worktreePath) =>
       validationHook(worktreePath).flatMap {
         case None =>
           progress(
-            "No project validation hook found. Skipping local project checks."
-          )
+            "No project validation hook found - this run is UNVERIFIED, not verified-good. " +
+              s"Nothing checked that it compiles or that its tests pass, and it is recorded as unverified rather " +
+              s"than green so runner selection does not read it as a success. Add an executable hook at " +
+              s"${Git.ValidationHookPaths.map(_.toString).mkString(" or ")} in the target repository."
+          ).as(false)
         case Some(hook) =>
           for
             _ <- progress(s"Running project validation hook: $hook")
@@ -399,18 +422,16 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
                     s"Project validation hook failed with exit code ${result.exitCode}."
                   )
                 )
-          yield ()
+          yield true
       }
     }
 
   private def validationHook: Kleisli[F, os.Path, Option[os.Path]] =
     Kleisli.apply { worktreePath =>
       F.blocking {
-        List(
-          worktreePath / ".gh-tasks-llm-executor" / "validate",
-          worktreePath / ".github" / "gh-tasks-llm-executor" / "validate",
-          worktreePath / "scripts" / "gh-task-validate"
-        ).find(path => os.exists(path) && os.isFile(path))
+        Git.ValidationHookPaths
+          .map(worktreePath / _)
+          .find(path => os.exists(path) && os.isFile(path))
       }
     }
 
@@ -422,7 +443,7 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
     val message = commitTitle
       .filter(_.trim.nonEmpty)
       .getOrElse(s"Implement task #${task.number}: ${task.title}")
-    call(worktreePath, "git", "add", "-A") *>
+    call(worktreePath, (Seq("git", "add", "-A", "--", ".") ++ Git.AgentScratchExcludes)*) *>
       call(worktreePath, "git", "commit", "-m", message).handleErrorWith { original =>
         // A rejecting pre-commit hook (e.g. failing lint/format check) leaves
         // the work staged but uncommitted. releaseWorktree force-removes the
@@ -671,3 +692,26 @@ final class Git[F[_]](using F: Sync[F])(progress: String => F[Unit]):
 
 object Git:
   def apply[F[_]: Sync](progress: String => F[Unit]): Git[F] = new Git[F](progress)
+
+  /** Scratch the agent writes into its own worktree, excluded from `commitAll`'s staging.
+    *
+    * `git add -A` stages whatever is on disk, and the agent is a process running in that directory writing files of its
+    * own. On 2026-08-01 an aider run published `.aider.chat.history.md`, `.aider.input.history` and a 778 KB
+    * `.aider.tags.cache.v4/cache.db` to a public repository's master. The cache is churn; the chat history is the full
+    * prompt-and-response transcript, which is not the target repository's content to carry.
+    *
+    * The target repository's `.gitignore` cannot be relied on for this — the executor works against repositories that
+    * have never seen an agent, and aider offers to add the entry itself, which turns into a `.gitignore` edit the merge
+    * repair then has to fight. Excluding at staging time keeps it out regardless.
+    *
+    * Both forms are listed because a pathspec must match the path as a whole: `.aider*` catches the loose files and the
+    * cache directory entry, `.aider*&#47;**` catches everything under it.
+    */
+  val AgentScratchExcludes: Seq[String] = Seq(":!.aider*", ":!.aider*/**")
+
+  /** Where a target repository may put its executable quality gate, in search order. */
+  val ValidationHookPaths: List[os.RelPath] = List(
+    os.rel / ".gh-tasks-llm-executor" / "validate",
+    os.rel / ".github" / "gh-tasks-llm-executor" / "validate",
+    os.rel / "scripts" / "gh-task-validate"
+  )

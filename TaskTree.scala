@@ -58,12 +58,10 @@ object TaskTree:
 
   /** Stable identity of the raw node used to look up its measured profile.
     *
-    * `Task` is deliberately shape-blind: a real issue is a branch when it still
-    * has open dependencies and a leaf when it does not, and that changes as work
-    * lands. Keying the profile on shape would make the same task price
-    * differently depending on when it was estimated. `phase` rides along because
-    * it is the fallback key — a task nobody has run yet has no measurement of its
-    * own, only its phase's.
+    * `Task` is deliberately shape-blind: a real issue is a branch when it still has open dependencies and a leaf when
+    * it does not, and that changes as work lands. Keying the profile on shape would make the same task price
+    * differently depending on when it was estimated. `phase` rides along because it is the fallback key — a task nobody
+    * has run yet has no measurement of its own, only its phase's.
     */
   enum NodeRef:
     case Branch(name: String)
@@ -80,15 +78,12 @@ object TaskTree:
 
   /** Result of folding one subtree.
     *
-    * `subtreeUsd` is additive and is used for whole-plan comparisons.
-    * `estimatedPerNodeUsd` allocates only this node's shared-prefix cost over the
-    * children that actually share that prefix.
+    * `subtreeUsd` is additive and is used for whole-plan comparisons. `estimatedPerNodeUsd` allocates only this node's
+    * shared-prefix cost over the children that actually share that prefix.
     *
-    * `prefixKey` rides on the fold result rather than only on the annotation
-    * because the allocation needs it: a child's cost is already folded away by
-    * the time its parent is priced, so without carrying the key upward the
-    * parent cannot tell which children reuse its cached prefix and which pay
-    * for their own.
+    * `prefixKey` rides on the fold result rather than only on the annotation because the allocation needs it: a child's
+    * cost is already folded away by the time its parent is priced, so without carrying the key upward the parent cannot
+    * tell which children reuse its cached prefix and which pay for their own.
     */
   final case class Cost(
       prefixKey: PrefixKey,
@@ -100,8 +95,8 @@ object TaskTree:
 
   /** Attributes attached to every node by [[annotate]].
     *
-    * The node's `PrefixKey` is on `cost`, not repeated here: two copies of one
-    * value that must always agree is a way for them to stop agreeing.
+    * The node's `PrefixKey` is on `cost`, not repeated here: two copies of one value that must always agree is a way
+    * for them to stop agreeing.
     */
   final case class Attr(tier: String, cost: Cost)
 
@@ -111,10 +106,9 @@ object TaskTree:
   def leaf(task: Option[Int]): Tree =
     Mu[Node](TaskF.Leaf(NodeRef.Leaf(task)))
 
-  /** Retags a tree unfolded from live issues into the identity the cost fold
-    * reads. The shape is preserved exactly — including the fact that a diamond
-    * dependency appears on both paths, so `subtreeUsd` is work-if-run rather
-    * than a deduplicated total.
+  /** Retags a tree unfolded from live issues into the identity the cost fold reads. The shape is preserved exactly —
+    * including the fact that a diamond dependency appears on both paths, so `subtreeUsd` is work-if-run rather than a
+    * deduplicated total.
     */
   def ofTaskGraph(tree: TaskGraph.Tree): Tree =
     TaskF.retag(tree)(nodeRefOf)

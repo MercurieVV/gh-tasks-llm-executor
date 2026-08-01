@@ -25,23 +25,19 @@ object TaskArtifact:
   val DefaultMaxChars: Int = 2000
   val Marker = "\n\n[CONTEXT TRUNCATED]"
 
-  /** Renders the artifact into the full structured text that a child task would
-    * receive.  No truncation — call `boundedRender` to enforce the limit.
+  /** Renders the artifact into the full structured text that a child task would receive. No truncation — call
+    * `boundedRender` to enforce the limit.
     */
   def render(artifact: TaskArtifact): String =
     val sb = new StringBuilder
     sb.append(s"Decision: ${artifact.decision}\n")
-    if artifact.filesTouched.nonEmpty then
-      sb.append(s"Files touched: ${artifact.filesTouched.mkString(", ")}\n")
-    if artifact.symbols.nonEmpty then
-      sb.append(s"Symbols: ${artifact.symbols.mkString(", ")}\n")
-    if artifact.followUps.nonEmpty then
-      sb.append(s"Follow-ups: ${artifact.followUps.mkString(", ")}\n")
+    if artifact.filesTouched.nonEmpty then sb.append(s"Files touched: ${artifact.filesTouched.mkString(", ")}\n")
+    if artifact.symbols.nonEmpty then sb.append(s"Symbols: ${artifact.symbols.mkString(", ")}\n")
+    if artifact.followUps.nonEmpty then sb.append(s"Follow-ups: ${artifact.followUps.mkString(", ")}\n")
     sb.toString
 
-  /** Returns a version of the rendered artifact that is guaranteed to fit within
-    * `limit` characters.  If the raw text exceeds the limit it is truncated and
-    * an explicit `[CONTEXT TRUNCATED]` marker is appended so the next phase can
+  /** Returns a version of the rendered artifact that is guaranteed to fit within `limit` characters. If the raw text
+    * exceeds the limit it is truncated and an explicit `[CONTEXT TRUNCATED]` marker is appended so the next phase can
     * see that information was dropped.
     */
   def boundedRender(artifact: TaskArtifact, limit: Int = DefaultMaxChars): String =
@@ -49,11 +45,10 @@ object TaskArtifact:
 
   /** The same bound applied to text that did not come from a `TaskArtifact`.
     *
-    * Runners write their conclusion as free-form prose, so the contract cannot be
-    * enforced at the point it is produced without also constraining what they
-    * emit. It is enforced where the text becomes someone else's context instead —
-    * an unbounded "summary" pasted into every dependent task's prompt is the
-    * transcript-shaped cost this contract exists to prevent.
+    * Runners write their conclusion as free-form prose, so the contract cannot be enforced at the point it is produced
+    * without also constraining what they emit. It is enforced where the text becomes someone else's context instead —
+    * an unbounded "summary" pasted into every dependent task's prompt is the transcript-shaped cost this contract
+    * exists to prevent.
     */
   def bound(text: String, limit: Int = DefaultMaxChars): String =
     val markerLen = Marker.length
@@ -63,6 +58,25 @@ object TaskArtifact:
       val keepLen = limit - markerLen
       if keepLen == 0 then Marker
       else text.take(keepLen) + Marker
+
+/** The phase vocabulary, in one place.
+  *
+  * `Phase:` is a keyed dimension in three independent places — the pending-metrics map key, `successRate`/`meanUsage`,
+  * and `TestEditGuard`'s exemption set — so an unnormalised `Phase: Implement` is a different phase from `implement` at
+  * every one of them, and matches at none. `parse` normalises on the way in so no caller has to remember to.
+  */
+object Phase:
+  val Plan = "plan"
+  val SourceOfTruth = "source-of-truth"
+  val Implement = "implement"
+  val Test = "test"
+
+  /** The phases the evaluator is allowed to emit and the selector can read. A phase outside this set is not rejected —
+    * it is simply a dimension nothing queries, which `TokenMetrics.renderReadiness` surfaces during the run.
+    */
+  val All: Set[String] = Set(Plan, SourceOfTruth, Implement, Test)
+
+  def normalise(phase: String): String = phase.trim.toLowerCase
 
 // Structured evaluator/runner state for a task. Never written into the issue
 // body directly — see TaskMetadataStore. Fields are individually mergeable so
@@ -220,7 +234,8 @@ object TaskMetadata:
     TaskMetadata(
       evaluation = field("evaluation"),
       execution = field("execution"),
-      phase = field("phase"),
+      // Normalised on the way in: every consumer keys on this string.
+      phase = field("phase").map(Phase.normalise).filter(_.nonEmpty),
       implemented = field("implemented"),
       answerConsumed = field("answer-consumed"),
       runnerLines = runnerLines,

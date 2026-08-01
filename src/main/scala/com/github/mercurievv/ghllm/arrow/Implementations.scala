@@ -74,7 +74,7 @@ object Impl:
        |Never use `cat`, `rg`, `sed`, `grep`, `head`, or `tail` against `.scala` files.
        |Use `document_outline` to understand a file's API instead of reading the entire file.
        |Call `set_workspace_root` ONCE with the absolute `Worktree:` path given below before your first query - do not call `get_workspace_root` or `pwd` to discover it, and do not call it again. Use `annotated_source` to read a `.scala` file.
-       |The index there was refreshed for this task immediately before you were dispatched; do not run `scripts/refresh-semanticdb.sh` yourself unless a tool reports the index is stale.
+       |If this repository ships `scripts/refresh-semanticdb.sh`, the index there was refreshed for this task immediately before you were dispatched; do not run it yourself unless a tool reports the index is stale. If it ships no such script, refresh the index however this repository does it.
        |If ScalaSemantic MCP is unavailable or failing, say so in your final answer before falling back to shell text tools.
        |""".stripMargin
 
@@ -145,6 +145,9 @@ object Impl:
   def selectTask[F[_]: Sync]: -->[F, RunContext, TaskSelection] =
     Kleisli { (context: RunContext) =>
       for
+        // Before selection, not after: a parent whose integration branch never
+        // landed is not a runnable task and would never be reached otherwise.
+        _ <- landStrandedIntegrationBranches[F](context)
         _ <- progress("Fetching open issues from GitHub...")
         rawIssues <- GitHub.fetchIssues(context.root)
         issues <- rawIssues.traverse(effectiveIssue[F](context.root, _))
@@ -344,19 +347,66 @@ object Impl:
   // One root candidate raising an uncaught error must not take down every
   // other queued candidate in the same batch. Report escaped failures against
   // that candidate and keep the outer run moving.
+  //
+  // "Keep moving" used to mean the terminal failure was written to the console
+  // and nowhere else: the issue stayed open, unlabelled and uncommented, so a
+  // human had no way to see the task had failed and the next run re-selected
+  // it and bought the same failure again. On 2026-08-01 #129 failed a
+  // TestEditGuard violation across two runners and left no trace at all.
+  //
+  // Every failure now leaves a comment. A policy rejection additionally routes
+  // the task to needs-input, because it is by construction unfixable by
+  // re-running: the phase forbids the change the task requires, so every
+  // runner reaches the same refusal and only a human editing the spec can
+  // unblock it. Capability and infrastructure failures are left selectable —
+  // retrying those next run is the right behaviour.
   def recoverCandidateFailure[F[_]: Sync]: -->[F, (TaskCandidate, Throwable), RunSummary] =
     Kleisli { case (candidate, error) =>
       val message = Option(error.getMessage).getOrElse(error.toString)
-      progress(
-        s"Task #${candidate.issue.number.value} failed unrecoverably: $message. Skipping and continuing with remaining tasks."
-      ).as(
-        RunSummary(
-          status = Status("error"),
-          message = Message5(message),
-          task = Some(candidate.issue)
-        )
+      val root = candidate.context.root
+      val summary = RunSummary(
+        status = Status("error"),
+        message = Message5(message),
+        task = Some(candidate.issue)
       )
+      for
+        _ <- progress(
+          s"Task #${candidate.issue.number.value} failed unrecoverably: $message. Skipping and continuing with remaining tasks."
+        )
+        // Best-effort throughout: a task that failed must not fail a second
+        // time on the bookkeeping about its failure.
+        _ <- GitHub.commentTaskFailure(progress)(root, candidate.issue, message).attempt.void
+        _ <- if isPolicyRejection(error) then blockTaskForHuman[F](candidate, message) else ().pure[F]
+      yield summary
     }
+
+  /** Delegates to `VerificationResult`'s classifier rather than re-matching on the exception, so the ladder's "don't
+    * escalate this" and this arrow's "don't re-select this" can never drift apart.
+    */
+  def isPolicyRejection(error: Throwable): Boolean =
+    VerificationResult.fromThrowable(error).isPolicyRejection
+
+  /** Marks a task as needing a human before it can run again.
+    *
+    * Both writes are required and neither is sufficient: `selectTask` excludes a task only when the merged metadata
+    * says needs-input AND a "Questions before execution:" comment exists AND no non-script reply follows it. Metadata
+    * alone is treated as stale state, and a question alone is not read at all. The failure comment posted by the caller
+    * cannot be mistaken for the human's answer — "script stopped before closing task" is a recognised script prefix.
+    */
+  private def blockTaskForHuman[F[_]: Sync](candidate: TaskCandidate, reason: String): F[Unit] =
+    val root = candidate.context.root
+    val question =
+      s"""$reason
+         |
+         |This is a policy rejection, not a runner failure: every runner reaches the
+         |same refusal, so re-running cannot fix it. Adjust the task (or its `Phase:`)
+         |and reply here to unblock it.""".stripMargin
+    (GitHub.commentNeedsUserInput(progress)(root, candidate.issue, question) *>
+      GitHub.commentTaskMetadata(progress)(
+        root,
+        candidate.issue.number,
+        TaskMetadata.render(TaskMetadata(evaluation = Some("needs-input")))
+      )).attempt.void
 
   def lastSummary[F[_]: Sync]: -->[F, List[RunSummary], RunSummary] =
     Kleisli.fromFunction { summaries =>
@@ -500,8 +550,8 @@ object Impl:
   def pendingDependencies[F[_]: Sync]: TaskNode => RunF[F][List[TaskNode]] =
     node => collectPendingDependencies[F].run(node).map(_.pending)
 
-  /** The live dependency graph as a task tree, for folds that want the shape as
-    * data (cost estimation, plan comparison) rather than to walk it.
+  /** The live dependency graph as a task tree, for folds that want the shape as data (cost estimation, plan comparison)
+    * rather than to walk it.
     */
   def taskTree[F[_]: Sync]: TaskNode => RunF[F][TaskGraph.Tree] =
     node => TaskGraph.unfold[RunF[F]](pendingDependencies[F])(TaskGraph.seed(node))
@@ -542,11 +592,10 @@ object Impl:
   // instrumented arrow.
   /** The runner a task will route to, decided from the issue alone.
     *
-    * One definition, called from two places: `claimAndRun`, which actually runs
-    * it, and the cache-peer grouping in `collectPendingDependencies`, which only
-    * needs to know whether two siblings will land on the same runner. If these
-    * ever diverged, the grouping would promise a shared prefix that never
-    * materialises and the TTL premium would be paid for nothing.
+    * One definition, called from two places: `claimAndRun`, which actually runs it, and the cache-peer grouping in
+    * `collectPendingDependencies`, which only needs to know whether two siblings will land on the same runner. If these
+    * ever diverged, the grouping would promise a shared prefix that never materialises and the TTL premium would be
+    * paid for nothing.
     */
   def selectRunnerForIssue(context: RunContext, issue: Issue): TaskRunner =
     val metadata = TaskMetadata.parse(issue.body.value)
@@ -902,6 +951,11 @@ object Impl:
       val execution =
         for
           _ <- refreshSemanticDbBeforeDispatch(env, run.task, run.worktreePath)
+          // Sampled before the agent can move it: without this, a branch that
+          // arrived already ahead of its base is indistinguishable from one this
+          // run advanced, and a run that changed nothing publishes and closes green
+          // on someone else's commits.
+          headBeforeRun <- git[F].headSha(run.worktreePath)
           _ <- progress(
             s"Running task #${run.task.number} with ${run.runner.display}..."
           )
@@ -912,7 +966,7 @@ object Impl:
             ImplementerAllowedTools,
             taskNumber = Some(run.task.number),
             metricsRoot = Some(run.context.root),
-            metricsScope = "implement",
+            metricsScope = AgentExecutor.MetricsScope.Implement,
             deferMetricsOutcome = true,
             phase = TaskMetadata.parse(run.task.body.value).phase
           )
@@ -923,14 +977,14 @@ object Impl:
               )
             )
             .whenA(looksBlocked(output))
-        yield ExecutedTask(run, output)
+        yield ExecutedTask(run, output, headBeforeRun)
 
       execution.handleErrorWith { error =>
         AgentExecutor.completeTokenMetrics[F](
           run.context.root,
           run.task.number,
           run.runner,
-          "implement",
+          AgentExecutor.MetricsScope.Implement,
           "error"
         ) *> Sync[F].raiseError(error)
       }
@@ -962,24 +1016,35 @@ object Impl:
 
     Base64.getUrlEncoder.withoutPadding().encodeToString(digest.digest())
 
+  /** The refresh script is repository-owned and optional: a target project that indexes differently, or not at all,
+    * simply does not ship one. Its absence is an environment fact no runner can repair, so it must not surface as a
+    * failed dispatch — before this was a `skip`, a missing script raised an `IOException` that the ladder charged to
+    * the agent and escalated through every runner before abandoning the task.
+    */
   def refreshSemanticDbBeforeDispatch[F[_]: Async](
       env: RunEnv[F],
       task: Issue,
       root: os.Path
   ): F[Unit] =
-    if taskTouchesScala(task) then
-      Async[F]
-        .blocking(scalaSourceHash(root))
-        .flatMap(hash =>
-          refreshSemanticDbIfNeeded(env, SemanticDbSource(root, hash))(
-            Async[F].blocking {
-              os.proc((root / "scripts" / "refresh-semanticdb.sh").toString)
-                .call(cwd = root, stdout = os.Inherit, stderr = os.Inherit)
-              ()
-            }
-          )
-        )
-    else Async[F].unit
+    val script = root / "scripts" / "refresh-semanticdb.sh"
+    if !taskTouchesScala(task) then Async[F].unit
+    else
+      Async[F].blocking(os.exists(script)).flatMap {
+        case false =>
+          progress[F](s"No SemanticDB refresh script at $script. Skipping index refresh.")
+        case true =>
+          Async[F]
+            .blocking(scalaSourceHash(root))
+            .flatMap(hash =>
+              refreshSemanticDbIfNeeded(env, SemanticDbSource(root, hash))(
+                Async[F].blocking {
+                  os.proc(script.toString)
+                    .call(cwd = root, stdout = os.Inherit, stderr = os.Inherit)
+                  ()
+                }
+              )
+            )
+      }
 
   def refreshSemanticDbIfNeeded[F[_]: Async](
       env: RunEnv[F],
@@ -1035,10 +1100,10 @@ object Impl:
   def recordAgentOutput[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli.ask[F, ExecutedTask]
 
-  /** Rejects a run that changed the tests it is about to be judged by, before
-    * the judgement happens. Raising here puts it on the same path as a failed
-    * validation, so the existing ladder escalates it and, if the stronger
-    * runner does the same, surfaces it to a human.
+  /** Rejects a run that changed the tests it is about to be judged by, before the judgement happens. Raising here puts
+    * it on the same path as a failed validation, except that it raises [[TestEditGuard.Violation]], which
+    * `routeRunnerFallback` surfaces to a human directly instead of escalating: no runner can satisfy a phase that
+    * forbids the edit the task requires.
     */
   def guardTestEdits[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli { task =>
@@ -1057,29 +1122,43 @@ object Impl:
                   task.run.context.root,
                   task.run.task.number,
                   task.run.runner,
-                  phase.getOrElse("implement"),
+                  // The dispatch's scope, not the phase: this argument keys the
+                  // pending-metrics map, and the phase dimension is already on
+                  // the staged event.
+                  AgentExecutor.MetricsScope.Implement,
                   // Not "green": this run is being rejected, and recording it
                   // as anything else would teach successRate that the runner
                   // succeeded at what it was actually caught doing.
                   "red"
-                ) *> Sync[F].raiseError(RuntimeException(message))
+                ) *> Sync[F].raiseError(TestEditGuard.Violation(phase, violations))
           }
     }
 
   def runProjectValidation[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     guardTestEdits[F] >>> Kleisli { task =>
-      // The phase the outcome is attributed to must be the task's own, or
-      // successRate(phase, runner) reads every run as an `implement` sample.
-      val phase = TestEditGuard.phaseOf(task.run.task.body).getOrElse("implement")
+      // The scope keys the pending-metrics map and must match the dispatch's
+      // `metricsScope`; it is deliberately NOT the task's phase. The phase
+      // dimension `successRate(phase, runner)` reads was written onto the
+      // staged event at defer time, from the same TaskMetadata; completion
+      // only attaches the outcome. Keying this on the phase instead dropped
+      // every event whose phase was not literally `implement`.
       git[F].runProjectValidation.run(task.run.worktreePath).attempt.flatMap {
-        case Right(_) =>
+        case Right(verified) =>
+          // "green" is a claim about the work, and only a hook that ran can make
+          // it. A repository shipping no hook produces `false` here, and calling
+          // that green handed `successRate` a success nobody checked - on such a
+          // repository EVERY run scored green, so the cheapest runner's measured
+          // rate converged on 1.0 and the ladder learned to stay on it no matter
+          // what it produced. `unverified` is excluded from `successRate` (it is
+          // not counted as a failure either - the runner did nothing wrong) while
+          // still carrying the usage sample `meanUsage` reads.
           AgentExecutor
             .completeTokenMetrics[F](
               task.run.context.root,
               task.run.task.number,
               task.run.runner,
-              phase,
-              "green"
+              AgentExecutor.MetricsScope.Implement,
+              if verified then "green" else TokenMetrics.UnverifiedOutcome
             )
             .as(task)
         case Left(error) =>
@@ -1087,37 +1166,77 @@ object Impl:
             task.run.context.root,
             task.run.task.number,
             task.run.runner,
-            phase,
+            AgentExecutor.MetricsScope.Implement,
             "red"
           ) *> Sync[F].raiseError(error)
       }
     }
 
-  def classifyAgentResultForPublication[F[_]: Sync]: -->[F, ExecutedTask, Either[ChangedTask, UnchangedTask]] =
-    (Kleisli.ask[F, ExecutedTask] &&& Kleisli { (task: ExecutedTask) =>
-      git[F].filesChanged(task.run.worktreePath)
-    } &&& Kleisli { (task: ExecutedTask) =>
-      git[F].hasPublishableCommits(
+  /** Commits that were already on the branch when the agent was dispatched are not this run's work.
+    *
+    * A run that ends with an unmoved HEAD and a clean worktree delivered nothing, whatever the branch is ahead of.
+    * Until 2026-08-01 those commits still counted as publishable, so a task whose agent reported itself blocked opened
+    * a pull request over pre-existing commits, merged it, and closed its issue green. `None` (a resumed run, where no
+    * sample was taken) never triggers this: an unmeasured run is not an empty one.
+    */
+  def advancedHead(task: ExecutedTask, current: Option[String]): Boolean =
+    task.headBeforeRun.forall(before => !current.contains(before))
+
+  /** Did this run leave anything behind to publish: uncommitted files, commits of its own, or a pull request already
+    * open on its branch.
+    */
+  def deliveredSomething[F[_]: Sync](task: ExecutedTask): F[Boolean] =
+    for
+      filesChanged <- git[F].filesChanged(task.run.worktreePath)
+      publishable <- git[F].hasPublishableCommits(
         task.run.worktreePath,
         task.run.branchName,
         task.run.baseBranch
       )
-    } &&& Kleisli { (task: ExecutedTask) =>
-      GitHub.hasOpenPullRequestForBranch(
+      ownCommits <-
+        if !publishable then Sync[F].pure(false)
+        else git[F].headSha(task.run.worktreePath).map(advancedHead(task, _))
+      hasOpenPullRequest <- GitHub.hasOpenPullRequestForBranch(
         task.run.worktreePath,
         task.run.branchName
       )
-    }).map({
-      case (
-            ((task, filesChanged), hasPublishableCommits),
-            hasOpenPullRequest
-          ) =>
-        Either.cond(
-          !(filesChanged || hasPublishableCommits || hasOpenPullRequest),
-          UnchangedTask(task),
-          ChangedTask(task)
-        )
-    })
+    yield filesChanged || ownCommits || hasOpenPullRequest
+
+  /** Rejects an empty run from inside the escalation loop, where a rejection still buys a retry on a stronger runner.
+    *
+    * It belongs here rather than at publication time for the same reason `runProjectValidation` does: anything composed
+    * after the agent that can reject its work has to sit inside the retried unit, or the ladder never sees the
+    * rejection and the task dies on the cheapest runner's shrug.
+    */
+  def rejectEmptyRun[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
+    Kleisli { task =>
+      deliveredSomething[F](task).flatMap {
+        case true  => Sync[F].pure(task)
+        case false =>
+          // The attempt earned a red and must be recorded as one. An empty run
+          // leaves a tree that still compiles, so when this arrow ran after
+          // `runProjectValidation` the validation had already recorded "green"
+          // and consumed the pending event — teaching `successRate` that the
+          // runner which delivered nothing had succeeded.
+          AgentExecutor.completeTokenMetrics[F](
+            task.run.context.root,
+            task.run.task.number,
+            task.run.runner,
+            AgentExecutor.MetricsScope.Implement,
+            "red"
+          ) *> Sync[F].raiseError[ExecutedTask](
+            RuntimeException(
+              s"Agent ${task.run.runner.display} finished task #${task.run.task.number} without changing anything: " +
+                "no files, no new commits, no pull request."
+            )
+          )
+      }
+    }
+
+  def classifyAgentResultForPublication[F[_]: Sync]: -->[F, ExecutedTask, Either[ChangedTask, UnchangedTask]] =
+    Kleisli { task =>
+      deliveredSomething[F](task).map(delivered => Either.cond(!delivered, UnchangedTask(task), ChangedTask(task)))
+    }
 
   def toPublishRequestOfChanged[F[_]: Sync]: -->[F, ChangedTask, PublishRequest] =
     Kleisli.fromFunction { changed =>
@@ -1143,10 +1262,27 @@ object Impl:
       ) *> Sync[F].raiseError(error)
     }
 
+  /** A run that produced no files, no commits of its own and no pull request delivered nothing, and the rest of the
+    * chain — `markTaskImplemented`, `closeTaskIssue`, `checkParentsForCompletion` — would otherwise close it green.
+    * That is the closing move of the postmortem's failure mode: the issue reads as done and nobody looks again.
+    *
+    * Raising instead sends it to the escalation ladder, which is right for the common cause (the runner gave up) and
+    * bounded for the rest: after `MaxEscalationDepth` empty runs the task surfaces to a human still open.
+    */
   def reportUnchangedTask[
       F[_]: Sync
   ]: -->[F, UnchangedTask, ExecutedTask] =
-    TaskLogger.progress[F, UnchangedTask](_ => "No files changed.").map(_.run)
+    Kleisli { unchanged =>
+      val run = unchanged.run.run
+      progress[F](
+        s"Task #${run.task.number} produced no files, no new commits and no pull request. Refusing to close it as done."
+      ) *> Sync[F].raiseError[ExecutedTask](
+        RuntimeException(
+          s"Agent ${run.runner.display} finished task #${run.task.number} without changing anything: " +
+            s"nothing to publish, so the task is not done."
+        )
+      )
+    }
 
   def verifyRelatedPullRequestCi[F[_]: Sync]: -->[F, ExecutedTask, ExecutedTask] =
     Kleisli { task =>
@@ -1206,6 +1342,56 @@ object Impl:
         .as(run)
     }
 
+  /** Lands the integration branches of parents that nothing else will land, resolving their conflicts with an agent.
+    *
+    * `GitHub.mergeSettledIntegrationBranches` handles the ones git can merge on its own and hands back the rest. Those
+    * are the parents whose base moved under them while subtasks landed — #34 and #39 held 27 and 17 commits in exactly
+    * that state, behind conflicts a person would resolve in minutes and no part of this program was resolving at all.
+    * The work is the same conflict repair a subtask gets, pointed at the integration branch and its default base.
+    *
+    * Every failure here is a warning: a parent that cannot be landed is a thing to tell someone about, never a reason
+    * to stop before selecting a task.
+    */
+  def landStrandedIntegrationBranches[F[_]: Sync](context: RunContext): F[Unit] =
+    GitHub
+      .mergeSettledIntegrationBranches[F](progress)
+      .run(context.root)
+      .flatMap(_.traverse_(repairAndLandIntegrationBranch[F](context, _)))
+      .handleErrorWith(error => progress(s"WARNING: integration branch sweep failed: ${error.getMessage}"))
+
+  private def repairAndLandIntegrationBranch[F[_]: Sync](context: RunContext, parent: Issue): F[Unit] =
+    val branchName = BranchName(s"task-${parent.number}")
+    val worktreePath = context.root / ".worktrees" / s"integration-task-${parent.number}"
+    val base = BranchName(GitHub.defaultBranchRef(context.root).split('/').last)
+    val request = PublishRequest(
+      root = context.root,
+      worktreePath = worktreePath,
+      branchName = branchName,
+      baseBranch = Some(base),
+      task = parent,
+      finalization = AgentFinalization(None, None),
+      runner = selectRunnerForIssue(context, parent)
+    )
+
+    val worktree = Resource.make(
+      git[F].acquireWorktree(context.root, worktreePath, branchName, None)
+    )(_ => git[F].releaseWorktree(context.root, worktreePath, branchName).attempt.void)
+
+    progress(
+      s"Integration branch $branchName for parent #${parent.number} still conflicts with $base. Repairing it with ${request.runner.display}..."
+    ) *>
+      worktree
+        .use(_ => BusinessLogicRetry.resolveMergeConflict[F](progress).run(request))
+        .flatMap {
+          case false => progress(s"Could not resolve the conflicts on $branchName; leaving parent #${parent.number}.")
+          case true  => GitHub.landIntegrationBranch[F](progress).run((context.root, parent.number))
+        }
+        .handleErrorWith(error =>
+          progress(
+            s"WARNING: could not repair the integration branch for parent #${parent.number}: ${error.getMessage}"
+          )
+        )
+
   def taskRun(
       context: RunContext,
       task: Issue,
@@ -1261,7 +1447,12 @@ Replay rules:
     // Same predicate as the SemanticDB refresh gate, deliberately: the two
     // Stage 3 features must agree on what "a Scala task" is, and body-only
     // matching missed tasks that name their files in the title.
-    val scalaMandate = if taskTouchesScala(task) then s"\n\n$ScalaSemanticMandate" else ""
+    // Gated on the RUNNER as well as the task: the mandate names `mcp__scala-semantic__*`
+    // tools and simultaneously bans `cat`/`rg`/`sed`/`grep` on `.scala` files, so a runner
+    // with no MCP wiring (aider, gemini, agy) is left with no way to read Scala source at
+    // all. Until 2026-08-01 this gated on `taskTouchesScala` alone.
+    val scalaMandate =
+      if taskTouchesScala(task) && runner.supportsScalaSemanticMcp then s"\n\n$ScalaSemanticMandate" else ""
 
     // The mandate tells the agent to hand `set_workspace_root` an absolute
     // path, so it has to be told which one. Without it the agent opens every

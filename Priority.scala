@@ -16,14 +16,14 @@ import com.github.mercurievv.ghllm.metrics.*
 // A tool that best fits the required abilities, is cheapest, and is under the
 // least budget pressure gets the smallest number and is picked first.
 final case class PriorityWeights(
-                                  // Gap between capability tiers / unmet-ability penalty steps. Must stay
-                                  // well above the max plausible cost+pressure+vendor sum for a tier/step
-                                  // to never leak into its neighbor - see costRank's unknown-cost fallback.
-                                  bandSize: Long = 1_000_000L,
-                                  budgetPressureScale: Double = 20000.0,
-                                  hardExhaustionThreshold: Double = 0.97,
-                                  vendorBonus: Long = 10000L,
-                                  unPreferredVendor: String = "claude"
+    // Gap between capability tiers / unmet-ability penalty steps. Must stay
+    // well above the max plausible cost+pressure+vendor sum for a tier/step
+    // to never leak into its neighbor - see costRank's unknown-cost fallback.
+    bandSize: Long = 1_000_000L,
+    budgetPressureScale: Double = 20000.0,
+    hardExhaustionThreshold: Double = 0.97,
+    vendorBonus: Long = 10000L,
+    unPreferredVendor: String = "claude"
 )
 
 object PriorityWeights:
@@ -47,8 +47,7 @@ object PriorityWeights:
       PriorityWeights(
         bandSize = numField(json, "bandSize").map(_.toLong).getOrElse(Default.bandSize),
         budgetPressureScale = numField(json, "budgetPressureScale").getOrElse(Default.budgetPressureScale),
-        hardExhaustionThreshold =
-          numField(json, "hardExhaustionThreshold").getOrElse(Default.hardExhaustionThreshold),
+        hardExhaustionThreshold = numField(json, "hardExhaustionThreshold").getOrElse(Default.hardExhaustionThreshold),
         vendorBonus = numField(json, "vendorBonus").map(_.toLong).getOrElse(Default.vendorBonus),
         unPreferredVendor = strField(json, "preferredVendor").getOrElse(Default.unPreferredVendor)
       )
@@ -98,7 +97,8 @@ object Priority:
       if requirements.isEmpty then legacyTier(tool).toDouble
       else unmetAbilityWeight(tool, requirements)
     val tierComponent = math.round(bands * weights.bandSize.toDouble)
-    val vendorCoef = (if tool.agent.value.equalsIgnoreCase(weights.unPreferredVendor) then 1 else 0) * weights.vendorBonus
+    val vendorCoef =
+      (if tool.agent.value.equalsIgnoreCase(weights.unPreferredVendor) then 1 else 0) * weights.vendorBonus
     val costRank = tool.cost.map(value => math.round(value * 10000.0)).getOrElse(500000L)
     val pressureRank = tool.budgetPressure
       .map(value => math.round(math.min(1.0, math.max(0.0, value)) * weights.budgetPressureScale))

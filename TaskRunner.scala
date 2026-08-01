@@ -22,6 +22,22 @@ final case class TaskRunner(
     val cacheTtlPart = Option.when(extendedCacheTtl)(", cache TTL: 1h").getOrElse("")
     s"agent: $agent$modelPart$effortPart$versionPart$cacheTtlPart"
 
+  /** Identity a recorded measurement is keyed on: agent, model and effort, but NOT version.
+    *
+    * `display` carries the CLI version and was the key until 2026-08-01. That made every measurement series
+    * version-scoped, so a `claude` or `codex` CLI upgrade — which happens far more often than 20 runs of one phase
+    * accumulate — silently reset `successRate`/`meanUsage` to an empty sample. Below `minSample` both return `None`,
+    * `selectRunnerFor` falls back to `Priority.score`, and the ladder economics never switch on at all. The observed
+    * inventory had one series per installed CLI version and none of them anywhere near 20.
+    *
+    * The version stays on the event as its own attribute, so a regression introduced by an upgrade is still visible;
+    * it just no longer partitions the sample.
+    */
+  def metricsIdentity: String =
+    val modelPart = model.fold("")(value => s", model: $value")
+    val effortPart = effort.fold("")(value => s", effort: $value")
+    s"agent: $agent$modelPart$effortPart"
+
   def invocationEnvironment: Map[String, String] =
     Option
       .when(agent.value == "claude" && extendedCacheTtl)(
@@ -103,11 +119,23 @@ final case class TaskRunner(
   private def workspaceFile(cwd: Option[os.Path], path: os.RelPath): Option[os.Path] =
     cwd.map(_ / path).filter(os.exists(_))
 
+  /** Whether this runner is wired to ScalaSemantic MCP at all.
+    *
+    * `command` only passes `--mcp-config` to claude and codex, so no other agent has the `mcp__scala-semantic__*` tools
+    * the mandate names. Sending it to one anyway does not merely waste tokens: the mandate also forbids `cat`, `rg`,
+    * `sed`, `grep`, `head` and `tail` on `.scala` files, so a runner without the MCP tools is left with no sanctioned
+    * way to read Scala source. Observed on 2026-08-01 — `Impl.taskPrompt` gated only on "the task touches Scala" and
+    * handed the mandate to aider, which then reported seven fixtures created, compiled and passing without making a
+    * single file change.
+    */
+  def supportsScalaSemanticMcp: Boolean =
+    TaskRunner.McpCapableAgents.contains(agent.value)
+
   private def shouldInjectScalaSemanticInstruction(
       allowedTools: Seq[String],
       cwd: Option[os.Path]
   ): Boolean =
-    Set("claude", "codex").contains(agent.value) &&
+    supportsScalaSemanticMcp &&
       allowedTools.nonEmpty &&
       workspaceFile(cwd, os.rel / ".agents" / "mcp_config.json").nonEmpty
 
@@ -172,20 +200,22 @@ final case class TaskRunner(
 
 object TaskRunner:
 
+  /** Agents `command` hands an MCP config to. Keep in sync with the `--mcp-config` / `mcp_servers.*` branches above. */
+  val McpCapableAgents: Set[String] = Set("claude", "codex")
+
   /** Prompt-cache flags per vendor — see `ADR-0001-prompt-cache-knobs.md`.
     *
-    * `--exclude-dynamic-system-prompt-sections` moves cwd, env info, memory paths and git status out of claude's
-    * system prompt and into the first user message. Every task here runs in its own worktree, so those sections differ
-    * for every sibling and sit AHEAD of the constant blocks `taskPrompt` orders stable-first — without this, the
-    * shared prefix begins after something that has already diverged.
+    * `--exclude-dynamic-system-prompt-sections` moves cwd, env info, memory paths and git status out of claude's system
+    * prompt and into the first user message. Every task here runs in its own worktree, so those sections differ for
+    * every sibling and sit AHEAD of the constant blocks `taskPrompt` orders stable-first — without this, the shared
+    * prefix begins after something that has already diverged.
     *
     * Both are opt-out rather than opt-in: the flag is newer than some installed claude CLIs, and an unrecognised flag
-    * is a hard failure rather than a warning, so a deployment on an older CLI (`scripts/remote-run.sh` targets
-    * machines this repo does not control) needs a way to turn it off without a code change.
+    * is a hard failure rather than a warning, so a deployment on an older CLI (`scripts/remote-run.sh` targets machines
+    * this repo does not control) needs a way to turn it off without a code change.
     */
   def claudeCacheFlags: Seq[String] =
-    if Cli.envBoolean("GH_TASKS_CLAUDE_STABLE_SYSTEM_PROMPT", true) then
-      Seq("--exclude-dynamic-system-prompt-sections")
+    if Cli.envBoolean("GH_TASKS_CLAUDE_STABLE_SYSTEM_PROMPT", true) then Seq("--exclude-dynamic-system-prompt-sections")
     else Nil
 
   /** aider's own default is `--no-cache-prompts`, i.e. no prompt caching at all.

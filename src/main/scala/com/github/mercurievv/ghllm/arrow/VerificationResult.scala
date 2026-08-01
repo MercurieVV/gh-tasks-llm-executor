@@ -20,6 +20,13 @@ object VerificationResult:
       case Green => true
       case _     => false
 
+    /** A verdict on the task's own specification rather than on the runner's competence. Every runner reaches it
+      * identically, so escalating one buys nothing but another paid run.
+      */
+    def isPolicyRejection: Boolean = self match
+      case Failed(_: TestEditGuard.Violation) => true
+      case _                                  => false
+
     // Bounded seed for the escalated attempt: never the failed transcript.
     def escalationSeed: Option[String] = self match
       case Green     => None

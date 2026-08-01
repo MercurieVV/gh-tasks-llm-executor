@@ -55,8 +55,23 @@ object BusinessLogicRetry:
           // `routeRunnerFallback`. That is the wrong half: the plan's Stage 1
           // is "run -> compile + test -> red: escalate", and the free verifier
           // is the whole reason a cheap runner can be tried first.
-          runTaskWithRunner =
-            run => retryRunTaskWithRunner(progress)(run.andThen(Impl.runProjectValidation[F]))
+          // `rejectEmptyRun` joins it for the same reason: a run that delivered
+          // nothing is a rejection of the agent's work, and outside this loop it
+          // would kill the task instead of escalating it - or, worse, reach
+          // publication and close the issue green over commits it never made.
+          //
+          // It runs BEFORE the validation, and the order is not cosmetic. A run
+          // that changed nothing leaves a tree that still compiles and still
+          // passes, so `runProjectValidation` recorded `outcome = "green"` for
+          // it - and since completing the metrics removes the pending event,
+          // the rejection that followed recorded nothing at all. Every empty run
+          // was a success in `successRate`, biasing selection toward whichever
+          // runner shrugs the fastest. Rejecting first records the "red" the
+          // attempt earned, and skips a validation of work that does not exist.
+          runTaskWithRunner = run =>
+            retryRunTaskWithRunner(progress)(
+              run.andThen(Impl.rejectEmptyRun[F]).andThen(Impl.runProjectValidation[F])
+            )
         ),
         // Already run above, once per attempt. Left in place it would re-run the
         // whole suite on the winning attempt and record a second sample for it.
@@ -126,6 +141,14 @@ object BusinessLogicRetry:
         // Green must never reach this arrow. Return it unchanged rather than
         // escalating a success into a paid re-run.
         Left(verdict).pure[F]
+      else if verdict.isPolicyRejection then
+        // Not a capability gap: the task's phase forbids the change the task
+        // needs, so a stronger runner reaches the same refusal. Escalating this
+        // cost three runs (one of them gpt-5 at high effort) before surfacing
+        // the same message the first run already produced.
+        progress(
+          s"Task #${claimed.task.number} was rejected on policy, not capability: $reason. Not escalating - fix the task instead."
+        ).as(Left(verdict))
       else if task.escalationDepth >= MaxEscalationDepth then
         progress(
           s"Task #${claimed.task.number} still failing after $MaxEscalationDepth escalation(s): $reason. Giving up so a human can look at it."
@@ -140,7 +163,7 @@ object BusinessLogicRetry:
               // Before, not after: the stronger runner must start from HEAD, not
               // from the cheap runner's half-finished edits.
               _ <- Git[F](progress).resetWorktree(claimed.worktreePath).attempt.flatMap {
-                case Right(_) => Sync[F].unit
+                case Right(_)    => Sync[F].unit
                 case Left(error) =>
                   // A worktree we cannot clean is not a reason to abandon the
                   // task — escalate anyway and say so.
@@ -260,12 +283,22 @@ object BusinessLogicRetry:
       else Left(error).pure[F]
     }
 
+  /** Recognises a conflict from whichever layer reported it.
+    *
+    * The three original signatures are GitHub's GraphQL wording, which is what surfaces when the API rejects the merge.
+    * `gh pr merge` phrases the same condition differently ("is not mergeable: the merge commit cannot be cleanly
+    * created", followed by instructions to resolve locally), and on 2026-08-01 that wording fell through to `Left`,
+    * failing task #56 outright with a conflict the repair path exists to resolve.
+    */
   def isMergeConflictError(error: Throwable): Boolean =
     Option(error.getMessage).exists { message =>
       val normalized = message.toLowerCase
       normalized.contains("has merge conflicts with its base branch") ||
       normalized.contains("pull request has merge conflicts") ||
-      normalized.contains("mergepullrequest")
+      normalized.contains("mergepullrequest") ||
+      normalized.contains("is not mergeable") ||
+      normalized.contains("merge commit cannot be cleanly created") ||
+      normalized.contains("resolve the merge conflicts")
     }
 
   def resolveMergeConflict[F[_]](progress: String => F[Unit])(using
@@ -343,7 +376,11 @@ object BusinessLogicRetry:
                 contextFiles = conflictedFiles,
                 taskNumber = Some(request.task.number),
                 metricsRoot = Some(request.root),
-                metricsScope = "merge-repair"
+                metricsScope = AgentExecutor.MetricsScope.MergeRepair,
+                // Without this the repair events are dimensionless: recorded,
+                // but counted by `metrics readiness` as invisible to runner
+                // selection, because meanUsage is keyed on (phase, runner).
+                phase = TestEditGuard.phaseOf(request.task.body)
               )
               .attempt
             _ <-
@@ -500,16 +537,13 @@ object BusinessLogicRetry:
 
   /** Run a repair agent until the project validates, rotating runners on red.
     *
-    * The retry was previously the same runner three times over. That is the
-    * defect `routeRunnerFallback` exists to avoid, on a second route: a runner
-    * that could not fix the build on attempt one is not more likely to fix it on
-    * attempt three, and each identical re-run is paid for. `alternateImplementor`
-    * with the attempted list is exactly what `repairMergeConflictsUntilClean`
-    * already does one function below - the two repair paths now agree.
+    * The retry was previously the same runner three times over. That is the defect `routeRunnerFallback` exists to
+    * avoid, on a second route: a runner that could not fix the build on attempt one is not more likely to fix it on
+    * attempt three, and each identical re-run is paid for. `alternateImplementor` with the attempted list is exactly
+    * what `repairMergeConflictsUntilClean` already does one function below - the two repair paths now agree.
     *
-    * The sequence is precomputed rather than chosen inside the loop because it
-    * does not depend on the error - which makes it a pure function, and the only
-    * part of this effect-heavy loop that can be tested without a live agent.
+    * The sequence is precomputed rather than chosen inside the loop because it does not depend on the error - which
+    * makes it a pure function, and the only part of this effect-heavy loop that can be tested without a live agent.
     */
   def repairRunnerSequence(
       inventory: AgentInventory,
@@ -546,7 +580,8 @@ object BusinessLogicRetry:
           RepairAllowedTools,
           contextFiles = repairContextFiles(worktreePath),
           taskNumber = Some(task.number),
-          metricsScope = "repair"
+          metricsScope = AgentExecutor.MetricsScope.Repair,
+          phase = TestEditGuard.phaseOf(task.body)
         )
         changed <- Impl.git[F].filesChanged(worktreePath)
         // Same false-green hole as the main execute path, on a second route: a
@@ -558,7 +593,7 @@ object BusinessLogicRetry:
           .map(TestEditGuard.violations(TestEditGuard.phaseOf(task.body), _))
         _ <-
           if testEdits.nonEmpty then
-            F.raiseError[Unit](RuntimeException(TestEditGuard.report(TestEditGuard.phaseOf(task.body), testEdits)))
+            F.raiseError[Unit](TestEditGuard.Violation(TestEditGuard.phaseOf(task.body), testEdits))
           else if changed then
             Impl.git[F].runProjectValidation(worktreePath).attempt.flatMap {
               case Right(_) =>
@@ -570,7 +605,26 @@ object BusinessLogicRetry:
               case Left(error) =>
                 F.raiseError(error)
             }
-          else progress(s"Repair agent made no file changes for task #${task.number}.")
+          else
+            // A repair that changed nothing is only a repair if there was nothing
+            // to repair. Taken on trust it returns success to a caller that then
+            // re-pushes the same unrepaired tree into the same rejection, burning
+            // the repair budget without a single edit - which is what task #125
+            // did on 2026-08-01. So ask the verifier: green means the tree was
+            // already sound, red means this runner declined the job and the next
+            // one gets it.
+            Impl.git[F].runProjectValidation(worktreePath).attempt.flatMap {
+              case Right(_) =>
+                progress(
+                  s"Repair agent made no file changes for task #${task.number}, and project checks pass. Nothing to repair."
+                )
+              case Left(error) if remainingRunners.nonEmpty =>
+                progress(
+                  s"Repair agent made no file changes for task #${task.number} but project checks still fail: ${error.getMessage}. Retrying repair with ${remainingRunners.head.display} (${remainingRunners.size} attempt(s) left)..."
+                ) *> loop(remainingRunners.head, remainingRunners.tail)
+              case Left(error) =>
+                F.raiseError(error)
+            }
       yield ()
 
     // +1: MaxRepairBuildCheckAttempts counts RETRIES after the first run, so the

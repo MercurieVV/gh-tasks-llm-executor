@@ -166,6 +166,82 @@ object GitHub:
       }
     }
 
+  /** Every issue, closed ones included. Only the sweep needs this: a parent's children are closed by the time its
+    * integration branch matters, so an open-only listing cannot tell a parent from a leaf.
+    */
+  def fetchAllIssues[F[_]: Sync]: Kleisli[F, os.Path, List[Issue]] =
+    Kleisli.apply { root =>
+      Sync[F].blocking {
+        val issuesJson = os
+          .proc(
+            "gh",
+            "issue",
+            "list",
+            "--state",
+            "all",
+            "--limit",
+            "1000",
+            "--json",
+            "number,title,body,state,labels"
+          )
+          .call(cwd = root)
+          .out
+          .text()
+
+        ujson.read(issuesJson).arr.toList.flatMap(parseIssue)
+      }
+    }
+
+  /** Lands integration branches whose parent was left behind.
+    *
+    * `checkParentsForCompletion` only fires when a child finishes, so a parent that was missed once is missed forever:
+    * its children are already closed, nothing will run them again, and the branch sits on origin. That is how #34 kept
+    * 27 commits and #39 kept 17. This sweep runs before task selection and merges what that path should have merged.
+    *
+    * The parent test is deliberate rather than incidental: a leaf's `task-N` branch is also "ahead of master" while its
+    * own pull request is in flight, and merging those would land unreviewed work. Only an issue that some other issue
+    * names as its parent, and that has no open children left, is swept.
+    */
+  /** Open issues that other issues name as their parent, and whose children are all closed. */
+  def settledParents(allIssues: List[Issue]): List[Issue] =
+    val isOpen = (issue: Issue) => issue.state.value.toLowerCase === "open"
+    val childrenByParent = allIssues
+      .flatMap(child => parentIds(child).map(_ -> child))
+      .groupMap(_._1)(_._2)
+    allIssues.filter(issue =>
+      isOpen(issue) && childrenByParent.get(issue.number).exists(_.forall(child => !isOpen(child)))
+    )
+
+  /** Returns the parents whose branch is still unlanded afterwards — the ones whose conflicts git could not resolve
+    * alone, which is what the caller needs an agent for.
+    */
+  def mergeSettledIntegrationBranches[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, os.Path, List[Issue]] =
+    Kleisli.apply { root =>
+      fetchAllIssues[F].run(root).flatMap { allIssues =>
+        settledParents(allIssues)
+          .traverse { parent =>
+            val branchName = BranchName(s"task-${parent.number}")
+            def stillAhead = F.blocking(integrationRef(root, branchName).filter(commitsAheadOfRef(root, _) > 0))
+
+            stillAhead.flatMap {
+              case None => none[Issue].pure[F]
+              case Some(ref) =>
+                progress(
+                  s"Parent #${parent.number} is open and its integration branch ($ref) is ahead of the default branch, with every child closed. Merging it."
+                ) *> mergeIntegrationBranch(progress)((root, parent.number)) *>
+                  stillAhead.map(_.as(parent))
+            }
+          }
+          .map(_.flatten)
+      }
+    }
+
+  /** The same merge, retried after something else has made the branch mergeable. */
+  def landIntegrationBranch[F[_]: Sync](progress: String => F[Unit]): Kleisli[F, (os.Path, TaskNumber), Unit] =
+    mergeIntegrationBranch(progress)
+
   private def parseIssue(value: ujson.Value): Option[Issue] =
     value match
       case ujson.Obj(fields) =>
@@ -342,8 +418,11 @@ object GitHub:
   ): Boolean =
     getDependencies(issue.body).exists(openIssueNumbers.contains)
 
+  def openChildren(issue: Issue, openIssues: List[Issue]): List[Issue] =
+    openIssues.filter(child => parentIds(child).contains(issue.number))
+
   def hasOpenChildren(issue: Issue, openIssues: List[Issue]): Boolean =
-    openIssues.exists(child => parentIds(child).contains(issue.number))
+    openChildren(issue, openIssues).nonEmpty
 
   def dependencyConclusion[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
@@ -356,9 +435,8 @@ object GitHub:
 
   /** Joins dependency conclusions into the block pasted into a child's prompt.
     *
-    * Bounded per dependency, not over the joined block: with several
-    * dependencies a single verbose parent would otherwise consume the whole
-    * budget and silently truncate its siblings away entirely.
+    * Bounded per dependency, not over the joined block: with several dependencies a single verbose parent would
+    * otherwise consume the whole budget and silently truncate its siblings away entirely.
     */
   def renderDependencyConclusions(
       conclusions: List[(TaskNumber, String)]
@@ -404,21 +482,16 @@ object GitHub:
         }
     }
 
-  /** Builds the context block given to the agent when a task has prior execution
-    * history.
+  /** Builds the context block given to the agent when a task has prior execution history.
     *
-    * This exists so reopened, retried, or resumed tasks do not start from a blank
-    * prompt. The executor reads the issue's recent comments and any pull requests
-    * linked from the issue, then enriches those pull requests with their workflow
-    * runs. That gives the next agent run the previous conclusion, restart notes,
-    * related PRs, and CI failures/pending checks it needs to continue or repair the
-    * task instead of repeating already-completed work.
+    * This exists so reopened, retried, or resumed tasks do not start from a blank prompt. The executor reads the
+    * issue's recent comments and any pull requests linked from the issue, then enriches those pull requests with their
+    * workflow runs. That gives the next agent run the previous conclusion, restart notes, related PRs, and CI
+    * failures/pending checks it needs to continue or repair the task instead of repeating already-completed work.
     *
-    * The method returns `None` when the issue has no automation history and no
-    * related pull requests, keeping normal first-run prompts unchanged. If GitHub
-    * history cannot be read, it logs progress and treats the task as having no
-    * replay context so a transient GitHub read problem does not block claiming the
-    * task.
+    * The method returns `None` when the issue has no automation history and no related pull requests, keeping normal
+    * first-run prompts unchanged. If GitHub history cannot be read, it logs progress and treats the task as having no
+    * replay context so a transient GitHub read problem does not block claiming the task.
     */
   def replayContext[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
@@ -795,9 +868,8 @@ $prText
 
   /** The `Files touched:` block a dependent task reads.
     *
-    * Capped, and by count rather than characters: a truncated path list would
-    * hand the next task a path that does not exist. A wide-reaching task is
-    * better summarised by its count than by an arbitrary prefix of its paths.
+    * Capped, and by count rather than characters: a truncated path list would hand the next task a path that does not
+    * exist. A wide-reaching task is better summarised by its count than by an arbitrary prefix of its paths.
     */
   val MaxReportedFiles: Int = 40
 
@@ -806,8 +878,7 @@ $prText
     else
       val shown = files.take(MaxReportedFiles)
       val more =
-        if files.length > MaxReportedFiles then
-          s"\n  ... and ${files.length - MaxReportedFiles} more"
+        if files.length > MaxReportedFiles then s"\n  ... and ${files.length - MaxReportedFiles} more"
         else ""
       s"\nFiles touched:\n${shown.map(file => s"  $file").mkString("\n")}$more\n"
 
@@ -969,8 +1040,15 @@ $questions
         )
     }
 
+  /** Leaves a failure comment, unless the newest comment already is that same failure.
+    *
+    * One failure can reach this from two places — the publication handler that saw it first, then the terminal handler
+    * that reports everything that escaped — and #130 got the identical wall of GraphQL text twice. Only consecutive
+    * duplicates are suppressed: the same failure recurring on a later run sits behind other comments and is still worth
+    * recording, because "this failed again" is the interesting part.
+    */
   def commentTaskFailure[F[_]](progress: String => F[Unit])(using
-      Sync[F]
+      F: Sync[F]
   ): Kleisli[F, (os.Path, Issue, String), Unit] =
     Kleisli.apply { case (root, task, reason) =>
       val body =
@@ -979,16 +1057,24 @@ $questions
 Reason:
 $reason
 """
-      progress(s"Leaving failure comment on task #${task.number}...") *>
-        call(
-          root,
-          "gh",
-          "issue",
-          "comment",
-          task.number.toString,
-          "--body",
-          body
-        )
+      issueHistory((root, task.number))
+        .handleErrorWith(_ => F.pure(IssueHistory(Nil, Nil)))
+        .map(_.comments.lastOption.exists(_.body.value.trim === body.trim))
+        .flatMap {
+          case true =>
+            progress(s"Failure on task #${task.number} is already the newest comment; not repeating it.")
+          case false =>
+            progress(s"Leaving failure comment on task #${task.number}...") *>
+              call(
+                root,
+                "gh",
+                "issue",
+                "comment",
+                task.number.toString,
+                "--body",
+                body
+              )
+        }
     }
 
   def commentSplitMissingWarning[F[_]](progress: String => F[Unit])(using
@@ -1079,12 +1165,15 @@ This parent task will not be implemented directly. Run child tasks first; when a
       .getOrElse(if localBranchExists(root, "master") then "master" else "main")
 
   def commitsAhead(root: os.Path, branchName: BranchName): Int =
+    commitsAheadOfRef(root, branchName.value)
+
+  def commitsAheadOfRef(root: os.Path, ref: String): Int =
     Try(
       os.proc(
         "git",
         "rev-list",
         "--count",
-        s"${defaultBranchRef(root)}..${branchName.value}"
+        s"${defaultBranchRef(root)}..$ref"
       ).call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
         .out
         .text()
@@ -1092,28 +1181,105 @@ This parent task will not be implemented directly. Run child tasks first; when a
         .toInt
     ).getOrElse(1)
 
+  /** The ref that actually holds an integration branch's work.
+    *
+    * Subtask pull requests are merged **on GitHub**, so their commits land on `origin/task-N` and the local `task-N`
+    * this process happens to hold is whatever it was last fetched at — often the branch point. Reading the local ref
+    * closed parent #39 as "no commits ahead" moments after merging a subtask into it, stranding 17 commits on a branch
+    * nobody would look at again. Fetch first, and prefer the remote.
+    */
+  def integrationRef(root: os.Path, branchName: BranchName): Option[String] =
+    os.proc("git", "fetch", "origin", branchName.value)
+      .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+    val remote = s"origin/${branchName.value}"
+    if localBranchExists(root, remote) then Some(remote)
+    else if localBranchExists(root, branchName.value) then Some(branchName.value)
+    else None
+
+  /** Landing a parent is a follow-up, never a precondition.
+    *
+    * The integration pull request can be conflicted, its checks can fail, GitHub can refuse the merge — all of which
+    * need a human, and none of which is a reason to stop. Raising here killed a whole run before it selected a single
+    * task, because a recovery sweep found a parent whose pull request conflicts with master. The same reasoning applies
+    * to the child path: a task that has already merged its own work must not be failed by its parent's trouble.
+    */
   private def mergeIntegrationBranch[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, (os.Path, TaskNumber), Unit] =
+    Kleisli.apply { case input @ (_, parentId) =>
+      mergeIntegrationBranchOrRaise(progress)
+        .run(input)
+        .handleErrorWith(error =>
+          progress(
+            s"WARNING: could not land the integration branch for parent #$parentId: ${error.getMessage}. " +
+              "Leaving it open for a human; the rest of the run continues."
+          )
+        )
+    }
+
+  /** Merges the default branch into an integration branch, in a throwaway worktree, and pushes if it merged cleanly.
+    *
+    * An integration branch collects subtask merges over hours or days, so by the time the parent is ready its base has
+    * moved and GitHub reports the pull request as conflicted — which stops checks from running at all, so nothing else
+    * in this path can proceed. Most of those are mechanical, and git resolves them without an agent. A conflict git
+    * cannot resolve is left alone: the merge is aborted, `false` comes back, and the caller warns a human.
+    */
+  def syncIntegrationBranchWithDefault[F[_]](progress: String => F[Unit])(
+      root: os.Path,
+      branchName: BranchName
+  )(using F: Sync[F]): F[Boolean] =
+    val base = defaultBranchRef(root).split('/').last
+    val worktree = os.temp.dir(prefix = s"integration-${branchName.value}")
+
+    def git(cwd: os.Path, args: String*): os.CommandResult =
+      os.proc("git" +: args).call(cwd = cwd, stdout = os.Pipe, stderr = os.Pipe, check = false)
+
+    F.blocking {
+      os.remove.all(worktree)
+      val added = git(root, "worktree", "add", "--force", worktree.toString, branchName.value).exitCode === 0
+      if !added then false
+      else
+        try
+          git(worktree, "fetch", "origin", base)
+          val merged = git(worktree, "merge", s"origin/$base", "--no-edit").exitCode === 0
+          if !merged then
+            git(worktree, "merge", "--abort")
+            false
+          else git(worktree, "push", "origin", s"HEAD:${branchName.value}").exitCode === 0
+        finally
+          git(root, "worktree", "remove", "--force", worktree.toString)
+          os.remove.all(worktree)
+    }.flatTap {
+      case true =>
+        progress(s"Merged $base into ${branchName.value} and pushed it, so its pull request can be checked.")
+      case false =>
+        progress(
+          s"Could not merge $base into ${branchName.value} automatically; its pull request may still be conflicted."
+        )
+    }
+
+  private def mergeIntegrationBranchOrRaise[F[_]](progress: String => F[Unit])(using
       F: Sync[F]
   ): Kleisli[F, (os.Path, TaskNumber), Unit] =
     Kleisli.apply { case (root, parentId) =>
       val branchName = BranchName(s"task-$parentId")
-      F.blocking {
-        os.proc("git", "rev-parse", "--verify", branchName.value)
-          .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
-          .exitCode === 0
-      }.flatMap {
-        case false =>
+      F.blocking(integrationRef(root, branchName)).flatMap {
+        case None =>
           progress(
             s"No integration branch $branchName found for parent #$parentId; nothing to merge."
           )
-        case true if commitsAhead(root, branchName) === 0 =>
+        case Some(ref) if commitsAheadOfRef(root, ref) === 0 =>
           progress(
-            s"Integration branch $branchName has no commits ahead of the default branch; closing parent #$parentId without a Pull Request."
+            s"Integration branch $branchName ($ref) has no commits ahead of the default branch; closing parent #$parentId without a Pull Request."
           ) *> setIssueStatus(progress)((root, parentId, "completed")) *> closeIssue(
             (root, parentId)
           )
-        case true =>
+        case Some(_) =>
           for
+            // Before the pull request, not after: GitHub will not run checks on a
+            // conflicted pull request, so an out-of-date integration branch stalls
+            // this path at `awaitPullRequestChecks` with nothing to wait for.
+            _ <- syncIntegrationBranchWithDefault(progress)(root, branchName)
             pullRequest <- ensurePullRequest(progress).run(
               (
                 root,
@@ -1304,6 +1470,38 @@ This parent task will not be implemented directly. Run child tasks first; when a
 
   private final case class PullRequest(number: TaskNumber, state: State)
 
+  /** True if `branchName` exists on origin. */
+  def remoteBranchExists[F[_]: Sync](cwd: os.Path, branchName: BranchName): F[Boolean] =
+    callOutputUnchecked(cwd, "git", "ls-remote", "--heads", "origin", branchName.value)
+      .map(_.trim.nonEmpty)
+
+  /** Creates a subtask's integration base on origin if nothing has created it yet.
+    *
+    * A subtask's PR is opened against `task-<parent>`, but nothing was responsible for that branch existing: it was
+    * only ever created as a side effect of some earlier subtask's worktree, locally. When no earlier subtask had run —
+    * or when its local branch was never pushed — `gh pr create --base task-5` failed with "Base ref must be a branch",
+    * killing the task after the agent had already done all of its work. #129 and #130 both died this way.
+    *
+    * Branching from the default branch is what the integration branch is *for*: it collects subtask merges and is later
+    * merged back by `mergeSettledIntegrationBranches`. Pushed with a `refs/heads/` target so it never depends on a
+    * local branch of that name — a stale local `task-5` from an old worktree must not decide where origin's starts.
+    */
+  def ensureIntegrationBase[F[_]](progress: String => F[Unit])(using
+      F: Sync[F]
+  ): Kleisli[F, (os.Path, Option[BranchName]), Unit] =
+    Kleisli.apply {
+      case (_, None) => F.unit
+      case (cwd, Some(base)) =>
+        remoteBranchExists(cwd, base).flatMap {
+          case true => F.unit
+          case false =>
+            val defaultRef = defaultBranchRef(cwd)
+            progress(
+              s"Integration base $base does not exist on origin; creating it from $defaultRef."
+            ) *> call(cwd, "git", "push", "origin", s"$defaultRef:refs/heads/${base.value}")
+        }
+    }
+
   private def ensurePullRequest[F[_]](
       progress: String => F[Unit]
   )(using F: Sync[F]): Kleisli[
@@ -1335,7 +1533,10 @@ This parent task will not be implemented directly. Run child tasks first; when a
               s"Pull Request #${pullRequest.number} for $branchName already exists."
             ).as(pullRequest)
           case _ =>
-            progress("Creating Pull Request...") *>
+            // Before the create call, not after a failure: gh reports a missing
+            // base as an opaque GraphQL error that no retry path recovers from.
+            ensureIntegrationBase(progress)((worktreePath, baseBranch)) *>
+              progress("Creating Pull Request...") *>
               call(
                 worktreePath,
                 Seq(

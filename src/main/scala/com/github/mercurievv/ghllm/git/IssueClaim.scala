@@ -30,6 +30,58 @@ object IssueClaim:
   ): Resource[F, Unit] =
     Resource.make(claim[F](progress).run((root, taskNumber)))(_ => release[F](progress).run((root, taskNumber)))
 
+  /** A network flap, not a verdict from the server.
+    *
+    * The distinction decides whether the task is retried or dropped: on 2026-07-31 a resolver failure mid-run made two
+    * queued tasks "fail unrecoverably" and skipped them for the rest of the run, while the claim ref they never took
+    * stayed behind on origin. Neither is a statement about the task.
+    */
+  def isTransientNetwork(stderr: String): Boolean =
+    val lower = stderr.toLowerCase
+    List(
+      "could not resolve host",
+      "temporary failure in name resolution",
+      "connection timed out",
+      "connection reset",
+      "operation timed out",
+      "i/o timeout",
+      "failed to connect",
+      "the remote end hung up",
+      "rpc failed",
+      "unexpected disconnect",
+      "502 bad gateway",
+      "503 service unavailable",
+      "504 gateway"
+    ).exists(lower.contains)
+
+  // Three attempts over ~1 minute: long enough to ride out a resolver blip or a
+  // laptop changing networks, short enough that a genuine outage still ends the
+  // run rather than parking it.
+  private val TransientBackoff = List(5000L, 15000L, 40000L)
+
+  /** Re-runs `attempt` while it reports a transient network failure. `attempt` returns the process result so this can
+    * read stderr without deciding what a non-transient exit code means — that stays with the caller.
+    */
+  def retryOnTransient[F[_]](progress: String => F[Unit])(
+      what: String,
+      attempt: F[os.CommandResult]
+  )(using F: Sync[F]): F[os.CommandResult] =
+    def loop(remaining: List[Long]): F[os.CommandResult] =
+      attempt.flatMap { result =>
+        val stderr = result.err.text()
+        if result.exitCode === 0 || !isTransientNetwork(stderr) then result.pure[F]
+        else
+          remaining match
+            case Nil => result.pure[F]
+            case delay :: rest =>
+              progress(
+                s"$what failed on a network error: ${stderr.trim.linesIterator.toList.headOption
+                    .getOrElse("")}. Retrying in ${delay / 1000}s..."
+              ) *> F.blocking(Thread.sleep(delay)) *> loop(rest)
+      }
+
+    loop(TransientBackoff)
+
   private val StaleThresholdSeconds = 4 * 60 * 60 // 4 hours
 
   def hasActiveClaim[F[_]: Sync](
@@ -112,9 +164,12 @@ object IssueClaim:
             .text()
             .trim
         }
-        result <- F.blocking(
-          os.proc("git", "push", "origin", s"$commitHash:${refName(taskNumber)}")
-            .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+        result <- retryOnTransient[F](progress)(
+          s"Claiming task #$taskNumber",
+          F.blocking(
+            os.proc("git", "push", "origin", s"$commitHash:${refName(taskNumber)}")
+              .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+          )
         )
         _ <-
           if result.exitCode === 0 then
@@ -150,12 +205,27 @@ object IssueClaim:
       F: Sync[F]
   ): Kleisli[F, (os.Path, TaskNumber), Unit] =
     Kleisli.apply { case (root, taskNumber) =>
+      // A release that quietly fails leaves the ref on origin, and the next run
+      // reads it as another process holding the task - for four hours, until the
+      // staleness threshold expires it. Worth retrying, and worth saying so when
+      // the retries run out.
       progress(s"Releasing claim on task #$taskNumber...") *>
-        F.blocking(
-          os.proc("git", "push", "origin", "--delete", refName(taskNumber))
-            .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
-        ).attempt
-          .void
+        retryOnTransient[F](progress)(
+          s"Releasing claim on task #$taskNumber",
+          F.blocking(
+            os.proc("git", "push", "origin", "--delete", refName(taskNumber))
+              .call(cwd = root, stdout = os.Pipe, stderr = os.Pipe, check = false)
+          )
+        ).attempt.flatMap {
+          case Right(result) if result.exitCode === 0 => F.unit
+          case Right(result) =>
+            progress(
+              s"Warning: claim ref for task #$taskNumber was not released: ${result.err.text().trim}. " +
+                s"Release it with scripts/unclaim-task.scala -- ${taskNumber.value} if the next run reports it claimed."
+            )
+          case Left(error) =>
+            progress(s"Warning: failed to release claim on task #$taskNumber: ${error.getMessage}")
+        }
     }
 
   private def isRefConflict(stderr: String): Boolean =

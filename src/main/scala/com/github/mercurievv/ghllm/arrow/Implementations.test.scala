@@ -46,6 +46,45 @@ class ScalaSemanticMandateSuite extends munit.FunSuite:
     // ordering is what makes it cacheable (T19). See PromptSegmentOrderSuite.
     assert(prompt.indexOf(Impl.ScalaSemanticMandate) < prompt.indexOf(body))
 
+  test("a runner with no MCP wiring does not get the mandate"):
+    // `TaskRunner.command` passes --mcp-config to claude and codex only, so aider,
+    // gemini and agy have none of the `mcp__scala-semantic__*` tools the mandate
+    // names - while the same block forbids cat/rg/sed/grep on `.scala` files. That
+    // leaves such a runner with no sanctioned way to read Scala source at all.
+    // Observed on 2026-08-01 on task #130: aider reported seven fixtures created,
+    // compiled and passing, and changed nothing.
+    val scalaTask = Issue(
+      TaskNumber(130),
+      IssueTitle("Add golden fixtures"),
+      IssueBody("Add fixtures under scalafix/testInput/src/golden/*.scala"),
+      State("open")
+    )
+    List(
+      TaskRunner(AgentBinary("aider"), Some("deepseek/deepseek-reasoner"), None, None),
+      TaskRunner(AgentBinary("gemini"), Some("gemini-3-pro"), None, None),
+      TaskRunner(AgentBinary("agy"), None, None, None)
+    ).foreach { unwired =>
+      val prompt = Impl.taskPrompt(scalaTask, unwired, None, None).value
+      assert(!prompt.contains(Impl.ScalaSemanticMandateHeader), s"${unwired.display}: $prompt")
+      assert(!prompt.contains("Never use `cat`"), s"${unwired.display}: $prompt")
+    }
+
+  test("an MCP-wired runner still gets it"):
+    List(
+      TaskRunner(AgentBinary("claude"), Some("haiku"), None, None),
+      TaskRunner(AgentBinary("codex"), Some("gpt-5"), Some("low"), None)
+    ).foreach { wired =>
+      val prompt = Impl
+        .taskPrompt(
+          Issue(TaskNumber(130), IssueTitle("Fix the router"), IssueBody("Change BusinessLogicRetry.scala"), State("open")),
+          wired,
+          None,
+          None
+        )
+        .value
+      assert(prompt.contains(Impl.ScalaSemanticMandate), s"${wired.display}: $prompt")
+    }
+
 class WorktreeHandoffSuite extends munit.FunSuite:
   private val runner = TaskRunner(AgentBinary("claude"), Some("opus"), None, None)
   private val worktree = os.pwd / ".worktrees" / "42-fix-the-router"
@@ -265,3 +304,127 @@ class FanOutCachePeersSuite extends CatsEffectSuite:
       env <- RunEnv.create[IO](issues)
       plan <- Impl.collectPendingDependencies[IO].run(TaskNode(context, parent)).run(env)
     yield assert(!plan.node.extendedCacheTtl)
+
+/** The rule that separates "this run produced commits" from "this branch already had some". */
+class AdvancedHeadSuite extends munit.FunSuite:
+  private val runner = TaskRunner(AgentBinary("claude"), Some("opus"), None, None)
+
+  private def executed(headBeforeRun: Option[String]) =
+    ExecutedTask(
+      ClaimedTask(
+        RunContext(os.pwd, AgentInventory(Nil), None),
+        Issue(TaskNumber(1), IssueTitle("t"), IssueBody("b"), State("open")),
+        runner,
+        os.pwd,
+        BranchName("task-1"),
+        None
+      ),
+      AgentOutput(""),
+      headBeforeRun
+    )
+
+  test("an unmoved HEAD means this run committed nothing of its own"):
+    assert(!Impl.advancedHead(executed(Some("abc123")), Some("abc123")))
+
+  test("a moved HEAD is this run's work"):
+    assert(Impl.advancedHead(executed(Some("abc123")), Some("def456")))
+
+  test("an unsampled run is never read as empty"):
+    // A resumed run takes no sample; treating None as "unchanged" would reject
+    // work that was done before the resume.
+    assert(Impl.advancedHead(executed(None), Some("abc123")))
+
+  test("a worktree whose HEAD cannot be read counts as moved, not as empty"):
+    assert(Impl.advancedHead(executed(Some("abc123")), None))
+
+/** A terminal failure decides two different things: whether to comment (always) and whether to take the task out of
+  * selection (only for a policy rejection). Getting the second wrong in either direction is expensive — blocking a
+  * transient failure needs a human to unblock work that would have retried itself, and not blocking a policy rejection
+  * buys the identical failure again on every later run.
+  */
+class TerminalFailureClassificationSuite extends munit.FunSuite:
+
+  test("a test-edit violation is a policy rejection: re-running it cannot help"):
+    val violation = TestEditGuard.Violation(Some("implement"), List("src/Foo.test.scala"))
+    assert(Impl.isPolicyRejection(violation))
+
+  test("an ordinary runner failure is not, and stays selectable for the next run"):
+    assert(!Impl.isPolicyRejection(RuntimeException("agent exited with code 1")))
+
+  test("a turn-cap kill is not a policy rejection — it is a verdict on the attempt"):
+    assert(!Impl.isPolicyRejection(TurnCapExceeded(75, 25)))
+
+  test("classification agrees with the escalation ladder's, which is the point of sharing it"):
+    val violation = TestEditGuard.Violation(Some("implement"), List("src/Foo.test.scala"))
+    assertEquals(
+      Impl.isPolicyRejection(violation),
+      VerificationResult.Failed(violation).isPolicyRejection
+    )
+
+/** An empty run must be recorded as the red it earned.
+  *
+  * A run that changed nothing leaves a tree that still compiles and still passes, so while `runProjectValidation` ran
+  * first it recorded `outcome = "green"` and consumed the pending event — and the rejection that followed recorded
+  * nothing. Every zero-delivery run counted as a success for the runner that delivered nothing, which is precisely
+  * backwards for a `successRate` that decides which runner to try first.
+  */
+class EmptyRunOutcomeSuite extends CatsEffectSuite:
+  private val runner = TaskRunner(AgentBinary("aider"), Some("deepseek/deepseek-reasoner"), None, None)
+
+  private final class CapturingBackend extends TokenMetrics.TokenMetricsBackend:
+    val recorded = scala.collection.mutable.ListBuffer.empty[TokenMetrics.TokenMetricsEvent]
+    def destination: String = "memory"
+    def record(event: TokenMetrics.TokenMetricsEvent): Unit = recorded += event
+    def record(event: TokenMetrics.ScalaTextToolCallEvent): Unit = ()
+    def query(query: TokenMetrics.TokenMetricsQuery): List[TokenMetrics.TokenMetricsEvent] = recorded.toList
+
+  /** A committed repo whose HEAD is exactly where the run started: nothing was delivered. */
+  private def emptyRun(): (os.Path, ExecutedTask) =
+    val root = os.temp.dir(prefix = "empty-run")
+    os.proc("git", "init", "-q", "-b", "master").call(cwd = root)
+    os.proc("git", "config", "user.email", "test@example.com").call(cwd = root)
+    os.proc("git", "config", "user.name", "Test").call(cwd = root)
+    os.write(root / "seed.txt", "seed")
+    os.proc("git", "add", ".").call(cwd = root)
+    os.proc("git", "commit", "-q", "-m", "seed").call(cwd = root)
+    val head = os.proc("git", "rev-parse", "HEAD").call(cwd = root).out.text().trim
+
+    val task = ExecutedTask(
+      ClaimedTask(
+        RunContext(root, AgentInventory(Nil), None),
+        Issue(TaskNumber(130), IssueTitle("t"), IssueBody("Phase: test"), State("open")),
+        runner,
+        root,
+        BranchName("master"),
+        None
+      ),
+      AgentOutput(""),
+      Some(head)
+    )
+    (root, task)
+
+  test("a run that delivered nothing records red, not green"):
+    val (root, task) = emptyRun()
+    val backend = CapturingBackend()
+    AgentExecutor.deferTokenMetrics(
+      root,
+      TaskNumber(130),
+      runner,
+      AgentExecutor.MetricsScope.Implement,
+      backend,
+      TokenMetrics.TokenMetricsEvent(
+        timestampMillis = 0L,
+        vendor = TokenUsage.Vendor.Aider,
+        usage = TokenUsage.TokenSnapshot.Zero,
+        taskNumber = Some(TaskNumber(130)),
+        model = Some("deepseek/deepseek-reasoner"),
+        scope = "implement",
+        phase = Some("test"),
+        runner = Some(runner.display)
+      )
+    )
+
+    Impl.rejectEmptyRun[IO].run(task).attempt.map { result =>
+      assert(result.isLeft, "an empty run must be rejected")
+      assertEquals(backend.recorded.map(_.outcome).toList, List(Some("red")))
+    }

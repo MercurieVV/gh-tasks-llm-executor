@@ -117,10 +117,10 @@ object Wiring:
         routeRecursiveMode = Impl.routeRecursiveMode,
         untilClosed = UntilClosedArrows[RealArr](
           refreshRoot = Impl.refreshRoot,
-          runRootOnce = Impl.runRootOnce(cycle(logged.executeRecursive)),
+          runRootOnce = Impl.runRootOnce(cycle(HyloExecutionSpike.wire(logged.recursiveArrows))),
           routeContinuation = Impl.routeContinuation
         ),
-        runOnce = Impl.runOnce(cycle(logged.executeRecursive))
+        runOnce = Impl.runOnce(cycle(HyloExecutionSpike.wire(logged.recursiveArrows)))
       )
     )
 
@@ -197,7 +197,7 @@ object Wiring:
             .getOrElse("default")})"
       case PreparedTask(run, parentConclusion, replayContext, escalationDepth) =>
         s"PreparedTask(issue=#${run.task.number},hasDependencyConclusion=${parentConclusion.nonEmpty},hasReplayContext=${replayContext.nonEmpty},escalationDepth=$escalationDepth)"
-      case ExecutedTask(run, output) =>
+      case ExecutedTask(run, output, _) =>
         s"ExecutedTask(issue=#${run.task.number},outputChars=${output.value.length})"
       case NeedsUserInput(run, questions) =>
         s"NeedsUserInput(issue=#${run.task.number},questionChars=${questions.value.length})"
